@@ -55,9 +55,6 @@
 - Client-side reprojection of WGS84, Web Mercator and UTM
 - Flags far-off features (e.g. swapped lat/lon) and has a feature popup
 
-**Khmer**
-- Real text shaping (rustybuzz/HarfBuzz) in the grid, explorer, map and exported images
-
 **And**: themes (dark, light, system) and over-the-air updates.
 
 ## Screenshots
@@ -72,12 +69,8 @@
     <td><img src="docs/screenshots/freeze.png" alt="Frozen columns"><br><sub>Freeze columns while scrolling</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/khmer.png" alt="Khmer text"><br><sub>Properly shaped Khmer</sub></td>
     <td><img src="docs/screenshots/copy-image.png" alt="Copy as image"><br><sub>Copy rows as an image</sub></td>
-  </tr>
-  <tr>
     <td><img src="docs/screenshots/complete.png" alt="Autocomplete"><br><sub>Context-aware autocomplete with column types</sub></td>
-    <td></td>
   </tr>
 </table>
 

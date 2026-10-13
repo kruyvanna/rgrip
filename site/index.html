@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>rgrip — a minimal DataGrip-style PostgreSQL client with PostGIS maps</title>
-  <meta name="description" content="Minimal DataGrip-style PostgreSQL client in Rust (egui) with a PostGIS map and Khmer support. Native macOS app, open source, MIT OR Apache-2.0.">
+  <meta name="description" content="Minimal DataGrip-style PostgreSQL client in Rust (egui) with a PostGIS map. Native macOS app, open source, MIT OR Apache-2.0.">
   <meta name="theme-color" content="#1c1c1e">
   <link rel="icon" type="image/png" href="img/icon.png">
   <link rel="apple-touch-icon" href="img/icon.png">
@@ -13,12 +13,12 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="rgrip">
   <meta property="og:title" content="rgrip — PostgreSQL + PostGIS client in Rust">
-  <meta property="og:description" content="Minimal DataGrip-style PostgreSQL client in Rust (egui) with a PostGIS map and Khmer support.">
+  <meta property="og:description" content="Minimal DataGrip-style PostgreSQL client in Rust (egui) with a PostGIS map.">
   <meta property="og:url" content="https://yoouTaro.github.io/rgrip/">
   <meta property="og:image" content="https://yoouTaro.github.io/rgrip/img/hero.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="rgrip — PostgreSQL + PostGIS client in Rust">
-  <meta name="twitter:description" content="Minimal DataGrip-style PostgreSQL client in Rust (egui) with a PostGIS map and Khmer support.">
+  <meta name="twitter:description" content="Minimal DataGrip-style PostgreSQL client in Rust (egui) with a PostGIS map.">
   <meta name="twitter:image" content="https://yoouTaro.github.io/rgrip/img/hero.png">
 
   <link rel="stylesheet" href="style.css">
@@ -48,7 +48,7 @@
       <div class="wrap">
         <p class="eyebrow">Open source · Native macOS · Rust</p>
         <h1>The PostgreSQL client that <span class="grad">speaks geometry</span>.</h1>
-        <p class="lead">A minimal, DataGrip-style PostgreSQL client built in Rust with egui. Query, edit and follow relations — then see your PostGIS data on a map, with proper Khmer text shaping.</p>
+        <p class="lead">A minimal, DataGrip-style PostgreSQL client built in Rust with egui. Query, edit and follow relations — then see your PostGIS data on a map.</p>
         <div class="cta">
           <a class="btn btn-primary" data-download href="https://github.com/yoouTaro/rgrip/releases">Download for macOS</a>
           <a class="btn btn-ghost" href="https://github.com/yoouTaro/rgrip">View on GitHub</a>
@@ -62,96 +62,15 @@
 
     <section id="features" class="section">
       <div class="wrap">
-        <h2>Everything you reach for, nothing you don't</h2>
-        <p class="sub">A small, fast, native tool for people who live in SQL.</p>
-        <div class="grid">
-          <article class="card">
-            <h3>Connections</h3>
-            <ul>
-              <li>SSL modes from <code>disable</code> to <code>verify-full</code>, custom CA, client certs</li>
-              <li>SSH tunnels with password or key</li>
-              <li>Paste <code>postgres://</code> URLs, <code>key=value</code> or <code>jdbc:postgresql://</code></li>
-              <li>Copy the connection URL back out</li>
-            </ul>
-          </article>
-          <article class="card">
-            <h3>Explorer</h3>
-            <ul>
-              <li>Schemas, tables, views and columns</li>
-              <li>Loaded on demand, so huge databases stay snappy</li>
-            </ul>
-          </article>
-          <article class="card">
-            <h3>SQL console</h3>
-            <ul>
-              <li>Syntax highlighting and line numbers</li>
-              <li>Context-aware autocomplete: tables, columns, PostGIS functions</li>
-              <li>Run statement <kbd>⌘↩</kbd>, run script <kbd>⇧⌘↩</kbd></li>
-              <li>Saved queries <kbd>⌘S</kbd>, formatter <kbd>⇧⌘F</kbd>, query files</li>
-            </ul>
-          </article>
-          <article class="card">
-            <h3>Slash commands</h3>
-            <p>Type in the editor, press <kbd>Tab</kbd>, get a complete query.</p>
-            <ul class="mono-list">
-              <li><code>/con_4326</code>, <code>/con_4326_2</code> <span>ArcGIS <code>st_geometry</code> via text</span></li>
-              <li><code>/con_merc</code> <span>default SRID 32648</span></li>
-              <li><code>/srid</code> <code>/top</code> <code>/count</code></li>
-            </ul>
-          </article>
-          <article class="card">
-            <h3>Results grid</h3>
-            <ul>
-              <li>Virtualized, with 1,000-row server-side paging</li>
-              <li>Multi-row selection and pinned (frozen) columns</li>
-              <li>Export CSV, TSV, JSON, GeoJSON, Markdown, SQL INSERT, SVG</li>
-              <li><b>Copy as image</b>: a PNG of the table, ready for Telegram or Slack</li>
-              <li><b>Copy for AI agent</b>: markdown with query and column types</li>
-            </ul>
-          </article>
-          <article class="card">
-            <h3>Inline editing</h3>
-            <ul>
-              <li>Double-click a cell in a table tab</li>
-              <li>Date/time picker for <code>date</code>, <code>timestamp</code>, <code>timestamptz</code>, <code>time</code></li>
-              <li>Set NULL, pending changes highlighted</li>
-              <li>Save <kbd>⌘S</kbd> as one transaction matched on the primary key: all or nothing</li>
-            </ul>
-          </article>
-          <article class="card">
-            <h3>Relations</h3>
-            <ul>
-              <li>Right-click rows, then Related</li>
-              <li>Follow foreign keys both ways (<code>→ users</code>, <code>← posts</code>) in a popup</li>
-              <li>Chain further, go Back, or open as a tab</li>
-            </ul>
-          </article>
-          <article class="card card-geo">
-            <h3>PostGIS</h3>
-            <ul>
-              <li>Readable geometry cells</li>
-              <li>Built-in map: dark, light, streets, satellite</li>
-              <li>Client-side reprojection of WGS84, Web Mercator, UTM</li>
-              <li>Flags far-off (swapped lat/lon) features</li>
-              <li>Feature popup with copy buttons</li>
-            </ul>
-          </article>
-          <article class="card card-km">
-            <h3>Khmer <span lang="km" class="km">ខ្មែរ</span></h3>
-            <ul>
-              <li>Real text shaping via HarfBuzz (rustybuzz)</li>
-              <li>Works in the grid, explorer, map and exported images</li>
-            </ul>
-          </article>
-          <article class="card">
-            <h3>Polish</h3>
-            <ul>
-              <li>Dark, light or system theme</li>
-              <li>In-app OTA updates from GitHub Releases</li>
-              <li>Native, small, quick to launch</li>
-            </ul>
-          </article>
-        </div>
+        <h2>Features</h2>
+        <dl class="features">
+          <div><dt>SQL console</dt><dd>Highlighting, context-aware autocomplete, a formatter (<kbd>⇧⌘F</kbd>), saved queries, and slash commands like <code>/count</code> that expand into full queries.</dd></div>
+          <div><dt>Results grid</dt><dd>Virtualized with server-side paging, multi-row selection and frozen columns. Export to CSV, JSON, GeoJSON, Markdown, SQL or SVG, or copy rows as an image.</dd></div>
+          <div><dt>Inline editing</dt><dd>Double-click a cell to edit it, with a date/time picker for date and time columns. Changes are saved in one transaction, matched on the primary key.</dd></div>
+          <div><dt>Relations</dt><dd>Follow foreign keys in both directions from any row, in a popup you can chain.</dd></div>
+          <div><dt>PostGIS</dt><dd>Readable geometry cells and a built-in map that reprojects WGS84, Web Mercator and UTM on the fly.</dd></div>
+          <div><dt>Connections</dt><dd>SSL up to <code>verify-full</code> with client certificates, SSH tunnels, and paste-in connection strings.</dd></div>
+        </dl>
       </div>
     </section>
 
@@ -198,15 +117,6 @@
 
         <div class="row">
           <div class="txt">
-            <p class="tag km-tag">Khmer</p>
-            <h3 lang="km" class="km-h">អក្សរខ្មែរ <span lang="en">that actually renders</span></h3>
-            <p>Complex scripts need real shaping. rgrip uses HarfBuzz through rustybuzz, so Khmer looks right in the grid, explorer, map labels and exported images.</p>
-          </div>
-          <figure class="shot"><img src="img/khmer.png" alt="Khmer text correctly shaped in the results grid" width="1600" height="1000" loading="lazy"></figure>
-        </div>
-
-        <div class="row rev">
-          <div class="txt">
             <p class="tag">Sharing</p>
             <h3>Copy as image</h3>
             <p>Need to show someone a result? One click copies a PNG of the table to your clipboard, ready to paste into Telegram or Slack. There is also Copy for AI agent, which gives you markdown with the query and column types.</p>
@@ -242,13 +152,6 @@
         <h3 class="mt">Build from source</h3>
         <p class="sub">Needs Rust 1.88 or newer.</p>
         <pre class="code" tabindex="0"><code>git clone https://github.com/yoouTaro/rgrip &amp;&amp; cd rgrip &amp;&amp; cargo run -p rgrip</code></pre>
-      </div>
-    </section>
-
-    <section class="section">
-      <div class="wrap narrow center">
-        <p class="km big" lang="km">សួស្តី</p>
-        <p class="sub">Hello, from a client that can actually write it.</p>
       </div>
     </section>
 
