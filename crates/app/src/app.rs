@@ -819,21 +819,32 @@ impl App {
         let Some(ci) = self.conn_index(&self.tabs[ti].conn) else { return };
         let connected = matches!(self.conns[ci].status, Status::Connected(_));
         let mut needs_connect = false;
+        let catalog = self.conns[ci].catalog.clone();
         let tab = &mut self.tabs[ti];
         match (action, &mut tab.kind) {
             (TabAction::Run { all }, TabKind::Console(c)) => {
                 if c.running.is_some() {
                     return;
                 }
+                let at = sql::char_to_byte(&c.sql, c.cursor.start);
                 let text = if all {
                     c.sql.clone()
                 } else if c.cursor.start != c.cursor.end {
-                    let a = sql::char_to_byte(&c.sql, c.cursor.start);
                     let b = sql::char_to_byte(&c.sql, c.cursor.end);
-                    c.sql[a..b].to_string()
+                    c.sql[at..b].to_string()
+                } else if let Some((_, line)) = rgrip_core::commands::command_line_at(&c.sql, at) {
+                    // A command line is its own statement (it has no `;`).
+                    line.to_string()
                 } else {
-                    let at = sql::char_to_byte(&c.sql, c.cursor.start);
                     sql::statement_at(&c.sql, at).map(|r| c.sql[r].to_string()).unwrap_or_default()
+                };
+                // Slash commands are ours, not SQL: expand before sending.
+                let text = match rgrip_core::commands::expand_all(&text, &catalog) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.toast = Some((e, theme::WARN(), Instant::now()));
+                        return;
+                    }
                 };
                 if text.trim().is_empty() {
                     return;
@@ -1671,6 +1682,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
             }
         }
     }
+    let mut format = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F));
     if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter)) {
         action = Some(TabAction::Run { all: true });
     } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
@@ -1695,6 +1707,9 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
             if ui.button("Run all").on_hover_text("⇧⌘↩").clicked() {
                 action = Some(TabAction::Run { all: true });
             }
+            if ghost_button(ui, "Format").on_hover_text("Format selection or all  ⇧⌘F").clicked() {
+                format = true;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let label = if c.saved_id.is_some() { "Save" } else { "Save as…" };
                 if ghost_button(ui, label).on_hover_text("⌘S").clicked() {
@@ -1703,6 +1718,19 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
             });
         }
     });
+
+    if format && c.running.is_none() {
+        // The selection if there is one, else the whole editor.
+        let range = if c.cursor.start != c.cursor.end {
+            sql::char_to_byte(&c.sql, c.cursor.start)..sql::char_to_byte(&c.sql, c.cursor.end)
+        } else {
+            0..c.sql.len()
+        };
+        let formatted = rgrip_core::format::format_sql(&c.sql[range.clone()]);
+        c.cursor = completion::replace_text(ui.ctx(), editor_id, &mut c.sql, range, &formatted);
+        c.popup = None;
+        ui.memory_mut(|m| m.request_focus(editor_id));
+    }
 
     let max_h = (ui.available_height() - 120.0).max(120.0);
     egui::TopBottomPanel::top(Id::new(("editor-panel", tab_id)))
@@ -2764,7 +2792,7 @@ mod tests {
         let mut h = Harness::new();
         h.type_text("/con_4326 geom");
         h.key(Key::Tab, Modifiers::NONE);
-        assert_eq!(h.console.sql, "ST_Transform(geom, 4326)");
+        assert_eq!(h.console.sql, "select t.*, ST_Transform(t.geom, 4326) as geom_4326\nfrom table_name t;");
         h.console.sql.clear();
         h.frame(vec![]);
         h.type_text("/con_4326_2 users");
@@ -2775,6 +2803,14 @@ mod tests {
         h.frame(vec![]);
         h.type_text("/");
         assert!(h.labels().iter().any(|l| l.starts_with("/con_4326")));
+    }
+
+    #[test]
+    fn format_shortcut_formats_the_editor() {
+        let mut h = Harness::new();
+        h.type_text("select a, b from t where a = 1");
+        h.key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert_eq!(h.console.sql, "select a, b\nfrom t\nwhere a = 1");
     }
 
     #[test]

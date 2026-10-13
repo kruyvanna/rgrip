@@ -21,8 +21,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "con_merc",
-        args: "[table] [field]",
-        help: "Web Mercator (3857/102100) via text → 4326",
+        args: "[table] [field] [srid]",
+        help: "Projected (default 32648, UTM 48N) via text → 4326",
     },
     Command { name: "srid", args: "<table> [field]", help: "SRIDs used by a table's geometries" },
     Command { name: "top", args: "<table> [n]", help: "First rows: select * … limit n (100)" },
@@ -30,6 +30,10 @@ pub const COMMANDS: &[Command] = &[
 ];
 
 const DEFAULT_FIELD: &str = "shape";
+/// Source SRID for `/con_merc` when none is given.
+const DEFAULT_MERC_SRID: u64 = 32648;
+/// Placeholder when a reprojection command has no table yet.
+const TABLE_PLACEHOLDER: &str = "table_name";
 
 fn ident(s: &str) -> String {
     if needs_quotes(s) { quote_ident(s) } else { s.to_string() }
@@ -39,10 +43,16 @@ fn ident(s: &str) -> String {
 fn find_table<'a>(catalog: &'a Catalog, arg: &str) -> Option<&'a CatalogTable> {
     let arg = arg.trim_matches('"');
     match arg.split_once('.') {
-        Some((schema, name)) => catalog.tables.iter().find(|t| t.schema == schema && t.name == name),
+        Some((schema, name)) => catalog
+            .tables
+            .iter()
+            .find(|t| t.schema.eq_ignore_ascii_case(schema) && t.name.eq_ignore_ascii_case(name)),
         None => {
-            let matches: Vec<_> = catalog.tables.iter().filter(|t| t.name == arg).collect();
-            matches.iter().find(|t| t.schema == "public").or(matches.first()).copied()
+            let matches: Vec<_> = catalog.tables.iter().filter(|t| t.name.eq_ignore_ascii_case(arg)).collect();
+            // Prefer an exact-case match, then `public`.
+            let exact = matches.iter().filter(|t| t.name == arg);
+            exact.clone().find(|t| t.schema == "public").or(exact.clone().next())
+                .or(matches.iter().find(|t| t.schema == "public")).or(matches.first()).copied()
         }
     }
 }
@@ -80,20 +90,30 @@ pub fn expand(line: &str, catalog: &Catalog) -> Result<String, String> {
     let command = COMMANDS.iter().find(|c| c.name == name).ok_or_else(|| format!("Unknown command /{name}"))?;
 
     let mut table: Option<(&CatalogTable, &str)> = None;
-    let mut field: Option<&str> = None;
+    let mut other: Vec<&str> = Vec::new();
     let mut number: Option<u64> = None;
     for w in words {
         if let Ok(n) = w.parse::<u64>() {
             number = Some(n);
         } else if table.is_none() && let Some(t) = find_table(catalog, w) {
             table = Some((t, w));
-        } else if field.is_none() {
-            field = Some(w);
         } else {
-            return Err(format!("Unexpected argument {w}. Usage: /{} {}", command.name, command.args));
+            other.push(w);
         }
     }
     let usage = || format!("Usage: /{} {}", command.name, command.args);
+    // `/cmd <table> <field>` with a table the catalog doesn't know (not
+    // loaded yet, or a typo Postgres will report): use it as typed.
+    let (from, field) = match (table, other.as_slice()) {
+        (Some((t, typed)), [] | [_]) => (Some(table_sql(t, typed)), other.first().copied()),
+        // A lone unknown word is the table for table-only commands, the
+        // field otherwise.
+        (None, [t]) if matches!(command.name, "top" | "count" | "srid") => (Some(t.to_string()), None),
+        (None, [f]) => (None, Some(*f)),
+        (None, []) => (None, None),
+        (None, [t, f]) => (Some(t.to_string()), Some(*f)),
+        (_, [.., w]) => return Err(format!("Unexpected argument {w}. {}", usage())),
+    };
     let field = field.map(|f| f.trim_matches('"').to_string()).unwrap_or_else(|| {
         table.and_then(|(t, _)| geometry_field(t)).unwrap_or(DEFAULT_FIELD).to_string()
     });
@@ -102,28 +122,27 @@ pub fn expand(line: &str, catalog: &Catalog) -> Result<String, String> {
         Some(match command.name {
             "con_4326" => format!("ST_Transform({f}, 4326)"),
             "con_4326_2" => format!("ST_SetSRID(st_astext({f})::text, 4326)"),
-            "con_merc" => format!("ST_Transform(ST_SetSRID(st_astext({f})::text::geometry, 3857), 4326)"),
+            "con_merc" => format!(
+                "ST_Transform(ST_SetSRID(st_astext({f})::text::geometry, {}), 4326)",
+                number.unwrap_or(DEFAULT_MERC_SRID)
+            ),
             _ => return None,
         })
     };
 
-    match (command.name, table) {
-        (_, None) if reproject("").is_some() => Ok(reproject(&ident(&field)).unwrap()),
-        (_, Some((t, typed))) if reproject("").is_some() => {
+    // Reprojections always expand to a complete query.
+    let from = from.or_else(|| reproject("").map(|_| TABLE_PLACEHOLDER.to_string()));
+    match (command.name, from) {
+        (_, Some(from)) if reproject("").is_some() => {
             let expr = reproject(&format!("t.{}", ident(&field))).unwrap();
-            Ok(format!(
-                "select t.*, {expr} as {}\nfrom {} t;",
-                ident(&format!("{field}_4326")),
-                table_sql(t, typed)
-            ))
+            Ok(format!("select t.*, {expr} as {}\nfrom {from} t;", ident(&format!("{field}_4326"))))
         }
-        ("srid", Some((t, typed))) => Ok(format!(
-            "select ST_SRID({f}) as srid, count(*)\nfrom {}\ngroup by 1\norder by 2 desc;",
-            table_sql(t, typed),
+        ("srid", Some(from)) => Ok(format!(
+            "select ST_SRID({f}) as srid, count(*)\nfrom {from}\ngroup by 1\norder by 2 desc;",
             f = ident(&field)
         )),
-        ("top", Some((t, typed))) => Ok(format!("select *\nfrom {}\nlimit {};", table_sql(t, typed), number.unwrap_or(100))),
-        ("count", Some((t, typed))) => Ok(format!("select count(*)\nfrom {};", table_sql(t, typed))),
+        ("top", Some(from)) => Ok(format!("select *\nfrom {from}\nlimit {};", number.unwrap_or(100))),
+        ("count", Some(from)) => Ok(format!("select count(*)\nfrom {from};")),
         _ => Err(usage()),
     }
 }
@@ -159,7 +178,28 @@ pub fn command_line_at(sql: &str, cursor: usize) -> Option<(std::ops::Range<usiz
     let start = sql[..cursor].rfind('\n').map_or(0, |i| i + 1);
     let end = sql[cursor..].find('\n').map_or(sql.len(), |i| cursor + i);
     let line = &sql[start..end];
-    line.trim_start().starts_with('/').then_some((start..end, line))
+    is_command_line(line).then_some((start..end, line))
+}
+
+/// `/word…` at the start of the line (not a `/* comment`).
+pub fn is_command_line(line: &str) -> bool {
+    line.trim_start().strip_prefix('/').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_alphabetic()))
+}
+
+/// Expand every command line in `sql` (for Run all / selection), keeping
+/// the other lines as they are.
+pub fn expand_all(sql: &str, catalog: &Catalog) -> Result<String, String> {
+    let mut out = Vec::new();
+    for line in sql.split('\n') {
+        if is_command_line(line) {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            let expanded = expand(line, catalog)?;
+            out.push(format!("{indent}{expanded}"));
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    Ok(out.join("\n"))
 }
 
 #[cfg(test)]
@@ -189,12 +229,20 @@ mod tests {
     }
 
     #[test]
-    fn expressions_default_to_shape() {
-        assert_eq!(x("/con_4326"), "ST_Transform(shape, 4326)");
-        assert_eq!(x("/con_4326 geom"), "ST_Transform(geom, 4326)");
-        assert_eq!(x("/con_4326_2"), "ST_SetSRID(st_astext(shape)::text, 4326)");
-        assert_eq!(x("/con_merc"), "ST_Transform(ST_SetSRID(st_astext(shape)::text::geometry, 3857), 4326)");
-        assert_eq!(x("/con_4326 \"Shape Field\""), "ST_Transform(\"Shape Field\", 4326)");
+    fn without_table_uses_a_placeholder() {
+        assert_eq!(x("/con_4326"), "select t.*, ST_Transform(t.shape, 4326) as shape_4326\nfrom table_name t;");
+        assert!(x("/con_4326 geom").starts_with("select t.*, ST_Transform(t.geom, 4326) as geom_4326"));
+        assert!(x("/con_4326_2").contains("ST_SetSRID(st_astext(t.shape)::text, 4326)"));
+        assert!(x("/con_4326 \"Shape Field\"").contains("ST_Transform(t.\"Shape Field\", 4326) as \"Shape Field_4326\""));
+    }
+
+    #[test]
+    fn merc_srid_defaults_to_32648() {
+        assert_eq!(
+            x("/con_merc"),
+            "select t.*, ST_Transform(ST_SetSRID(st_astext(t.shape)::text::geometry, 32648), 4326) as shape_4326\nfrom table_name t;"
+        );
+        assert!(x("/con_merc parcels 3857").contains("::geometry, 3857), 4326)"));
     }
 
     #[test]
@@ -203,7 +251,7 @@ mod tests {
         // The table's geometry column is used, and args can come in any order.
         assert_eq!(x("/con_4326 roads"), "select t.*, ST_Transform(t.geom, 4326) as geom_4326\nfrom roads t;");
         assert_eq!(x("/con_4326 geom roads"), x("/con_4326 roads geom"));
-        assert_eq!(x("/con_merc gis.zones"), "select t.*, ST_Transform(ST_SetSRID(st_astext(t.the_geom)::text::geometry, 3857), 4326) as the_geom_4326\nfrom gis.zones t;");
+        assert_eq!(x("/con_merc gis.zones"), "select t.*, ST_Transform(ST_SetSRID(st_astext(t.the_geom)::text::geometry, 32648), 4326) as the_geom_4326\nfrom gis.zones t;");
         assert!(x("/con_4326 zones").contains("from gis.zones t"));
     }
 
@@ -216,6 +264,35 @@ mod tests {
         assert!(expand("/top", &catalog()).unwrap_err().contains("Usage: /top <table>"));
         assert!(expand("/nope", &catalog()).unwrap_err().contains("Unknown command"));
         assert!(expand("/con_4326 a b c", &catalog()).unwrap_err().contains("Unexpected argument"));
+    }
+
+    #[test]
+    fn table_and_field_args() {
+        assert_eq!(
+            x("/con_4326_2 PARCELS objectid"),
+            "select t.*, ST_SetSRID(st_astext(t.objectid)::text, 4326) as objectid_4326\nfrom parcels t;"
+        );
+        // Unknown table with an explicit field: used as typed.
+        assert_eq!(
+            x("/con_4326_2 parcel shape"),
+            "select t.*, ST_SetSRID(st_astext(t.shape)::text, 4326) as shape_4326\nfrom parcel t;"
+        );
+        assert_eq!(x("/count gis.ZONES"), "select count(*)\nfrom gis.zones;");
+        // Table-only commands take an unknown word as the table.
+        assert_eq!(x("/count parcel"), "select count(*)\nfrom parcel;");
+        assert_eq!(x("/top parcel 5"), "select *\nfrom parcel\nlimit 5;");
+    }
+
+    #[test]
+    fn expands_every_command_line() {
+        let sql = "/con_4326_2 parcels\n/* note */\nselect 1;\n  /count notes";
+        assert_eq!(
+            expand_all(sql, &catalog()).unwrap(),
+            "select t.*, ST_SetSRID(st_astext(t.shape)::text, 4326) as shape_4326\nfrom parcels t;\n/* note */\nselect 1;\n  select count(*)\nfrom notes;"
+        );
+        assert_eq!(expand_all("select 4 / 2;", &catalog()).unwrap(), "select 4 / 2;");
+        assert!(expand_all("/top", &catalog()).unwrap_err().contains("Usage"));
+        assert!(!is_command_line("/* comment */"));
     }
 
     #[test]

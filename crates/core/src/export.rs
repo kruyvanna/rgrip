@@ -1,4 +1,5 @@
-//! Result set export: CSV, TSV, JSON, GeoJSON, Markdown and SQL INSERTs.
+//! Result set export: CSV, TSV, JSON, GeoJSON, Markdown, SQL INSERTs and
+//! an SVG picture of the table.
 //!
 //! Values arrive as text, so each column's kind is inferred from its data to
 //! emit real numbers/booleans/objects in JSON and unquoted literals in SQL.
@@ -16,11 +17,19 @@ pub enum Format {
     GeoJson,
     Markdown,
     SqlInsert,
+    Svg,
 }
 
 impl Format {
-    pub const ALL: [Format; 6] =
-        [Format::Csv, Format::Tsv, Format::Json, Format::GeoJson, Format::Markdown, Format::SqlInsert];
+    pub const ALL: [Format; 7] = [
+        Format::Csv,
+        Format::Tsv,
+        Format::Json,
+        Format::GeoJson,
+        Format::Markdown,
+        Format::SqlInsert,
+        Format::Svg,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -30,6 +39,7 @@ impl Format {
             Format::GeoJson => "GeoJSON",
             Format::Markdown => "Markdown",
             Format::SqlInsert => "SQL INSERT",
+            Format::Svg => "SVG table",
         }
     }
 
@@ -41,6 +51,7 @@ impl Format {
             Format::GeoJson => "geojson",
             Format::Markdown => "md",
             Format::SqlInsert => "sql",
+            Format::Svg => "svg",
         }
     }
 }
@@ -133,6 +144,7 @@ pub fn export(rs: &ResultSet, format: Format, table: &str) -> String {
         Format::GeoJson => geojson(rs, &kinds),
         Format::Markdown => markdown(rs, &kinds),
         Format::SqlInsert => sql_insert(rs, &kinds, table),
+        Format::Svg => svg(rs, &kinds),
     }
 }
 
@@ -271,6 +283,108 @@ fn sql_insert(rs: &ResultSet, kinds: &[Kind], table: &str) -> String {
     out
 }
 
+/// A light, readable picture of the table: bold header, zebra rows,
+/// right-aligned numbers, greyed NULLs. Long values are shortened and very
+/// long results are cut off with a note, so the image stays legible.
+fn svg(rs: &ResultSet, kinds: &[Kind]) -> String {
+    const MAX_ROWS: usize = 500;
+    const MAX_CHARS: usize = 48;
+    const FONT: f32 = 13.0;
+    const PAD_X: f32 = 12.0;
+    const ROW_H: f32 = 28.0;
+    const FONTS: &str = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'Noto Sans Khmer', 'Khmer Sangam MN', sans-serif";
+
+    let shorten = |s: &str| -> String {
+        let s: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        if s.chars().count() > MAX_CHARS {
+            s.chars().take(MAX_CHARS - 1).collect::<String>() + "…"
+        } else {
+            s
+        }
+    };
+    let shown = &rs.rows[..rs.rows.len().min(MAX_ROWS)];
+    let cells: Vec<Vec<Option<String>>> = shown
+        .iter()
+        .map(|row| row.iter().zip(kinds).map(|(v, k)| v.as_deref().map(|v| shorten(&display(v, *k)))).collect())
+        .collect();
+    let widths: Vec<f32> = rs
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let body = cells.iter().map(|r| r[i].as_deref().map_or(text_width("NULL", FONT), |v| text_width(v, FONT)));
+            body.fold(text_width(name, FONT) * 1.08, f32::max) + 2.0 * PAD_X
+        })
+        .collect();
+    let total_w: f32 = widths.iter().sum::<f32>().max(160.0);
+    let more = rs.rows.len() - shown.len();
+    let footer = if more > 0 { ROW_H } else { 0.0 };
+    let total_h = ROW_H * (shown.len() + 1) as f32 + footer;
+    let (w, h) = (total_w + 2.0, total_h + 2.0);
+
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\" font-family=\"{FONTS}\" font-size=\"{FONT}\">\n"
+    );
+    out += &format!("<rect x=\"1\" y=\"1\" width=\"{total_w}\" height=\"{total_h}\" rx=\"8\" fill=\"#ffffff\" stroke=\"#d0d7de\"/>\n");
+    out += &format!("<path d=\"M1 {ROW_H} h{total_w}\" stroke=\"#d0d7de\"/>\n");
+    for i in 0..shown.len() {
+        if i % 2 == 1 {
+            out += &format!("<rect x=\"1\" y=\"{}\" width=\"{total_w}\" height=\"{ROW_H}\" fill=\"#f6f8fa\"/>\n", 1.0 + ROW_H * (i + 1) as f32);
+        }
+    }
+    let baseline = |row: usize| 1.0 + ROW_H * row as f32 + ROW_H / 2.0 + FONT * 0.35;
+    let mut x = 1.0;
+    for (i, name) in rs.columns.iter().enumerate() {
+        let right = kinds[i] == Kind::Number;
+        let tx = if right { x + widths[i] - PAD_X } else { x + PAD_X };
+        let anchor = if right { " text-anchor=\"end\"" } else { "" };
+        out += &format!(
+            "<text x=\"{tx}\" y=\"{}\" font-weight=\"600\" fill=\"#1f2328\"{anchor}>{}</text>\n",
+            baseline(0),
+            xml_escape(name)
+        );
+        for (r, row) in cells.iter().enumerate() {
+            out += &match &row[i] {
+                Some(v) => format!("<text x=\"{tx}\" y=\"{}\" fill=\"#1f2328\"{anchor}>{}</text>\n", baseline(r + 1), xml_escape(v)),
+                None => format!("<text x=\"{tx}\" y=\"{}\" fill=\"#8c959f\" font-style=\"italic\"{anchor}>NULL</text>\n", baseline(r + 1)),
+            };
+        }
+        x += widths[i];
+        if i + 1 < rs.columns.len() {
+            out += &format!("<path d=\"M{x} 1 v{}\" stroke=\"#eaeef2\"/>\n", ROW_H * (shown.len() + 1) as f32);
+        }
+    }
+    if more > 0 {
+        out += &format!(
+            "<text x=\"{}\" y=\"{}\" fill=\"#8c959f\" font-style=\"italic\">… {more} more rows not shown</text>\n",
+            1.0 + PAD_X,
+            baseline(shown.len() + 1)
+        );
+    }
+    out += "</svg>\n";
+    out
+}
+
+/// Rough rendered width; there are no font metrics here, so err wide.
+fn text_width(s: &str, font: f32) -> f32 {
+    s.chars()
+        .map(|c| match c as u32 {
+            // Khmer dependent vowels and signs stack on the consonant.
+            0x17B4..=0x17DD => 0.0,
+            0x1780..=0x17B3 => 0.75,
+            0x2E80..=0xFFEF => 1.0,
+            _ if c.is_ascii_uppercase() || "mwMW@%".contains(c) => 0.72,
+            _ if c.is_ascii() => 0.56,
+            _ => 0.65,
+        })
+        .sum::<f32>()
+        * font
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
 /// Just the given rows (in order).
 pub fn subset(rs: &ResultSet, rows: &[usize]) -> ResultSet {
     ResultSet {
@@ -369,6 +483,22 @@ mod tests {
                 vec![s("2"), s("ផ្សារធំថ្មី"), None, s("f"), None, None],
             ],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn svg_table() {
+        let out = export(&rs(), Format::Svg, "t");
+        assert!(out.starts_with("<svg xmlns="), "{out}");
+        assert!(out.ends_with("</svg>\n"));
+        // Escaped, numbers right-aligned, NULLs greyed, geometry as WKT.
+        assert!(out.contains("Royal, &quot;Palace&quot;"));
+        assert!(out.contains("text-anchor=\"end\">1</text>"));
+        assert!(out.contains(">NULL</text>"));
+        assert!(out.contains("POINT"));
+        assert!(out.contains("ផ្សារធំថ្មី"));
+        if let Ok(path) = std::env::var("RGRIP_SVG_SAMPLE") {
+            std::fs::write(path, &out).unwrap();
         }
     }
 

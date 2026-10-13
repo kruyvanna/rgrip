@@ -3,6 +3,7 @@ pub mod complete;
 pub mod config;
 pub mod conn_string;
 pub mod export;
+pub mod format;
 pub mod geo;
 pub mod model;
 pub mod postgres;

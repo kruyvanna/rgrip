@@ -17,6 +17,7 @@ russh = "0.64"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 semver = "1"
 sha2 = "0.10"
+sqlformat = "0.5.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }

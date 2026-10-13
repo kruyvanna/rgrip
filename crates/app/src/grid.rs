@@ -241,6 +241,7 @@ fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, g
         item(ui, "CSV", &|| export::export(&subset(), Format::Csv, source.table).trim_start_matches('\u{FEFF}').to_string());
         item(ui, "JSON", &|| export::export(&subset(), Format::Json, source.table));
         item(ui, "Markdown", &|| export::export(&subset(), Format::Markdown, source.table));
+        item(ui, "SVG table", &|| export::export(&subset(), Format::Svg, source.table));
         if geom {
             item(ui, "GeoJSON", &|| export::export(&subset(), Format::GeoJson, source.table));
         }

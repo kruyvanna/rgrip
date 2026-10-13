@@ -69,11 +69,11 @@ const PAGE_PREFIX: &str = "select * from (";
 /// Returns the SQL and how many chars were prepended (to map error
 /// positions back). `None` for anything that isn't safely wrappable.
 pub fn paged_query(stmt: &str, limit: usize, offset: usize) -> Option<(String, usize)> {
-    let body = stmt.trim();
-    let body = body.strip_suffix(';').unwrap_or(body).trim_end();
-    if split_statements(body).len() != 1 {
-        return None;
-    }
+    // Cut at the end of the statement so a trailing `;` and any comments
+    // after it stay out of the subquery. Leading text is kept as-is so
+    // error positions only shift by the prefix.
+    let [s] = &split_statements(stmt)[..] else { return None };
+    let body = &stmt[..s.trimmed.end];
     let words = crate::complete::words(body);
     let first = words.first()?.as_str();
     if !matches!(first, "select" | "with" | "values" | "table") {
@@ -140,11 +140,17 @@ fn push_statement(sql: &str, start: usize, end: usize, out: &mut Vec<Statement>)
     });
 }
 
-fn is_only_comments(s: &str) -> bool {
-    s.lines().all(|l| {
-        let l = l.trim();
-        l.is_empty() || l.starts_with("--")
-    })
+fn is_only_comments(mut s: &str) -> bool {
+    loop {
+        s = s.trim_start();
+        if let Some(rest) = s.strip_prefix("--") {
+            s = rest.split_once('\n').map_or("", |(_, r)| r);
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            s = rest.split_once("*/").map_or("", |(_, r)| r);
+        } else {
+            return s.is_empty();
+        }
+    }
 }
 
 /// Returns the index just after `needle`, or the end of input.
@@ -208,6 +214,7 @@ mod tests {
     #[test]
     fn skips_comment_only_tail() {
         assert_eq!(texts("select 1;\n-- done\n"), ["select 1"]);
+        assert_eq!(texts("select 1; /* a */ -- b\n/* c */"), ["select 1"]);
     }
 
     #[test]
@@ -228,6 +235,9 @@ mod tests {
         assert_eq!(shift, 15);
         assert!(paged_query("-- c\nwith x as (select 1) select * from x -- tail", 10, 0).is_some());
         assert!(paged_query("values (1), (2)", 10, 0).is_some());
+        // Comments after the `;` stay outside the subquery.
+        let (sql, _) = paged_query("select 1; -- note\n/* more */", 10, 0).unwrap();
+        assert_eq!(sql, "select * from (select 1\n) as _rgrip_page limit 10 offset 0");
         for sql in [
             "select 1; select 2",
             "insert into t values (1) returning *",
