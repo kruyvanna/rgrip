@@ -56,7 +56,7 @@ pub enum Kind {
 
 /// Infer each column's kind from all its non-null values.
 pub fn infer_kinds(rs: &ResultSet) -> Vec<Kind> {
-    let geom = geo::geometry_columns(rs);
+    let geom = rs.geometry_columns();
     (0..rs.columns.len())
         .map(|i| {
             if geom.contains(&i) {
@@ -290,7 +290,7 @@ mod tests {
                 ],
                 vec![s("2"), s("ផ្សារធំថ្មី"), None, s("f"), None, None],
             ],
-            truncated: false,
+            ..Default::default()
         }
     }
 

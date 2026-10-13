@@ -4267,7 +4267,7 @@ dependencies = [
 
 [[package]]
 name = "rgrip"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
  "ab_glyph",
  "earcutr",
@@ -4282,7 +4282,7 @@ dependencies = [
 
 [[package]]
 name = "rgrip-core"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
  "directories",
  "russh",

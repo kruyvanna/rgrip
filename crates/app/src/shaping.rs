@@ -11,6 +11,11 @@ use eframe::egui::{self, Color32, ColorImage, Painter, Pos2, Rect, TextureHandle
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Longest text shaped (cells show one line).
+const MAX_CHARS: usize = 300;
+/// Widest image produced, in pixels; also capped by the GPU's texture limit.
+const MAX_WIDTH_PX: f32 = 4000.0;
+
 pub fn is_complex(text: &str) -> bool {
     text.chars().any(is_khmer)
 }
@@ -69,8 +74,14 @@ fn shaper() -> Option<&'static Shaper> {
 /// tint when drawing. `None` if no Khmer font is available.
 pub fn shape(ctx: &egui::Context, text: &str, size: f32) -> Option<Arc<Shaped>> {
     let shaper = shaper()?;
+    // Callers show one line; long text would also exceed GPU texture limits.
+    let text = match text.char_indices().nth(MAX_CHARS) {
+        Some((i, _)) => &text[..i],
+        None => text,
+    };
     let ppp = ctx.pixels_per_point();
     let px = size * ppp;
+    let max_width = MAX_WIDTH_PX.min(ctx.input(|i| i.max_texture_side) as f32 - 4.0 * px);
     let key = (text.to_string(), (px * 10.0) as u32);
     if let Some(hit) = shaper.cache.lock().unwrap().get(&key) {
         return Some(hit.clone());
@@ -96,11 +107,15 @@ pub fn shape(ctx: &egui::Context, text: &str, size: f32) -> Option<Arc<Shaped>> 
         for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
             let x = pen + pos.x_offset as f32 * scale;
             let y = ascent + pad - pos.y_offset as f32 * scale;
+            if pen > max_width {
+                break;
+            }
             placed.push(GlyphId(info.glyph_id as u16).with_scale_and_position(glyph_scale, point(x + pad, y)));
             pen += pos.x_advance as f32 * scale;
         }
     }
-    let width = (pen + 2.0 * pad).ceil().max(1.0) as usize;
+    // The last glyph placed may extend up to ~2em past `max_width`.
+    let width = (pen.min(max_width + px * 2.0) + 2.0 * pad).ceil().max(1.0) as usize;
     let height = (ascent + descent + 2.0 * pad).ceil().max(1.0) as usize;
     let mut alpha = vec![0.0f32; width * height];
     for glyph in placed {

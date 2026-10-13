@@ -1,3 +1,4 @@
 target/
 dev/certs/
 dev/ssh/id_ed25519*
+dist/

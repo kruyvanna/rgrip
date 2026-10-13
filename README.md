@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon-512.png" width="128" alt="rgrip"></p>
+
 # rgrip
 
 A minimal, DataGrip-style PostgreSQL client written in Rust ([egui](https://github.com/emilk/egui)).
@@ -15,6 +17,17 @@ Requires Rust 1.88+ (egui 0.33).
 
 ```sh
 cargo run -p rgrip
+```
+
+Download the macOS app (Apple silicon) from [Releases](https://github.com/yoouTaro/rgrip/releases).
+It is ad-hoc signed, not notarized: on first launch right-click **rgrip.app → Open**, or run
+`xattr -dr com.apple.quarantine rgrip.app`.
+
+To build the app bundle yourself:
+
+```sh
+./scripts/bundle-macos.sh   # → dist/rgrip.app and dist/rgrip-<version>-macos-<arch>.zip
+./scripts/build-icon.sh     # regenerate assets/rgrip.icns from assets/logo.svg
 ```
 
 Connections are stored in `~/Library/Application Support/dev.rgrip.rgrip/` (`connections.toml`, `queries.toml`).

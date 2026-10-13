@@ -205,6 +205,15 @@ pub struct ResultSet {
     pub rows: Vec<Vec<Option<String>>>,
     /// More rows were returned than we keep in memory.
     pub truncated: bool,
+    /// Lazily computed geometry column indexes (see [`ResultSet::geometry_columns`]).
+    pub geometry_cache: std::sync::OnceLock<Vec<usize>>,
+}
+
+impl ResultSet {
+    /// Columns holding PostGIS geometries; computed once per result set.
+    pub fn geometry_columns(&self) -> &[usize] {
+        self.geometry_cache.get_or_init(|| crate::geo::geometry_columns(self))
+    }
 }
 
 #[derive(Clone, Debug)]

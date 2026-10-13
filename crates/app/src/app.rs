@@ -1420,7 +1420,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
                         *view = View::Result(n);
                         *grid = GridState::default();
                     }
-                    if !rgrip_core::geo::geometry_columns(rs).is_empty()
+                    if !rs.geometry_columns().is_empty()
                         && segment(ui, *view == View::Map(n), if sets.len() > 1 { "Map ↑" } else { "Map" })
                     {
                         *view = View::Map(n);
@@ -1470,7 +1470,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
                     grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, None, row_offset);
                 }
                 View::Map(n) if n < sets.len() => {
-                    let cols = rgrip_core::geo::geometry_columns(sets[n]);
+                    let cols = sets[n].geometry_columns().to_vec();
                     if cols.is_empty() {
                         centered(ui, |ui| muted(ui, "No geometry columns in this result"));
                     } else {
@@ -1504,7 +1504,7 @@ fn update_popup(c: &mut Console, catalog: &Catalog, changed: bool, force: bool, 
 /// Export menu for a result grid: copy or save the rows shown, or (when
 /// `can_export_all`) write every row of the underlying query to a file.
 fn export_menu(ui: &mut Ui, rs: &ResultSet, table: &str, can_export_all: bool) -> Option<TabAction> {
-    let has_geometry = !rgrip_core::geo::geometry_columns(rs).is_empty();
+    let has_geometry = !rs.geometry_columns().is_empty();
     let formats: Vec<export::Format> = export::Format::ALL
         .into_iter()
         .filter(|f| *f != export::Format::GeoJson || has_geometry)
@@ -1621,7 +1621,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
             action = Some(TabAction::Reload);
         }
         if let Some(Ok(rs)) = &t.data {
-            if !rgrip_core::geo::geometry_columns(rs).is_empty() {
+            if !rs.geometry_columns().is_empty() {
                 ui.add_space(6.0);
                 if segment(ui, !t.show_map, "Grid") {
                     t.show_map = false;
@@ -1675,8 +1675,8 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 ui.label(RichText::new(e.as_str()).monospace().color(theme::ERROR));
             });
         }
-        Some(Ok(rs)) if t.show_map && !rgrip_core::geo::geometry_columns(rs).is_empty() => {
-            let cols = rgrip_core::geo::geometry_columns(rs);
+        Some(Ok(rs)) if t.show_map && !rs.geometry_columns().is_empty() => {
+            let cols = rs.geometry_columns().to_vec();
             t.map.show(ui, rs, &cols);
         }
         Some(Ok(rs)) => {
