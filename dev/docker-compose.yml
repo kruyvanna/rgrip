@@ -1,0 +1,20 @@
+# Local test environment: PostGIS with SSL (own CA), and an SSH bastion.
+#   ./dev/gen-certs.sh && docker compose -f dev/docker-compose.yml up -d
+# Postgres: localhost:55432 user rgrip / rgrip, db rgrip (SSL on, plain also allowed)
+# SSH:      localhost:2222  user rgrip / rgrip or dev/ssh/id_ed25519; from there Postgres is pg:5432
+services:
+  pg:
+    image: postgis/postgis:16-3.4
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: rgrip
+      POSTGRES_PASSWORD: rgrip
+      POSTGRES_DB: rgrip
+    volumes:
+      - ./certs:/certs:ro
+      - ./seed.sql:/docker-entrypoint-initdb.d/zz-seed.sql:ro
+    entrypoint: ["bash", "-c", "mkdir -p /etc/pgssl && cp /certs/server.* /certs/ca.crt /etc/pgssl/ && chown -R postgres /etc/pgssl && chmod 600 /etc/pgssl/server.key && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/etc/pgssl/server.crt -c ssl_key_file=/etc/pgssl/server.key -c ssl_ca_file=/etc/pgssl/ca.crt"]
+    ports: ["55432:5432"]
+  ssh:
+    build: ./ssh
+    ports: ["2222:22"]
