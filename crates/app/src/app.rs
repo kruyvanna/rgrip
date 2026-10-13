@@ -138,13 +138,78 @@ struct TableView {
     map: crate::map::MapView,
     /// Primary key columns; empty means the table can't be edited inline.
     key: Vec<String>,
+    /// Date/time columns by name, for the edit picker.
+    temporal: HashMap<String, rgrip_core::datetime::TemporalKind>,
+    /// Foreign keys from and to this table.
+    relations: Vec<Relation>,
+    /// Related rows shown in a popup over the tab.
+    related: Option<Related>,
     /// Pending inline edits: (row, col) → new value.
     changes: std::collections::BTreeMap<(usize, usize), Option<String>>,
     editor: Option<grid::CellEditor>,
     saving: bool,
 }
 
+/// What a related-rows popup shows: rows of `schema.table` matching `filter`.
+#[derive(Clone)]
+struct RelatedTarget {
+    schema: String,
+    table: String,
+    filter: String,
+    /// e.g. "← posts (user_id)".
+    label: String,
+}
+
+/// The related-rows popup of a table tab. Read-only; it can follow further
+/// relations, with Back to return.
+struct Related {
+    target: RelatedTarget,
+    back: Vec<RelatedTarget>,
+    data: Option<Result<ResultSet, String>>,
+    total: Option<i64>,
+    relations: Vec<Relation>,
+    grid: GridState,
+}
+
+impl Related {
+    fn query(&self) -> TableQuery {
+        TableQuery {
+            schema: self.target.schema.clone(),
+            table: self.target.table.clone(),
+            filter: self.target.filter.clone(),
+            order: None,
+            limit: PAGE_SIZE,
+            offset: 0,
+        }
+    }
+}
+
 impl TableView {
+    fn new(schema: String, table: String, filter: String) -> Self {
+        Self {
+            schema,
+            table,
+            filter: filter.clone(),
+            applied_filter: filter,
+            order: None,
+            page: 0,
+            loading: false,
+            pending: false,
+            data: None,
+            total: None,
+            grid: GridState::default(),
+            show_map: false,
+            map: Default::default(),
+            key: Vec::new(),
+            temporal: HashMap::new(),
+            relations: Vec::new(),
+            related: None,
+            changes: Default::default(),
+            editor: None,
+            saving: false,
+        }
+    }
+
     fn query(&self) -> TableQuery {
         TableQuery {
             schema: self.schema.clone(),
@@ -301,6 +366,12 @@ enum TabAction {
     Run { all: bool },
     /// Write a table tab's pending inline edits.
     SaveEdits,
+    /// Open `schema.table` filtered with `filter` (following a foreign key).
+    OpenFiltered { schema: String, table: String, filter: String },
+    /// Show related rows in the tab's popup (stacking on an open one).
+    ShowRelated(RelatedTarget),
+    /// Popup: back to the previous related rows.
+    RelatedBack,
     /// Next (`true`) or previous page of a paged console query.
     Page(bool),
     Cancel,
@@ -329,6 +400,9 @@ pub struct App {
     /// Keys of expanded explorer nodes.
     expanded: HashSet<String>,
     selected: Option<String>,
+    /// Debug screenshot scenes: when the scene first looked settled.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    demo_settled: Option<Instant>,
 }
 
 impl App {
@@ -377,6 +451,7 @@ impl App {
             toast: None,
             expanded: HashSet::new(),
             selected: None,
+            demo_settled: None,
         }
     }
 
@@ -467,7 +542,7 @@ impl App {
                             refresh = Some(conn.clone());
                         }
                         c.running = None;
-                        c.grid = GridState::default();
+                        c.grid = GridState::fresh(&c.grid);
                         c.view = match &result {
                             Ok(out) => match out.statements.iter().filter(|s| s.result.is_some()).count() {
                                 0 => View::Output,
@@ -481,12 +556,26 @@ impl App {
                         self.worker.send(Cmd::Catalog(conn));
                     }
                 }
-                Ev::TablePage { tab, result, key } => {
+                Ev::TablePage { tab, modal: true, result, relations, .. } => {
+                    if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab)
+                        && let Some(rel) = &mut t.related
+                    {
+                        rel.grid = GridState::fresh(&rel.grid);
+                        rel.data = Some(result);
+                        rel.relations = relations;
+                    }
+                }
+                Ev::TablePage { tab, modal: false, result, columns, relations } => {
                     if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab) {
                         t.loading = false;
-                        t.grid = GridState::default();
+                        t.grid = GridState::fresh(&t.grid);
                         t.data = Some(result);
-                        t.key = key;
+                        t.key = columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect();
+                        t.relations = relations;
+                        t.temporal = columns
+                            .iter()
+                            .filter_map(|c| Some((c.name.clone(), rgrip_core::datetime::kind_of(&c.data_type)?)))
+                            .collect();
                         // Edits are keyed by row index: they belong to the old page.
                         t.changes.clear();
                         t.editor = None;
@@ -546,9 +635,13 @@ impl App {
                         self.toast = Some((e, theme::ERROR(), Instant::now()));
                     }
                 },
-                Ev::TableCount { tab, result } => {
+                Ev::TableCount { tab, modal, result } => {
                     if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab) {
-                        t.total = result.ok();
+                        match (modal, &mut t.related) {
+                            (true, Some(rel)) => rel.total = result.ok(),
+                            (true, None) => {}
+                            (false, _) => t.total = result.ok(),
+                        }
                     }
                 }
             }
@@ -571,6 +664,7 @@ impl App {
                         conn: tab.conn.clone(),
                         tab: tab.id,
                         query: t.query(),
+                        modal: false,
                     });
                 }
                 _ => {}
@@ -610,36 +704,38 @@ impl App {
     }
 
     fn open_table(&mut self, ci: usize, schema: String, table: String) {
+        self.open_table_with(ci, schema, table, None);
+    }
+
+    /// Open (or switch to) a table tab showing only the rows matching `filter`.
+    fn open_table_filtered(&mut self, ci: usize, schema: String, table: String, filter: String) {
+        self.open_table_with(ci, schema, table, Some(filter));
+    }
+
+    fn open_table_with(&mut self, ci: usize, schema: String, table: String, filter: Option<String>) {
         let conn = self.conns[ci].cfg.id.clone();
         if let Some(i) = self.tabs.iter().position(|t| {
             t.conn == conn && matches!(&t.kind, TabKind::Table(v) if v.schema == schema && v.table == table)
         }) {
             self.active = i;
+            if let (Some(filter), TabKind::Table(t)) = (filter, &mut self.tabs[i].kind) {
+                if !t.changes.is_empty() {
+                    self.toast = Some(("Save or discard your changes in this tab first".into(), theme::WARN(), Instant::now()));
+                    return;
+                }
+                t.filter = filter.clone();
+                t.applied_filter = filter;
+                t.page = 0;
+                self.tab_action(i, TabAction::Reload);
+            }
             return;
         }
+        let filter = filter.unwrap_or_default();
         let title = if schema == "public" { table.clone() } else { format!("{schema}.{table}") };
         self.push_tab(
             conn,
             title,
-            TabKind::Table(TableView {
-                schema,
-                table,
-                filter: String::new(),
-                applied_filter: String::new(),
-                order: None,
-                page: 0,
-                loading: false,
-                pending: false,
-                data: None,
-                total: None,
-                grid: GridState::default(),
-                show_map: false,
-                map: Default::default(),
-                key: Vec::new(),
-                changes: Default::default(),
-                editor: None,
-                saving: false,
-            }),
+            TabKind::Table(TableView::new(schema, table, filter)),
         );
         self.tab_action(self.active, TabAction::Reload);
     }
@@ -847,6 +943,9 @@ impl App {
 
     fn tab_action(&mut self, ti: usize, action: TabAction) {
         let Some(ci) = self.conn_index(&self.tabs[ti].conn) else { return };
+        if let TabAction::OpenFiltered { schema, table, filter } = action {
+            return self.open_table_filtered(ci, schema, table, filter);
+        }
         let connected = matches!(self.conns[ci].status, Status::Connected(_));
         let mut needs_connect = false;
         let catalog = self.conns[ci].catalog.clone();
@@ -966,6 +1065,41 @@ impl App {
                     Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
                 }
             }
+            (TabAction::ShowRelated(target), TabKind::Table(t)) => {
+                match &mut t.related {
+                    Some(rel) => {
+                        let prev = std::mem::replace(&mut rel.target, target);
+                        rel.back.push(prev);
+                        rel.data = None;
+                        rel.total = None;
+                    }
+                    None => {
+                        t.related = Some(Related {
+                            target,
+                            back: Vec::new(),
+                            data: None,
+                            total: None,
+                            relations: Vec::new(),
+                            grid: GridState::default(),
+                        })
+                    }
+                }
+                let query = t.related.as_ref().unwrap().query();
+                if connected {
+                    self.worker.send(Cmd::TableData { conn: tab.conn.clone(), tab: tab.id, query, modal: true });
+                }
+            }
+            (TabAction::RelatedBack, TabKind::Table(t)) => {
+                let Some(rel) = &mut t.related else { return };
+                let Some(prev) = rel.back.pop() else { return };
+                rel.target = prev;
+                rel.data = None;
+                rel.total = None;
+                let query = rel.query();
+                if connected {
+                    self.worker.send(Cmd::TableData { conn: tab.conn.clone(), tab: tab.id, query, modal: true });
+                }
+            }
             (TabAction::Reload, TabKind::Table(t)) => {
                 t.loading = true;
                 t.total = None;
@@ -974,6 +1108,7 @@ impl App {
                         conn: tab.conn.clone(),
                         tab: tab.id,
                         query: t.query(),
+                        modal: false,
                     });
                 } else {
                     t.pending = true;
@@ -993,7 +1128,113 @@ impl App {
     /// connection and runs it; `RGRIP_DEMO_TABLE=schema.table` opens a table.
     /// Used to exercise and screenshot the UI without clicking.
     #[cfg(debug_assertions)]
+    /// Per-frame screenshot scene setup (debug builds), applied once the
+    /// active tab has data:
+    /// - `RGRIP_DEMO_EXPAND=demo,public`: explorer schemas to expand
+    /// - `RGRIP_DEMO_FREEZE=a,b`: frozen columns
+    /// - `RGRIP_DEMO_SELECT=0,2`: selected rows
+    /// - `RGRIP_DEMO_TABLE_VIEW=map` (+ `RGRIP_DEMO_FEATURE=<row>`): map view
+    /// - `RGRIP_DEMO_EDITS='0:phone=+855 12 345 678;1:verified=t'`: pending edits
+    /// - `RGRIP_DEMO_EDITOR=2:registered_on`: open cell editor (picker)
+    /// - `RGRIP_DEMO_RELATED=parcels`: related-rows popup for the selection
+    /// - `RGRIP_DEMO_COPY_IMAGE=<path>`: write "Copy as image" PNG of the selection
+    /// - `RGRIP_DEMO_SCROLL_X=320`: scroll the grid sideways (once)
+    /// - `RGRIP_DEMO_ONLY=1`: show just the demo connection, no saved queries
+    /// - `RGRIP_DEMO_READY=<path>`: touch when settled (for the capture script)
+    fn demo_scene(&mut self) {
+        let env = |k: &str| std::env::var(k).ok();
+        if env("RGRIP_DEMO_ONLY").is_some() {
+            if let Some(name) = env("RGRIP_DEMO_CONN") {
+                self.conns.retain(|c| c.cfg.display_name() == name);
+            }
+            self.saved.clear();
+        }
+        let scroll_x = env("RGRIP_DEMO_SCROLL_X").and_then(|v| v.parse::<f32>().ok());
+        if let (Some(list), Some(c)) = (env("RGRIP_DEMO_EXPAND"), self.conns.first()) {
+            let id = c.cfg.id.clone();
+            self.expanded.insert(format!("c/{id}"));
+            for s in list.split(',') {
+                self.expanded.insert(format!("s/{id}/{s}"));
+            }
+        }
+        let mut follow_action = None;
+        let settled = match self.tabs.get_mut(self.active).map(|t| &mut t.kind) {
+            None => true,
+            Some(TabKind::Console(c)) => {
+                if let (Some(cols), true) = (env("RGRIP_DEMO_FREEZE"), c.grid.frozen.is_empty()) {
+                    c.grid.frozen = cols.split(',').map(String::from).collect();
+                }
+                (c.running.is_none() && c.output.is_some()) || c.popup.is_some()
+            }
+            Some(TabKind::Table(t)) => match &t.data {
+                Some(Ok(rs)) if !t.loading => {
+                    let col = |name: &str| rs.columns.iter().position(|c| c == name);
+                    let cell = |spec: &str| -> Option<(usize, usize)> {
+                        let (r, c) = spec.split_once(':')?;
+                        Some((r.parse().ok()?, col(c)?))
+                    };
+                    if let (Some(cols), true) = (env("RGRIP_DEMO_FREEZE"), t.grid.frozen.is_empty()) {
+                        t.grid.frozen = cols.split(',').map(String::from).collect();
+                        t.grid.scroll_x = scroll_x;
+                    }
+                    if let (Some(sel), true) = (env("RGRIP_DEMO_SELECT"), t.grid.selection.is_empty()) {
+                        t.grid.selection = sel.split(',').filter_map(|v| v.parse().ok()).collect();
+                    }
+                    if env("RGRIP_DEMO_TABLE_VIEW").as_deref() == Some("map") {
+                        t.show_map = true;
+                        t.map.selected = env("RGRIP_DEMO_FEATURE").and_then(|v| v.parse().ok());
+                    }
+                    if let (Some(edits), true) = (env("RGRIP_DEMO_EDITS"), t.changes.is_empty()) {
+                        for e in edits.split(';') {
+                            if let Some((at, v)) = e.split_once('=').and_then(|(spec, v)| Some((cell(spec)?, v))) {
+                                t.changes.insert(at, Some(v.to_string()));
+                            }
+                        }
+                    }
+                    if let (Some(spec), true) = (env("RGRIP_DEMO_EDITOR"), t.editor.is_none()) {
+                        if let Some((r, c)) = cell(&spec) {
+                            t.editor = Some(grid::CellEditor::open(r, c, rs.rows[r][c].as_deref()));
+                        }
+                    }
+                    if let Some(path) = env("RGRIP_DEMO_COPY_IMAGE").filter(|p| !std::path::Path::new(p).exists()) {
+                        let rows: Vec<usize> = if t.grid.selection.is_empty() { (0..rs.rows.len().min(8)).collect() } else { t.grid.selection.iter().copied().collect() };
+                        let sub = export::subset(rs, &rows);
+                        if let Some(png) = crate::snapshot::table_png(&sub) {
+                            let _ = std::fs::write(path, png);
+                        }
+                    }
+                    match (env("RGRIP_DEMO_RELATED"), &t.related) {
+                        (Some(other), None) => {
+                            if let Some(r) = t.relations.iter().find(|r| r.other_table == other) {
+                                let rows: Vec<usize> = if t.grid.selection.is_empty() { vec![0] } else { t.grid.selection.iter().copied().collect() };
+                                follow_action = Some(follow(r, rs, &rows));
+                            }
+                            false
+                        }
+                        (Some(_), Some(rel)) => rel.data.is_some(),
+                        _ => true,
+                    }
+                }
+                _ => false,
+            },
+        };
+        if let Some(a) = follow_action {
+            self.tab_action(self.active, a);
+        }
+        // Touch the ready file once the scene has looked settled for a moment.
+        if let Some(path) = env("RGRIP_DEMO_READY") {
+            if !settled {
+                self.demo_settled = None;
+            } else if self.demo_settled.get_or_insert_with(Instant::now).elapsed() > Duration::from_millis(2500) {
+                let _ = std::fs::write(&path, "ready");
+            }
+            self.egui_ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(debug_assertions)]
     fn demo_hook(&mut self) {
+        self.demo_scene();
         if let Ok(name) = std::env::var("RGRIP_DEMO_CONN") {
             if let Some(i) = self.conns.iter().position(|c| c.cfg.display_name() == name).filter(|&i| i > 0) {
                 self.conns.swap(0, i);
@@ -1858,7 +2099,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
                 for (n, rs) in sets.iter().enumerate() {
                     if segment(ui, *view == View::Result(n), &format!("Result {}", n + 1)) {
                         *view = View::Result(n);
-                        *grid = GridState::default();
+                        *grid = GridState::fresh(grid);
                     }
                     if !rs.geometry_columns().is_empty()
                         && segment(ui, *view == View::Map(n), if sets.len() > 1 { "Map ↑" } else { "Map" })
@@ -1907,7 +2148,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
             match *view {
                 View::Result(n) if n < sets.len() => {
                     let row_offset = if paged.is_some() { *offset } else { 0 };
-                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()) };
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations: &[] };
                     grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, None, row_offset, &source, None);
                 }
                 View::Map(n) if n < sets.len() => {
@@ -2048,6 +2289,43 @@ fn output_log(ui: &mut Ui, out: &QueryOutput) {
     });
 }
 
+/// Show the rows related to `rows` through `r` in the popup.
+fn follow(r: &Relation, rs: &ResultSet, rows: &[usize]) -> TabAction {
+    match related_filter(r, rs, rows) {
+        Some(filter) => {
+            let (arrow, cols): (&str, Vec<&str>) = if r.outgoing {
+                ("→", r.columns.iter().map(|(here, _)| here.as_str()).collect())
+            } else {
+                ("←", r.columns.iter().map(|(_, there)| there.as_str()).collect())
+            };
+            let other = if r.other_schema == "public" { r.other_table.clone() } else { format!("{}.{}", r.other_schema, r.other_table) };
+            TabAction::ShowRelated(RelatedTarget {
+                schema: r.other_schema.clone(),
+                table: r.other_table.clone(),
+                filter,
+                label: format!("{arrow} {other} ({})", cols.join(", ")),
+            })
+        }
+        None => TabAction::Notify("No related rows: the key is NULL".into()),
+    }
+}
+
+/// WHERE for the other side of `r`, matching the given rows' key values.
+/// `None` when every key is NULL (nothing related) or a column is missing.
+fn related_filter(r: &Relation, rs: &ResultSet, rows: &[usize]) -> Option<String> {
+    let pairs: Vec<(usize, &str)> = r
+        .columns
+        .iter()
+        .map(|(here, there)| Some((rs.columns.iter().position(|c| c == here)?, there.as_str())))
+        .collect::<Option<_>>()?;
+    let keys: Vec<Vec<(&str, Option<&str>)>> = rows
+        .iter()
+        .filter_map(|&row| rs.rows.get(row))
+        .map(|row| pairs.iter().map(|&(c, there)| (there, row[c].as_deref())).collect())
+        .collect();
+    rgrip_core::edit::match_rows(&keys)
+}
+
 /// One UPDATE per edited row, matched on the primary key values as loaded.
 fn edit_statements(t: &TableView, rs: &ResultSet) -> Result<Vec<String>, String> {
     let key_cols: Vec<usize> = t
@@ -2178,7 +2456,12 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
             let (table_name, table_sql) = (format!("{}.{}", t.schema, t.table), rgrip_core::postgres::table_select_sql(&t.query()));
             let sort = t.order.as_ref().map(|(c, asc)| Sort { column: c, ascending: *asc });
             let offset = (t.page * PAGE_SIZE) as usize;
-            let editing = (!t.key.is_empty() && !t.saving).then_some(grid::Editing { changes: &t.changes, editor: &mut t.editor });
+            let kinds: Vec<_> = rs.columns.iter().map(|c| t.temporal.get(c).copied()).collect();
+            let editing = (!t.key.is_empty() && !t.saving).then_some(grid::Editing {
+                changes: &t.changes,
+                editor: &mut t.editor,
+                kinds: &kinds,
+            });
             let event = grid::show(
                 ui,
                 Id::new(("table-grid", tab_id)),
@@ -2186,7 +2469,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 &mut t.grid,
                 sort,
                 offset,
-                &grid::Source { table: &table_name, sql: Some(&table_sql) },
+                &grid::Source { table: &table_name, sql: Some(&table_sql), relations: &t.relations },
                 editing,
             );
             match event {
@@ -2199,6 +2482,9 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 }
                 Some(GridEvent::Revert { row, col }) => {
                     t.changes.remove(&(row, col));
+                }
+                Some(GridEvent::Follow { relation, rows }) => {
+                    action = Some(follow(&t.relations[relation], rs, &rows));
                 }
                 // Sorting reloads the page, which would drop pending edits.
                 Some(GridEvent::HeaderClicked(_)) if !t.changes.is_empty() => {
@@ -2218,6 +2504,73 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 None => {}
             }
         }
+    }
+    if let Some(a) = related_ui(ui, tab_id, t) {
+        action = Some(a);
+    }
+    action
+}
+
+/// The related-rows popup: a read-only grid of the rows on the other side
+/// of a foreign key, which can follow further relations.
+fn related_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> {
+    let rel = t.related.as_mut()?;
+    let mut action = None;
+    let mut close = false;
+    let screen = ui.ctx().content_rect();
+    let modal = egui::Modal::new(Id::new(("related", tab_id))).show(ui.ctx(), |ui| {
+        ui.set_width((screen.width() * 0.85).min(1400.0));
+        ui.horizontal(|ui| {
+            if !rel.back.is_empty() && ghost_button(ui, "‹ Back").clicked() {
+                action = Some(TabAction::RelatedBack);
+            }
+            ui.label(RichText::new(&rel.target.label).strong());
+            ui.label(RichText::new(&rel.target.filter).monospace().small().color(theme::MUTED()));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if crate::widgets::icon_button(ui, Icon::Close, "Close  Esc").clicked() {
+                    close = true;
+                }
+                if ghost_button(ui, "Open as tab").on_hover_text("Open the table filtered to these rows").clicked() {
+                    action = Some(TabAction::OpenFiltered {
+                        schema: rel.target.schema.clone(),
+                        table: rel.target.table.clone(),
+                        filter: rel.target.filter.clone(),
+                    });
+                    close = true;
+                }
+                if let Some(Ok(rs)) = &rel.data {
+                    let n = rs.rows.len() as i64;
+                    let text = match rel.total {
+                        Some(total) if total > n => format!("first {n} of {total}"),
+                        _ => plural(n as usize, "row"),
+                    };
+                    ui.label(RichText::new(text).small().color(theme::MUTED()));
+                }
+            });
+        });
+        ui.add_space(6.0);
+        let height = (screen.height() * 0.7).max(200.0);
+        ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
+            ui.set_min_height(height);
+            match &rel.data {
+                None => centered(ui, |ui| muted(ui, "loading…")),
+                Some(Err(e)) => {
+                    ui.label(RichText::new(e.as_str()).monospace().color(theme::ERROR()));
+                }
+                Some(Ok(rs)) if rs.rows.is_empty() => centered(ui, |ui| muted(ui, "no related rows")),
+                Some(Ok(rs)) => {
+                    let name = format!("{}.{}", rel.target.schema, rel.target.table);
+                    let source = grid::Source { table: &name, sql: None, relations: &rel.relations };
+                    let event = grid::show(ui, Id::new(("related-grid", tab_id)), rs, &mut rel.grid, None, 0, &source, None);
+                    if let Some(GridEvent::Follow { relation, rows }) = event {
+                        action = Some(follow(&rel.relations[relation], rs, &rows));
+                    }
+                }
+            }
+        });
+    });
+    if close || modal.should_close() {
+        t.related = None;
     }
     action
 }
@@ -2730,6 +3083,86 @@ mod tests {
     //! Drives the real console UI headlessly with keyboard events.
     use super::*;
     use rgrip_core::complete::CatalogTable;
+
+    #[test]
+    fn related_popup() {
+        let s = |v: &str| Some(v.to_string());
+        let rows = |n: usize| ResultSet {
+            columns: vec!["id".into(), "user_id".into()],
+            rows: (0..n).map(|i| vec![Some(i.to_string()), s("5")]).collect(),
+            ..Default::default()
+        };
+        let mut t = TableView::new("public".into(), "users".into(), String::new());
+        t.data = Some(Ok(rows(1)));
+        let target = |label: &str| RelatedTarget {
+            schema: "public".into(),
+            table: "posts".into(),
+            filter: r#""user_id" = '5'"#.into(),
+            label: label.into(),
+        };
+        t.related = Some(Related {
+            target: target("← posts (user_id)"),
+            back: vec![target("previous")],
+            data: Some(Ok(rows(3))),
+            total: Some(3),
+            relations: Vec::new(),
+            grid: GridState::default(),
+        });
+        let ctx = egui::Context::default();
+        let mut frame = |t: &mut TableView, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events,
+                ..Default::default()
+            };
+            let mut action = None;
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| action = table_ui(ui, 1, t));
+            });
+            action
+        };
+        frame(&mut t, vec![]);
+        frame(&mut t, vec![]);
+        // The popup is up, over the tab, with its rows.
+        let modal = ctx.memory(|m| m.area_rect(Id::new(("related", 1u64)))).expect("modal shown");
+        assert!(modal.width() > 900.0 && modal.height() > 400.0, "{modal:?}");
+        // Esc closes it.
+        let esc = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        frame(&mut t, vec![esc]);
+        assert!(t.related.is_none());
+    }
+
+    #[test]
+    fn related_rows_filter() {
+        let s = |v: &str| Some(v.to_string());
+        let users = ResultSet {
+            columns: vec!["id".into(), "name".into()],
+            rows: vec![vec![s("5"), s("a")], vec![s("7"), s("b")]],
+            ..Default::default()
+        };
+        let rel = |outgoing, table: &str, cols: &[(&str, &str)]| Relation {
+            name: "fk".into(),
+            outgoing,
+            other_schema: "public".into(),
+            other_table: table.into(),
+            columns: cols.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+        };
+        // users ← posts.user_id: posts whose user_id is one of these ids.
+        let posts = rel(false, "posts", &[("id", "user_id")]);
+        assert_eq!(related_filter(&posts, &users, &[0]).as_deref(), Some(r#""user_id" = '5'"#));
+        assert_eq!(related_filter(&posts, &users, &[0, 1]).as_deref(), Some(r#""user_id" in ('5', '7')"#));
+        // posts.user_id → users, with a NULL user_id: nothing to open.
+        let post_rows = ResultSet {
+            columns: vec!["id".into(), "user_id".into()],
+            rows: vec![vec![s("1"), None], vec![s("2"), s("7")]],
+            ..Default::default()
+        };
+        let user = rel(true, "users", &[("user_id", "id")]);
+        assert_eq!(related_filter(&user, &post_rows, &[0]), None);
+        assert_eq!(related_filter(&user, &post_rows, &[0, 1]).as_deref(), Some(r#""id" = '7'"#));
+        // A key column that isn't in the result.
+        assert_eq!(related_filter(&rel(true, "x", &[("nope", "id")]), &users, &[0]), None);
+    }
 
     struct Harness {
         ctx: egui::Context,

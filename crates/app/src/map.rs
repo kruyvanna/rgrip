@@ -649,12 +649,12 @@ impl Plugin for Features<'_> {
                             shapes.push(Shape::mesh(mesh));
                         }
                         for ring in &f.rings {
-                            shapes.push(Shape::closed_line(ring.iter().map(screen).collect(), Stroke::new(1.5, color)));
+                            shapes.push(path_shape(ring.iter().map(screen), true, Stroke::new(1.5, color)));
                         }
                     }
                     1 => {
                         for l in &f.lines {
-                            shapes.push(Shape::line(l.iter().map(screen).collect(), Stroke::new(2.5, color)));
+                            shapes.push(path_shape(l.iter().map(screen), false, Stroke::new(2.5, color)));
                         }
                     }
                     _ => {
@@ -668,6 +668,31 @@ impl Plugin for Features<'_> {
             }
         }
         painter.extend(shapes);
+    }
+}
+
+/// A line or ring outline that egui can stroke safely. Repeated vertices
+/// (and a ring's closing point, which egui adds itself) make zero-length
+/// segments; two in a row give the stroke a NaN/infinite corner, drawn as a
+/// spike across the map. Collapsed paths become a dot.
+fn path_shape(points: impl Iterator<Item = Pos2>, closed: bool, stroke: Stroke) -> Shape {
+    let mut pts: Vec<Pos2> = Vec::new();
+    for p in points.filter(|p| p.x.is_finite() && p.y.is_finite()) {
+        if pts.last().is_none_or(|q| q.distance_sq(p) > 1e-4) {
+            pts.push(p);
+        }
+    }
+    if closed {
+        while pts.len() > 1 && pts[0].distance_sq(*pts.last().unwrap()) <= 1e-4 {
+            pts.pop();
+        }
+    }
+    match pts.len() {
+        0 => Shape::Noop,
+        1 => Shape::circle_filled(pts[0], stroke.width.max(1.5), stroke.color),
+        2 => Shape::line_segment([pts[0], pts[1]], stroke),
+        _ if closed => Shape::closed_line(pts, stroke),
+        _ => Shape::line(pts, stroke),
     }
 }
 
@@ -686,4 +711,50 @@ fn in_triangle(p: Pos2, a: Pos2, b: Pos2, c: Pos2) -> bool {
     let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
     let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
     !(neg && pos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::epaint::{TessellationOptions, Tessellator};
+
+    /// Real rings from placemarks (ids 4021, 4104, 4112): a repeated vertex
+    /// next to the closing point used to tessellate to NaN/inf vertices.
+    #[test]
+    fn repeated_vertices_dont_spike() {
+        let rings: [Vec<[f64; 2]>; 3] = [
+            vec![[104.8881900106798,11.5757230297559],[104.8881900106798,11.5757230297559],[104.8881866622101,11.57576302279848],[104.8878748431896,11.57574350274659],[104.8878765571624,11.57570701957044],[104.8881900106798,11.5757230297559]],
+            vec![[104.8881793744038,11.57586940547118],[104.8881690870962,11.5760477149109],[104.8878569281968,11.57603972829357],[104.8878679931232,11.57585340170502],[104.8878679931232,11.57585340170502],[104.8881793744038,11.57586940547118]],
+            vec![[104.8878959432044,11.57609912055814],[104.8878210045372,11.57610007750799],[104.8878210045372,11.57610007750799],[104.887822875971,11.57604262372333],[104.8878228389796,11.57603731721991],[104.8878967401051,11.57604099787687],[104.8878959432044,11.57609912055814]],
+        ];
+        for zoom in [6.0f64, 10.0, 14.0, 18.0, 21.0] {
+            let k = 2f64.powf(zoom) * 256.0 / 360.0;
+            let screen = |c: &[f64; 2]| Pos2::new(((c[0] - 104.88) * k) as f32 + 900.0, ((11.57 - c[1]) * k) as f32 + 600.0);
+            for ring in &rings {
+                let origin = screen(&ring[0]);
+                for (closed, width) in [(true, 1.5), (false, 2.5)] {
+                    let shape = path_shape(ring.iter().map(screen), closed, Stroke::new(width, Color32::WHITE));
+                    let mut mesh = Mesh::default();
+                    Tessellator::new(2.0, TessellationOptions::default(), [1, 1], vec![]).tessellate_shape(shape, &mut mesh);
+                    let size = ring.iter().map(|c| screen(c).distance(origin)).fold(0.0, f32::max);
+                    for v in &mesh.vertices {
+                        assert!(v.pos.x.is_finite() && v.pos.y.is_finite(), "zoom {zoom}: non-finite vertex");
+                        // Nothing strays past the ring plus the stroke.
+                        assert!(v.pos.distance(origin) <= size + 10.0, "zoom {zoom}: spike to {:?}", v.pos);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn collapsed_paths() {
+        let p = Pos2::new(5.0, 5.0);
+        let s = Stroke::new(1.5, Color32::WHITE);
+        assert!(matches!(path_shape([p, p, p].into_iter(), true, s), Shape::Circle(_)));
+        assert!(matches!(path_shape([p, Pos2::new(9.0, 5.0), p].into_iter(), true, s), Shape::LineSegment { .. }));
+        assert!(matches!(path_shape(std::iter::empty(), false, s), Shape::Noop));
+        let nan = Pos2::new(f32::NAN, 1.0);
+        assert!(matches!(path_shape([nan, p].into_iter(), false, s), Shape::Circle(_)));
+    }
 }

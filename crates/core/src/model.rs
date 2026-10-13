@@ -198,6 +198,19 @@ pub struct ColumnInfo {
     pub primary_key: bool,
 }
 
+/// A foreign key touching a table, seen from that table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Relation {
+    pub name: String,
+    /// `true`: this table references `other` (posts.user_id → users).
+    /// `false`: `other` references this table (users ← posts.user_id).
+    pub outgoing: bool,
+    pub other_schema: String,
+    pub other_table: String,
+    /// Column pairs (this table's column, other table's column).
+    pub columns: Vec<(String, String)>,
+}
+
 /// Rows are kept as text (Postgres text protocol), `None` is SQL NULL.
 #[derive(Clone, Debug, Default)]
 pub struct ResultSet {

@@ -68,6 +68,12 @@ pub fn copy_table(ctx: &eframe::egui::Context, rs: &rgrip_core::ResultSet, table
     ));
 }
 
+/// The "Copy as image" PNG, as bytes (for screenshot scenes).
+#[cfg(debug_assertions)]
+pub fn table_png(rs: &rgrip_core::ResultSet) -> Option<Vec<u8>> {
+    render(&rgrip_core::export::svg_for_raster(rs))?.encode_png().ok()
+}
+
 /// `public.png` directly (egui's copy goes through TIFF).
 #[cfg(target_os = "macos")]
 fn copy_png_macos(png: &[u8]) {

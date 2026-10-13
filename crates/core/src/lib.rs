@@ -2,6 +2,7 @@ pub mod commands;
 pub mod complete;
 pub mod config;
 pub mod conn_string;
+pub mod datetime;
 pub mod edit;
 pub mod export;
 pub mod format;

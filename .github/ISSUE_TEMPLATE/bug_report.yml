@@ -1,0 +1,54 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to report this. Please do not paste passwords or private data.
+  - type: input
+    id: version
+    attributes:
+      label: rgrip version
+      description: Shown under the settings menu, or the release you downloaded.
+      placeholder: 0.0.6-alpha
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: macOS 15.1, Apple silicon
+    validations:
+      required: true
+  - type: input
+    id: postgres
+    attributes:
+      label: Postgres / PostGIS version
+      placeholder: PostgreSQL 16.4, PostGIS 3.4
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Connect to ...
+        2. Run ...
+        3. Click ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Screenshot or logs
+      description: Drag and drop an image here, or paste any relevant output.

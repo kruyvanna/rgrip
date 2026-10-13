@@ -8,6 +8,7 @@ use crate::theme;
 use eframe::egui::{self, Align, Id, Label, Layout, RichText, Sense, Stroke, TextStyle, Ui};
 use egui_extras::{Column, TableBuilder};
 use rgrip_core::ResultSet;
+use rgrip_core::datetime::{self as dt, Temporal, TemporalKind};
 use std::collections::{BTreeMap, HashMap};
 
 /// Characters of a value laid out in a cell; a cell shows one line anyway.
@@ -23,6 +24,13 @@ pub struct GridState {
     anchor: Option<usize>,
     /// Column of the last right-clicked cell (for cell actions in the menu).
     menu_col: Option<usize>,
+    /// Frozen (pinned left) columns by name, in the order they were frozen.
+    /// By name so they survive reloads and re-runs.
+    pub frozen: Vec<String>,
+    /// Shared vertical offset of the frozen and scrolling halves.
+    scroll_y: f32,
+    /// One-shot horizontal offset for the scrolling half (screenshot scenes).
+    pub scroll_x: Option<f32>,
     cache: Option<Cache>,
 }
 
@@ -30,6 +38,8 @@ pub struct GridState {
 pub struct Source<'a> {
     pub table: &'a str,
     pub sql: Option<&'a str>,
+    /// Foreign keys of the table, for "Related" in the row menu.
+    pub relations: &'a [rgrip_core::Relation],
 }
 
 /// Per-result-set derived data.
@@ -41,12 +51,20 @@ struct Cache {
     geoms: HashMap<(usize, usize), (String, String)>,
 }
 
+enum Freeze {
+    Add(String),
+    Remove(String),
+    Clear,
+}
+
 pub enum GridEvent {
     HeaderClicked(usize),
     /// A cell was edited (or set to NULL); `value` may equal the original.
     Change { row: usize, col: usize, value: Option<String> },
     /// Drop the pending change of a cell.
     Revert { row: usize, col: usize },
+    /// Open the rows related to `rows` through `source.relations[relation]`.
+    Follow { relation: usize, rows: Vec<usize> },
 }
 
 /// Inline editing, for table tabs whose rows have a primary key.
@@ -55,6 +73,8 @@ pub struct Editing<'a> {
     pub changes: &'a BTreeMap<(usize, usize), Option<String>>,
     /// The cell being edited.
     pub editor: &'a mut Option<CellEditor>,
+    /// Date/time kind of each column, for the picker.
+    pub kinds: &'a [Option<TemporalKind>],
 }
 
 pub struct CellEditor {
@@ -62,12 +82,14 @@ pub struct CellEditor {
     col: usize,
     text: String,
     focus: bool,
+    /// Month shown by the date picker.
+    view: Option<(i32, u32)>,
 }
 
 impl CellEditor {
     /// Start editing a cell with its current (possibly pending) value.
-    fn open(row: usize, col: usize, value: Option<&str>) -> Self {
-        Self { row, col, text: value.unwrap_or_default().to_string(), focus: true }
+    pub(crate) fn open(row: usize, col: usize, value: Option<&str>) -> Self {
+        Self { row, col, text: value.unwrap_or_default().to_string(), focus: true, view: None }
     }
 }
 
@@ -110,6 +132,11 @@ fn column_widths(rs: &ResultSet) -> Vec<f32> {
 }
 
 impl GridState {
+    /// State for a new result: selection and scroll reset, frozen columns kept.
+    pub fn fresh(old: &GridState) -> Self {
+        Self { frozen: old.frozen.clone(), ..Default::default() }
+    }
+
     fn cache(&mut self, rs: &ResultSet) -> &mut Cache {
         let key = (rs as *const ResultSet as usize, rs.rows.len(), rs.columns.len());
         if self.cache.as_ref().is_none_or(|c| c.key != key) {
@@ -150,124 +177,206 @@ pub fn show(
     let mut menu_row = None;
     let geom = !rs.geometry_columns().is_empty();
     let mut menu_col = state.menu_col;
+    // Frozen columns (by name) that exist in this result, in freeze order.
+    let frozen: Vec<usize> = state.frozen.iter().filter_map(|n| rs.columns.iter().position(|c| c == n)).collect();
+    let rest: Vec<usize> = (0..rs.columns.len()).filter(|c| !frozen.contains(c)).collect();
+    let scroll_y = state.scroll_y;
+    let scroll_x = state.scroll_x.take();
     let cache = state.cache(rs);
+    let cache_widths = cache.widths.clone();
     let changes = edit.as_ref().map(|e| e.changes);
+    let kinds = edit.as_ref().map(|e| e.kinds);
     let mut close_editor = false;
 
-    egui::ScrollArea::horizontal()
-        .id_salt(id.with("h"))
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let mut table = TableBuilder::new(ui)
-                .id_salt(id)
-                .striped(true)
-                .resizable(true)
-                .sense(Sense::click())
-                .auto_shrink([false, false])
-                .cell_layout(Layout::left_to_right(Align::Center))
-                .column(Column::exact(gutter_w));
-            for w in &cache.widths {
-                table = table.column(Column::initial(*w).at_least(40.0).clip(true));
-            }
+    let mut freeze: Option<Freeze> = None;
 
-            table
-                .header(row_h + 4.0, |mut header| {
+    // Draws one half: the frozen part (row numbers + frozen columns, no
+    // horizontal scroll) or the scrolling rest. Returns its vertical offset.
+    let mut draw = |ui: &mut Ui, salt: &str, cols: &[usize], gutter: bool| -> f32 {
+        let mut table = TableBuilder::new(ui)
+            .id_salt(id.with(salt))
+            .striped(true)
+            .resizable(!gutter)
+            .sense(Sense::click())
+            .auto_shrink([false, false])
+            .vertical_scroll_offset(scroll_y)
+            .cell_layout(Layout::left_to_right(Align::Center));
+        if gutter {
+            table = table
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .column(Column::exact(gutter_w));
+            for &c in cols {
+                table = table.column(Column::exact(cache.widths[c]).clip(true));
+            }
+        } else {
+            for &c in cols {
+                table = table.column(Column::initial(cache.widths[c]).at_least(40.0).clip(true));
+            }
+        }
+        let out = table
+            .header(row_h + 4.0, |mut header| {
+                if gutter {
                     header.col(|ui| header_bg(ui));
-                    for (i, name) in rs.columns.iter().enumerate() {
-                        header.col(|ui| {
-                            header_bg(ui);
-                            ui.add_space(PAD);
-                            let mut text = name.clone();
-                            if let Some(s) = sort.as_ref().filter(|s| s.column == name) {
-                                text += if s.ascending { "  ↑" } else { "  ↓" };
+                }
+                for &i in cols {
+                    let name = &rs.columns[i];
+                    header.col(|ui| {
+                        header_bg(ui);
+                        ui.add_space(PAD);
+                        let mut text = name.clone();
+                        if let Some(s) = sort.as_ref().filter(|s| s.column == name) {
+                            text += if s.ascending { "  ↑" } else { "  ↓" };
+                        }
+                        let r = ui.add(
+                            Label::new(RichText::new(text).size(12.5).color(theme::TEXT()))
+                                .truncate()
+                                .selectable(false)
+                                .sense(Sense::click()),
+                        );
+                        if r.clicked() {
+                            event = Some(GridEvent::HeaderClicked(i));
+                        }
+                        let is_frozen = frozen.contains(&i);
+                        r.context_menu(|ui| {
+                            ui.label(RichText::new(name).small().color(theme::MUTED()));
+                            if is_frozen {
+                                if ui.button("Unfreeze column").clicked() {
+                                    freeze = Some(Freeze::Remove(name.clone()));
+                                    ui.close();
+                                }
+                            } else if ui
+                                .add_enabled(rest.len() > 1, egui::Button::new("Freeze column"))
+                                .on_hover_text("Keep it on the left while scrolling sideways")
+                                .clicked()
+                            {
+                                freeze = Some(Freeze::Add(name.clone()));
+                                ui.close();
                             }
-                            let r = ui.add(
-                                Label::new(RichText::new(text).size(12.5).color(theme::TEXT()))
-                                    .truncate()
-                                    .selectable(false)
-                                    .sense(Sense::click()),
-                            );
-                            if r.clicked() {
-                                event = Some(GridEvent::HeaderClicked(i));
+                            if !frozen.is_empty() && ui.button("Unfreeze all").clicked() {
+                                freeze = Some(Freeze::Clear);
+                                ui.close();
                             }
                         });
-                    }
-                })
-                .body(|body| {
-                    body.rows(row_h, rs.rows.len(), |mut row| {
-                        let i = row.index();
-                        row.set_selected(selection.contains(&i));
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(row_h, rs.rows.len(), |mut row| {
+                    let i = row.index();
+                    row.set_selected(selection.contains(&i));
+                    if gutter {
                         row.col(|ui| {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.add_space(8.0);
                                 ui.label(RichText::new((row_offset + i + 1).to_string()).size(11.0).color(theme::FAINT()));
                             });
                         });
-                        for (col, value) in rs.rows[i].iter().enumerate() {
-                            let pending = changes.and_then(|c| c.get(&(i, col)));
-                            let value = pending.map_or(value.as_deref(), |v| v.as_deref());
-                            let editing = edit.as_mut().and_then(|e| e.editor.as_mut()).filter(|ed| ed.row == i && ed.col == col);
-                            let (_, cell_resp) = row.col(|ui| {
-                                if pending.is_some() {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, theme::ACCENT().gamma_multiply(0.16));
-                                }
-                                ui.add_space(PAD);
-                                match editing {
-                                    Some(ed) => {
-                                        if let EditorOutcome::Close(e) = cell_editor(ui, ed, rs.rows[i][col].as_deref()) {
-                                            close_editor = true;
-                                            if e.is_some() {
-                                                event = e;
-                                            }
+                    }
+                    for &col in cols {
+                        let pending = changes.and_then(|c| c.get(&(i, col)));
+                        let kind = kinds.and_then(|k| k.get(col).copied().flatten());
+                        let value = pending.map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
+                        let editing = edit.as_mut().and_then(|e| e.editor.as_mut()).filter(|ed| ed.row == i && ed.col == col);
+                        let (_, cell_resp) = row.col(|ui| {
+                            if pending.is_some() {
+                                ui.painter().rect_filled(ui.max_rect(), 0.0, theme::ACCENT().gamma_multiply(0.16));
+                            }
+                            ui.add_space(PAD);
+                            match editing {
+                                Some(ed) => {
+                                    if let EditorOutcome::Close(e) = cell_editor(ui, ed, rs.rows[i][col].as_deref(), kind) {
+                                        close_editor = true;
+                                        if e.is_some() {
+                                            event = e;
                                         }
                                     }
-                                    None => cell(ui, cache, i, col, value),
                                 }
-                            });
-                            if cell_resp.double_clicked()
-                                && !cache.geom_cols.contains(&col)
-                                && let Some(e) = edit.as_mut()
-                            {
-                                *e.editor = Some(CellEditor::open(i, col, value));
+                                None => cell(ui, cache, i, col, value),
                             }
-                            if cell_resp.secondary_clicked() {
-                                menu_col = Some(col);
-                            }
-                        }
-                        let response = row.response();
-                        if response.clicked() {
-                            clicked_row = Some(i);
-                        }
-                        if response.secondary_clicked() {
-                            menu_row = Some(i);
-                        }
-                        response.context_menu(|ui| {
-                            // Cell actions for the right-clicked cell.
-                            if let (Some(e), Some(col)) = (edit.as_mut(), menu_col.filter(|c| !cache.geom_cols.contains(c))) {
-                                let pending = e.changes.get(&(i, col));
-                                let value = pending.map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
-                                ui.label(RichText::new(&rs.columns[col]).small().color(theme::MUTED()));
-                                if ui.button("Edit cell").on_hover_text("Or double-click it").clicked() {
-                                    *e.editor = Some(CellEditor::open(i, col, value));
-                                    ui.close();
-                                }
-                                if ui.add_enabled(value.is_some(), egui::Button::new("Set NULL")).clicked() {
-                                    event = Some(GridEvent::Change { row: i, col, value: None });
-                                    ui.close();
-                                }
-                                if pending.is_some() && ui.button("Revert cell").clicked() {
-                                    event = Some(GridEvent::Revert { row: i, col });
-                                    ui.close();
-                                }
-                                ui.separator();
-                            }
-                            // The menu acts on the selection (or just this row).
-                            let rows: Vec<usize> = if selection.contains(&i) { selection.iter().copied().collect() } else { vec![i] };
-                            rows_menu(ui, rs, &rows, source, geom);
                         });
+                        if cell_resp.double_clicked()
+                            && !cache.geom_cols.contains(&col)
+                            && let Some(e) = edit.as_mut()
+                        {
+                            *e.editor = Some(CellEditor::open(i, col, value));
+                        }
+                        if cell_resp.secondary_clicked() {
+                            menu_col = Some(col);
+                        }
+                    }
+                    let response = row.response();
+                    if response.clicked() {
+                        clicked_row = Some(i);
+                    }
+                    if response.secondary_clicked() {
+                        menu_row = Some(i);
+                    }
+                    response.context_menu(|ui| {
+                        // Cell actions for the right-clicked cell.
+                        if let (Some(e), Some(col)) = (edit.as_mut(), menu_col.filter(|c| !cache.geom_cols.contains(c))) {
+                            let pending = e.changes.get(&(i, col));
+                            let value = pending.map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
+                            ui.label(RichText::new(&rs.columns[col]).small().color(theme::MUTED()));
+                            if ui.button("Edit cell").on_hover_text("Or double-click it").clicked() {
+                                *e.editor = Some(CellEditor::open(i, col, value));
+                                ui.close();
+                            }
+                            if ui.add_enabled(value.is_some(), egui::Button::new("Set NULL")).clicked() {
+                                event = Some(GridEvent::Change { row: i, col, value: None });
+                                ui.close();
+                            }
+                            if pending.is_some() && ui.button("Revert cell").clicked() {
+                                event = Some(GridEvent::Revert { row: i, col });
+                                ui.close();
+                            }
+                            ui.separator();
+                        }
+                        // The menu acts on the selection (or just this row).
+                        let rows: Vec<usize> = if selection.contains(&i) { selection.iter().copied().collect() } else { vec![i] };
+                        if let Some(e) = rows_menu(ui, rs, &rows, source, geom) {
+                            event = Some(e);
+                        }
                     });
                 });
+            });
+        out.state.offset.y
+    };
+
+    let left_w = gutter_w + frozen.iter().map(|&c| cache_widths[c]).sum::<f32>();
+    let mut offsets = [scroll_y; 2];
+    ui.horizontal_top(|ui| {
+        let h = ui.available_height();
+        ui.allocate_ui_with_layout(egui::vec2(left_w, h), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(left_w);
+            offsets[0] = draw(ui, "frozen", &frozen, true);
         });
+        if !frozen.is_empty() {
+            // Edge of the frozen block.
+            let x = ui.cursor().left();
+            ui.painter().vline(x, ui.max_rect().y_range(), Stroke::new(1.5, theme::ACCENT().gamma_multiply(0.6)));
+        }
+        let mut scroll = egui::ScrollArea::horizontal().id_salt(id.with("h")).auto_shrink([false, false]);
+        if let Some(x) = scroll_x {
+            scroll = scroll.horizontal_scroll_offset(x);
+        }
+        scroll
+            .show(ui, |ui| {
+                // The table stacks header and body: it needs a vertical layout.
+                ui.vertical(|ui| offsets[1] = draw(ui, "main", &rest, false));
+            });
+    });
+    // Whichever half was scrolled leads; the other follows next frame.
+    let moved = offsets.iter().copied().find(|y| (y - scroll_y).abs() > 0.5);
+    if let Some(y) = moved {
+        state.scroll_y = y;
+        ui.ctx().request_repaint();
+    }
+    match freeze {
+        Some(Freeze::Add(name)) => state.frozen.push(name),
+        Some(Freeze::Remove(name)) => state.frozen.retain(|n| *n != name),
+        Some(Freeze::Clear) => state.frozen.clear(),
+        None => {}
+    }
     state.menu_col = menu_col;
     if close_editor && let Some(e) = edit.as_mut() {
         *e.editor = None;
@@ -298,11 +407,27 @@ pub fn show(
 }
 
 /// Copy / export actions for the given rows.
-fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, geom: bool) {
+fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, geom: bool) -> Option<GridEvent> {
     use rgrip_core::export::{self, Format};
     let n = rows.len();
     let subset = || export::subset(rs, rows);
     let noun = if n == 1 { "row".to_string() } else { format!("{n} rows") };
+    let mut event = None;
+    if !source.relations.is_empty() {
+        ui.menu_button("Related", |ui| {
+            for (i, r) in source.relations.iter().enumerate() {
+                let cols: Vec<&str> = r.columns.iter().map(|(here, there)| if r.outgoing { here.as_str() } else { there.as_str() }).collect();
+                let other = if r.other_schema == "public" { r.other_table.clone() } else { format!("{}.{}", r.other_schema, r.other_table) };
+                let (arrow, hover) = if r.outgoing { ("→", "Rows these rows reference") } else { ("←", "Rows that reference these rows") };
+                let label = format!("{arrow} {other}  ({})", cols.join(", "));
+                if ui.button(label).on_hover_text(format!("{hover}\n{}", r.name)).clicked() {
+                    event = Some(GridEvent::Follow { relation: i, rows: rows.to_vec() });
+                    ui.close();
+                }
+            }
+        });
+        ui.separator();
+    }
     if ui.button(format!("Copy {noun}")).on_hover_text("Tab-separated  ⌘C").clicked() {
         ui.ctx().copy_text(rows_tsv(rs, rows, false));
         ui.close();
@@ -356,6 +481,7 @@ fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, g
             }
         }
     });
+    event
 }
 
 fn rows_tsv(rs: &ResultSet, rows: &[usize], header: bool) -> String {
@@ -405,7 +531,7 @@ fn cell(ui: &mut Ui, cache: &mut Cache, row: usize, col: usize, value: Option<&s
 
 /// The in-cell text field. Enter (or clicking away) keeps the edit, Esc
 /// drops it; either way the editor closes.
-fn cell_editor(ui: &mut Ui, ed: &mut CellEditor, original: Option<&str>) -> EditorOutcome {
+fn cell_editor(ui: &mut Ui, ed: &mut CellEditor, original: Option<&str>, kind: Option<TemporalKind>) -> EditorOutcome {
     let out = egui::TextEdit::singleline(&mut ed.text)
         .font(TextStyle::Monospace)
         .frame(false)
@@ -421,16 +547,143 @@ fn cell_editor(ui: &mut Ui, ed: &mut CellEditor, original: Option<&str>) -> Edit
         state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(n))));
         state.store(ui.ctx(), r.id);
     }
-    ui.painter().rect_stroke(ui.max_rect().shrink(1.0), 2.0, Stroke::new(1.0, theme::ACCENT()), egui::StrokeKind::Inside);
-    if !r.lost_focus() {
-        return EditorOutcome::Editing;
-    }
+    let cell = ui.max_rect();
+    ui.painter().rect_stroke(cell.shrink(1.0), 2.0, Stroke::new(1.0, theme::ACCENT()), egui::StrokeKind::Inside);
+    // An empty edit of a NULL keeps it NULL.
+    let commit = |ed: &CellEditor| {
+        let value = if ed.text.is_empty() && original.is_none() { None } else { Some(ed.text.clone()) };
+        EditorOutcome::Close(Some(GridEvent::Change { row: ed.row, col: ed.col, value }))
+    };
+    let Some(kind) = kind else {
+        if !r.lost_focus() {
+            return EditorOutcome::Editing;
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return EditorOutcome::Close(None);
+        }
+        return commit(ed);
+    };
+    // Date/time: the picker takes clicks, so losing text focus doesn't end
+    // the edit. Enter / Done / a click elsewhere keeps it, Esc drops it.
+    let (popup, done) = picker(ui, cell, ed, kind);
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         return EditorOutcome::Close(None);
     }
-    // An empty edit of a NULL keeps it NULL.
-    let value = if ed.text.is_empty() && original.is_none() { None } else { Some(ed.text.clone()) };
-    EditorOutcome::Close(Some(GridEvent::Change { row: ed.row, col: ed.col, value }))
+    let clicked_away = ui.input(|i| {
+        i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !cell.contains(p) && !popup.contains(p))
+    });
+    if done || clicked_away || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        return commit(ed);
+    }
+    EditorOutcome::Editing
+}
+
+const MONTHS: [&str; 12] =
+    ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/// Local wall-clock now and the local UTC offset, in seconds.
+fn now_local() -> (i64, i64) {
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    #[cfg(unix)]
+    {
+        let t = unix as libc::time_t;
+        let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+        // SAFETY: localtime_r writes into `tm` and returns null on failure.
+        if !unsafe { libc::localtime_r(&t, tm.as_mut_ptr()) }.is_null() {
+            #[allow(clippy::unnecessary_cast)] // `c_long` isn't i64 everywhere
+            return (unix, unsafe { tm.assume_init() }.tm_gmtoff as i64);
+        }
+    }
+    (unix, 0)
+}
+
+/// Calendar and/or time fields under the cell. Edits `ed.text`; returns the
+/// popup's rect and whether Done was clicked.
+fn picker(ui: &Ui, cell: egui::Rect, ed: &mut CellEditor, kind: TemporalKind) -> (egui::Rect, bool) {
+    let (unix, offset) = now_local();
+    let now = dt::from_unix(unix, offset);
+    let parsed = dt::parse(kind, &ed.text);
+    // Unparseable text (empty, `infinity`, …): start from now.
+    let mut t = parsed.clone().unwrap_or_else(|| Temporal { frac: String::new(), ..now.clone() });
+    if parsed.is_none() && !kind.has_tz() {
+        t.tz.clear();
+    }
+    let (mut vy, mut vm) = ed.view.unwrap_or((t.year, t.month));
+    let mut changed = false;
+    let mut done = false;
+    let area = egui::Area::new(Id::new(("cell-picker", ed.row, ed.col)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(cell.left_bottom() + egui::vec2(0.0, 2.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                if kind.has_date() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("‹").clicked() {
+                            (vy, vm) = if vm == 1 { (vy - 1, 12) } else { (vy, vm - 1) };
+                        }
+                        let title = format!("{} {vy}", MONTHS[vm as usize - 1]);
+                        ui.add_sized([150.0, 18.0], Label::new(RichText::new(title).strong()));
+                        if ui.small_button("›").clicked() {
+                            (vy, vm) = if vm == 12 { (vy + 1, 1) } else { (vy, vm + 1) };
+                        }
+                    });
+                    egui::Grid::new("days").spacing([2.0, 2.0]).show(ui, |ui| {
+                        for d in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] {
+                            ui.add_sized([26.0, 16.0], Label::new(RichText::new(d).small().color(theme::FAINT())));
+                        }
+                        ui.end_row();
+                        let lead = dt::weekday(vy, vm, 1);
+                        for _ in 0..lead {
+                            ui.label("");
+                        }
+                        for d in 1..=dt::days_in_month(vy, vm) {
+                            let selected = parsed.is_some() && (t.year, t.month, t.day) == (vy, vm, d);
+                            let today = (now.year, now.month, now.day) == (vy, vm, d);
+                            let mut b = egui::Button::new(RichText::new(d.to_string()).size(12.0)).selected(selected).min_size(egui::vec2(26.0, 22.0));
+                            if today && !selected {
+                                b = b.stroke(Stroke::new(1.0, theme::ACCENT()));
+                            }
+                            if ui.add(b).clicked() {
+                                (t.year, t.month, t.day) = (vy, vm, d);
+                                changed = true;
+                            }
+                            if (lead + d) % 7 == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                }
+                if kind.has_time() {
+                    ui.horizontal(|ui| {
+                        let two = |n: f64, _| format!("{:02}", n as u32);
+                        changed |= ui.add(egui::DragValue::new(&mut t.hour).range(0..=23).custom_formatter(two)).changed();
+                        ui.label(":");
+                        changed |= ui.add(egui::DragValue::new(&mut t.minute).range(0..=59).custom_formatter(two)).changed();
+                        ui.label(":");
+                        changed |= ui.add(egui::DragValue::new(&mut t.second).range(0..=59).custom_formatter(two)).changed();
+                        if kind.has_tz() && !t.tz.is_empty() {
+                            ui.label(RichText::new(&t.tz).color(theme::MUTED()));
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    let label = if kind.has_time() { "Now" } else { "Today" };
+                    if ui.button(label).clicked() {
+                        t = Temporal { frac: String::new(), ..now.clone() };
+                        (vy, vm) = (t.year, t.month);
+                        changed = true;
+                    }
+                    let fill = egui::Button::new(RichText::new("Done").color(theme::BG())).fill(theme::ACCENT());
+                    done = ui.add(fill).on_hover_text("Enter").clicked();
+                });
+            });
+        });
+    if changed {
+        ed.text = dt::format(kind, &t);
+    }
+    ed.view = Some((vy, vm));
+    (area.response.rect, done)
 }
 
 enum EditorOutcome {
@@ -487,7 +740,7 @@ mod tests {
         };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None }, None);
+                show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[] }, None);
             });
         });
     }
@@ -536,6 +789,7 @@ mod tests {
         editor: &mut Option<CellEditor>,
         events: Vec<egui::Event>,
         time: f64,
+        kinds: &[Option<TemporalKind>],
     ) -> Option<GridEvent> {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
@@ -546,8 +800,8 @@ mod tests {
         let mut out = None;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let edit = Some(Editing { changes, editor: &mut *editor });
-                out = show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None }, edit);
+                let edit = Some(Editing { changes, editor: &mut *editor, kinds });
+                out = show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[] }, edit);
             });
         });
         out
@@ -567,7 +821,7 @@ mod tests {
         let mut t = 0.0;
         let mut step = |events: Vec<egui::Event>, editor: &mut Option<CellEditor>, st: &mut GridState| {
             t += 0.05;
-            frame_edit(&ctx, &rs, st, &changes, editor, events, t)
+            frame_edit(&ctx, &rs, st, &changes, editor, events, t, &[None, None])
         };
         step(vec![], &mut editor, &mut st);
         // Double-click row 2's "name" cell (x = 120 is past the gutter and id column).
@@ -600,6 +854,85 @@ mod tests {
         let esc = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
         assert!(step(vec![esc], &mut editor, &mut st).is_none());
         assert!(editor.is_none());
+    }
+
+    #[test]
+    fn date_picker() {
+        let rs = ResultSet {
+            columns: vec!["id".into(), "due".into()],
+            rows: vec![vec![Some("1".into()), Some("2024-02-10".into())]],
+            ..Default::default()
+        };
+        let kinds = [None, Some(TemporalKind::Date)];
+        let ctx = egui::Context::default();
+        let mut st = GridState::default();
+        let changes = BTreeMap::new();
+        let mut editor = Some(CellEditor::open(0, 1, Some("2024-02-10")));
+        let mut t = 0.0;
+        let mut step = |events: Vec<egui::Event>, editor: &mut Option<CellEditor>| {
+            t += 0.05;
+            frame_edit(&ctx, &rs, &mut st, &changes, editor, events, t, &kinds)
+        };
+        step(vec![], &mut editor);
+        step(vec![], &mut editor);
+        let popup = ctx.memory(|m| m.area_rect(Id::new(("cell-picker", 0usize, 1usize)))).expect("picker shown");
+        assert!(popup.height() > 150.0, "calendar rows: {popup:?}");
+        // Clicking inside the picker keeps the editor open.
+        let inside = popup.center_top() + egui::vec2(0.0, 8.0);
+        let press = |pressed| egui::Event::PointerButton { pos: inside, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        step(vec![egui::Event::PointerMoved(inside)], &mut editor);
+        step(vec![press(true)], &mut editor);
+        step(vec![press(false)], &mut editor);
+        assert!(editor.is_some());
+        // Typed text and Enter still work.
+        editor.as_mut().unwrap().text = "2024-02-29".into();
+        let enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        match step(vec![enter], &mut editor) {
+            Some(GridEvent::Change { value: Some(v), .. }) => assert_eq!(v, "2024-02-29"),
+            _ => panic!("expected a change"),
+        }
+        assert!(editor.is_none());
+        // Esc cancels.
+        editor = Some(CellEditor::open(0, 1, Some("2024-02-10")));
+        step(vec![], &mut editor);
+        let esc = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        assert!(step(vec![esc], &mut editor).is_none());
+        assert!(editor.is_none());
+    }
+
+    #[test]
+    fn frozen_columns_scroll_together() {
+        let rs = ResultSet {
+            columns: vec!["id".into(), "name".into(), "note".into()],
+            rows: (0..200).map(|i| vec![Some(i.to_string()), Some(format!("row {i}")), Some("x".repeat(80))]).collect(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut st = GridState { frozen: vec!["note".into()], ..Default::default() };
+        frame(&ctx, &rs, &mut st, vec![]);
+        frame(&ctx, &rs, &mut st, vec![]);
+        // Wheel over the scrolling half (right side): both halves follow.
+        let over = egui::pos2(700.0, 300.0);
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -400.0), modifiers: egui::Modifiers::NONE };
+        frame(&ctx, &rs, &mut st, vec![egui::Event::PointerMoved(over), wheel]);
+        for _ in 0..30 {
+            frame(&ctx, &rs, &mut st, vec![]);
+        }
+        let y = st.scroll_y;
+        assert!(y > 100.0, "scrolled: {y}");
+        // A click in the frozen half selects the row shown there.
+        let h = ctx.style().text_styles[&TextStyle::Monospace].size;
+        let row_h = ctx.fonts_mut(|f| f.row_height(&egui::FontId::monospace(h))) + 10.0;
+        let target = 8.0 + row_h + 4.0 + row_h * 2.5; // third visible row
+        let pos = egui::pos2(120.0, target);
+        let press = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(&ctx, &rs, &mut st, vec![egui::Event::PointerMoved(pos)]);
+        frame(&ctx, &rs, &mut st, vec![press(true)]);
+        frame(&ctx, &rs, &mut st, vec![press(false)]);
+        let expected = ((y + row_h * 2.5) / row_h) as usize;
+        assert_eq!(st.selection.iter().copied().collect::<Vec<_>>(), [expected], "scroll {y}, row_h {row_h}");
+        // Freezing survives a new result with the same column names.
+        assert_eq!(st.frozen, ["note"]);
     }
 
     #[test]
@@ -663,7 +996,7 @@ mod perf {
             let start = Instant::now();
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    show(ui, egui::Id::new("perf"), &rs, &mut state, None, 0, &Source { table: "t", sql: None }, None);
+                    show(ui, egui::Id::new("perf"), &rs, &mut state, None, 0, &Source { table: "t", sql: None, relations: &[] }, None);
                 });
             });
             // Tessellation runs every frame in the real app too.

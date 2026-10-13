@@ -32,9 +32,49 @@ pub fn update_sql(schema: &str, table: &str, key: &[(&str, Option<&str>)], set: 
     )
 }
 
+/// WHERE clause matching any of `rows`, each a list of (column, value)
+/// pairs: `"user_id" = '5'`, `"user_id" in ('5', '7')`, or OR-ed groups
+/// for multi-column keys. `None` when no row has a complete (non-NULL) key.
+pub fn match_rows(rows: &[Vec<(&str, Option<&str>)>]) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    let rows: Vec<&Vec<(&str, Option<&str>)>> = rows
+        .iter()
+        .filter(|r| !r.is_empty() && r.iter().all(|(_, v)| v.is_some()))
+        .filter(|r| seen.insert(r.iter().map(|(_, v)| *v).collect::<Vec<_>>()))
+        .collect();
+    let first = rows.first()?;
+    if first.len() == 1 {
+        let col = quote_ident(first[0].0);
+        let values: Vec<String> = rows.iter().map(|r| literal(r[0].1)).collect();
+        return Some(match values.as_slice() {
+            [one] => format!("{col} = {one}"),
+            _ => format!("{col} in ({})", values.join(", ")),
+        });
+    }
+    let groups: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let conds: Vec<String> = r.iter().map(|(c, v)| format!("{} = {}", quote_ident(c), literal(*v))).collect();
+            format!("({})", conds.join(" and "))
+        })
+        .collect();
+    Some(groups.join(" or "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matches_rows() {
+        assert_eq!(match_rows(&[vec![("user_id", Some("5"))]]).unwrap(), r#""user_id" = '5'"#);
+        let rows = [vec![("id", Some("5"))], vec![("id", Some("7"))], vec![("id", Some("5"))], vec![("id", None)]];
+        assert_eq!(match_rows(&rows).unwrap(), r#""id" in ('5', '7')"#);
+        let rows = [vec![("a", Some("1")), ("b", Some("x"))], vec![("a", Some("2")), ("b", Some("y"))]];
+        assert_eq!(match_rows(&rows).unwrap(), r#"("a" = '1' and "b" = 'x') or ("a" = '2' and "b" = 'y')"#);
+        assert_eq!(match_rows(&[vec![("id", None)]]), None);
+        assert_eq!(match_rows(&[]), None);
+    }
 
     #[test]
     fn builds_updates() {

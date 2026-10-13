@@ -3,5 +3,11 @@ resolver = "2"
 members = ["crates/core", "crates/app"]
 
 [workspace.package]
-version = "0.0.6-alpha"
+version = "0.0.7-alpha"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yoouTaro/rgrip"
+homepage = "https://yoouTaro.github.io/rgrip/"
+description = "Minimal DataGrip-style PostgreSQL client in Rust (egui) with PostGIS map and Khmer support."
+keywords = ["postgres", "postgis", "database", "gui", "egui"]
+categories = ["database", "gui"]

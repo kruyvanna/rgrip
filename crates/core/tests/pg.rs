@@ -111,6 +111,28 @@ async fn end_to_end() {
         let err = conn.execute("select 1;\nselect nope").await.unwrap_err();
         assert!(err.contains("42703") && err.contains("line 2"), "{err}");
 
+        // Foreign keys, both directions, including a self-reference.
+        conn.execute(&format!(
+            "create table {schema}.users (id int primary key, boss int references {schema}.users);
+             create table {schema}.posts (id int primary key, user_id int references {schema}.users,
+                                          a int, b int, unique (a, b));
+             create table {schema}.notes (id int primary key, pa int, pb int,
+                                          constraint notes_post foreign key (pa, pb) references {schema}.posts (a, b));"
+        ))
+        .await
+        .unwrap();
+        let rel = conn.relations(&schema, "users").await.unwrap();
+        let brief: Vec<(bool, &str, Vec<(String, String)>)> =
+            rel.iter().map(|r| (r.outgoing, r.other_table.as_str(), r.columns.clone())).collect();
+        let pair = |a: &str, b: &str| vec![(a.to_string(), b.to_string())];
+        assert_eq!(
+            brief,
+            [(true, "users", pair("boss", "id")), (false, "posts", pair("id", "user_id")), (false, "users", pair("id", "boss"))]
+        );
+        let rel = conn.relations(&schema, "notes").await.unwrap();
+        assert_eq!(rel[0].columns, [("pa".to_string(), "a".to_string()), ("pb".to_string(), "b".to_string())]);
+        assert!(conn.relations(&schema, "items").await.unwrap().is_empty());
+
         // Inline edits: all-or-nothing, one row each.
         use rgrip_core::edit::update_sql;
         let names = || async {

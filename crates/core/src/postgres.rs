@@ -266,6 +266,53 @@ impl PgConn {
             .collect())
     }
 
+    /// Foreign keys from and to a table (a self-reference appears both ways).
+    pub async fn relations(&self, schema: &str, table: &str) -> Result<Vec<Relation>, String> {
+        // `cols(rel, keys)`: attribute names of `keys` in `rel`, in key order.
+        let rows = self
+            .client
+            .query(
+                "with t as (
+                   select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                   where n.nspname = $1 and c.relname = $2
+                 ), fk as (
+                   select con.conname, true as outgoing, con.confrelid as other,
+                          con.conrelid as here_rel, con.conkey as here, con.confkey as there
+                   from pg_constraint con join t on con.conrelid = t.oid where con.contype = 'f'
+                   union all
+                   select con.conname, false, con.conrelid,
+                          con.confrelid, con.confkey, con.conkey
+                   from pg_constraint con join t on con.confrelid = t.oid where con.contype = 'f'
+                 )
+                 select fk.conname::text, fk.outgoing, n.nspname::text, c.relname::text,
+                        array(select a.attname::text from unnest(fk.here) with ordinality k(num, i)
+                              join pg_attribute a on a.attrelid = fk.here_rel and a.attnum = k.num order by k.i),
+                        array(select a.attname::text from unnest(fk.there) with ordinality k(num, i)
+                              join pg_attribute a on a.attrelid = fk.other and a.attnum = k.num order by k.i)
+                 from fk
+                 join pg_class c on c.oid = fk.other
+                 join pg_namespace n on n.oid = c.relnamespace
+                 order by fk.outgoing desc, c.relname, fk.conname",
+                &[&schema, &table],
+            )
+            .await
+            .map_err(|e| format_error(&e, None))?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let here: Vec<String> = r.get(4);
+                let there: Vec<String> = r.get(5);
+                Relation {
+                    name: r.get(0),
+                    outgoing: r.get(1),
+                    other_schema: r.get(2),
+                    other_table: r.get(3),
+                    columns: here.into_iter().zip(there).collect(),
+                }
+            })
+            .collect())
+    }
+
     pub async fn columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
         let rows = self
             .client

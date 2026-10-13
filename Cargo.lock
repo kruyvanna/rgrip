@@ -4363,12 +4363,13 @@ dependencies = [
 
 [[package]]
 name = "rgrip"
-version = "0.0.6-alpha"
+version = "0.0.7-alpha"
 dependencies = [
  "ab_glyph",
  "earcutr",
  "eframe",
  "egui_extras",
+ "libc",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "resvg 0.48.1",
@@ -4381,7 +4382,7 @@ dependencies = [
 
 [[package]]
 name = "rgrip-core"
-version = "0.0.6-alpha"
+version = "0.0.7-alpha"
 dependencies = [
  "directories",
  "reqwest",

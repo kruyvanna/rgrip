@@ -20,7 +20,8 @@ pub enum Cmd {
     Catalog(ConnId),
     /// `page: Some(offset)` fetches one page of a read-only query.
     Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize> },
-    TableData { conn: ConnId, tab: TabId, query: TableQuery },
+    /// `modal`: for the tab's related-rows popup rather than the tab itself.
+    TableData { conn: ConnId, tab: TabId, query: TableQuery, modal: bool },
     /// Inline-edit UPDATEs, applied in one transaction.
     SaveEdits { conn: ConnId, tab: TabId, statements: Vec<String> },
     Cancel(ConnId),
@@ -42,11 +43,12 @@ pub enum Ev {
     Columns { conn: ConnId, schema: String, table: String, result: Result<Vec<ColumnInfo>, String> },
     Catalog { conn: ConnId, result: Result<Catalog, String> },
     QueryDone { tab: TabId, result: Result<QueryOutput, String> },
-    /// `key`: the table's primary key columns (empty: no key, read-only).
-    TablePage { tab: TabId, result: Result<ResultSet, String>, key: Vec<String> },
+    /// `columns`: the table's columns (primary key and types, for editing).
+    /// `relations`: foreign keys from and to the table.
+    TablePage { tab: TabId, modal: bool, result: Result<ResultSet, String>, columns: Vec<ColumnInfo>, relations: Vec<Relation> },
     /// Rows updated, or why nothing was saved.
     EditsSaved { tab: TabId, result: Result<usize, String> },
-    TableCount { tab: TabId, result: Result<i64, String> },
+    TableCount { tab: TabId, modal: bool, result: Result<i64, String> },
     /// Path and row count, or an error.
     Exported(Result<(std::path::PathBuf, usize), String>),
     UpdateChecked(Result<Option<rgrip_core::update::Release>, String>),
@@ -179,21 +181,19 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::QueryDone { tab, result });
         }
-        Cmd::TableData { conn, tab, query } => {
+        Cmd::TableData { conn, tab, query, modal } => {
             let c = match get(&conns, &conn) {
                 Ok(c) => c,
-                Err(e) => return emit.send(Ev::TablePage { tab, result: Err(e), key: Vec::new() }),
+                Err(e) => return emit.send(Ev::TablePage { tab, modal, result: Err(e), columns: Vec::new(), relations: Vec::new() }),
             };
             let page = c.table_page(&query).await;
             let ok = page.is_ok();
-            let key = match c.columns(&query.schema, &query.table).await {
-                Ok(cols) => cols.into_iter().filter(|c| c.primary_key).map(|c| c.name).collect(),
-                Err(_) => Vec::new(),
-            };
-            emit.send(Ev::TablePage { tab, result: page, key });
+            let columns = c.columns(&query.schema, &query.table).await.unwrap_or_default();
+            let relations = c.relations(&query.schema, &query.table).await.unwrap_or_default();
+            emit.send(Ev::TablePage { tab, modal, result: page, columns, relations });
             if ok {
                 let count = c.table_count(&query).await;
-                emit.send(Ev::TableCount { tab, result: count });
+                emit.send(Ev::TableCount { tab, modal, result: count });
             }
         }
         Cmd::SaveEdits { conn, tab, statements } => {
