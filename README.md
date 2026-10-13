@@ -2,7 +2,7 @@
 
 <h1 align="center">rgrip</h1>
 
-<p align="center"><b>A minimal DataGrip-style PostgreSQL client in Rust (egui), with a PostGIS map and Khmer support.</b></p>
+<p align="center"><b>PostGIS, without opening QGIS.</b><br>A tiny native PostgreSQL client in Rust that puts any query's geometry on a map.</p>
 
 <p align="center">
   <a href="https://github.com/yoouTaro/rgrip/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/yoouTaro/rgrip?include_prereleases&label=release"></a>
@@ -20,6 +20,13 @@
 </p>
 
 <p align="center"><img src="docs/screenshots/hero.png" alt="rgrip screenshot" width="900"></p>
+
+## Why rgrip
+
+- **Tiny and native.** A 9 MB download, about 75 MB of memory at idle, 0% CPU when idle. One Rust binary: no JVM, no Electron. (Measured on 0.0.7, Apple silicon.)
+- **GIS-first.** Geometry is readable in the grid and goes on a map from any query. UTM and Web Mercator are reprojected on the fly, ArcGIS `st_geometry` is one slash command away, and swapped lat/lon gets flagged.
+- **Made for sharing.** Copy rows as an image for Telegram or Slack, or as markdown for an AI agent.
+- **Free and open source**, and openly vibe-coded.
 
 ## Features
 

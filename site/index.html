@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>rgrip — a minimal DataGrip-style PostgreSQL client with PostGIS maps</title>
-  <meta name="description" content="Minimal DataGrip-style PostgreSQL client in Rust (egui) with a PostGIS map. Native macOS app, open source, MIT OR Apache-2.0.">
+  <title>rgrip: PostGIS, without opening QGIS</title>
+  <meta name="description" content="A tiny (9 MB) native PostgreSQL client that puts your PostGIS data on a map. Free and open source.">
   <meta name="theme-color" content="#1c1c1e">
   <link rel="icon" type="image/png" href="img/icon.png">
   <link rel="apple-touch-icon" href="img/icon.png">
@@ -12,13 +12,13 @@
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="rgrip">
-  <meta property="og:title" content="rgrip — PostgreSQL + PostGIS client in Rust">
-  <meta property="og:description" content="Minimal DataGrip-style PostgreSQL client in Rust (egui) with a PostGIS map.">
+  <meta property="og:title" content="rgrip: PostGIS, without opening QGIS">
+  <meta property="og:description" content="A tiny (9 MB) native PostgreSQL client that puts your PostGIS data on a map. Free and open source.">
   <meta property="og:url" content="https://yoouTaro.github.io/rgrip/">
   <meta property="og:image" content="https://yoouTaro.github.io/rgrip/img/hero.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="rgrip — PostgreSQL + PostGIS client in Rust">
-  <meta name="twitter:description" content="Minimal DataGrip-style PostgreSQL client in Rust (egui) with a PostGIS map.">
+  <meta name="twitter:title" content="rgrip: PostGIS, without opening QGIS">
+  <meta name="twitter:description" content="A tiny (9 MB) native PostgreSQL client that puts your PostGIS data on a map. Free and open source.">
   <meta name="twitter:image" content="https://yoouTaro.github.io/rgrip/img/hero.png">
 
   <link rel="stylesheet" href="style.css">
@@ -46,14 +46,20 @@
   <main id="main">
     <section class="hero" id="top">
       <div class="wrap">
-        <p class="eyebrow">Open source · Native macOS · Rust</p>
-        <h1>The PostgreSQL client that <span class="grad">speaks geometry</span>.</h1>
-        <p class="lead">A minimal, DataGrip-style PostgreSQL client built in Rust with egui. Query, edit and follow relations — then see your PostGIS data on a map.</p>
+        <p class="eyebrow">Free · open source · 9 MB</p>
+        <h1>PostGIS, <span class="grad">without opening QGIS</span>.</h1>
+        <p class="lead">A tiny native PostgreSQL client that puts any query's geometry on a map: UTM, Web Mercator, even ArcGIS <code>st_geometry</code>. Then copy the rows as an image and drop them in the team chat.</p>
         <div class="cta">
           <a class="btn btn-primary" data-download href="https://github.com/yoouTaro/rgrip/releases">Download for macOS</a>
           <a class="btn btn-ghost" href="https://github.com/yoouTaro/rgrip">View on GitHub</a>
         </div>
-        <p class="fine">Apple silicon · free · MIT OR Apache-2.0</p>
+        <p class="fine">macOS · Apple silicon · MIT OR Apache-2.0</p>
+        <ul class="stats" aria-label="Measured on rgrip 0.0.7">
+          <li><b>9 MB</b><span>download</span></li>
+          <li><b>~75 MB</b><span>memory at idle</span></li>
+          <li><b>0%</b><span>CPU when idle</span></li>
+          <li><b>No JVM</b><span>no Electron, just Rust</span></li>
+        </ul>
         <figure class="shot shot-hero">
           <img src="img/hero.png" alt="rgrip main window: schema explorer, SQL console and results grid" width="1600" height="1000" fetchpriority="high">
         </figure>
@@ -64,11 +70,11 @@
       <div class="wrap">
         <h2>Features</h2>
         <dl class="features">
+          <div><dt>PostGIS</dt><dd>Readable geometry cells and a built-in map that reprojects WGS84, Web Mercator and UTM on the fly.</dd></div>
           <div><dt>SQL console</dt><dd>Highlighting, context-aware autocomplete, a formatter (<kbd>⇧⌘F</kbd>), saved queries, and slash commands like <code>/count</code> that expand into full queries.</dd></div>
           <div><dt>Results grid</dt><dd>Virtualized with server-side paging, multi-row selection and frozen columns. Export to CSV, JSON, GeoJSON, Markdown, SQL or SVG, or copy rows as an image.</dd></div>
           <div><dt>Inline editing</dt><dd>Double-click a cell to edit it, with a date/time picker for date and time columns. Changes are saved in one transaction, matched on the primary key.</dd></div>
           <div><dt>Relations</dt><dd>Follow foreign keys in both directions from any row, in a popup you can chain.</dd></div>
-          <div><dt>PostGIS</dt><dd>Readable geometry cells and a built-in map that reprojects WGS84, Web Mercator and UTM on the fly.</dd></div>
           <div><dt>Connections</dt><dd>SSL up to <code>verify-full</code> with client certificates, SSH tunnels, and paste-in connection strings.</dd></div>
         </dl>
       </div>

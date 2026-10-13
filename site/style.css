@@ -131,3 +131,10 @@ kbd{display:inline-block;min-width:1.9em;text-align:center;padding:2px 7px;borde
 .features dt{font-weight:600;font-size:18px;margin-bottom:6px}
 .features dd{margin:0;color:var(--muted);font-size:16px}
 @media (max-width:760px){.features{grid-template-columns:1fr}}
+
+/* Hero stats strip. */
+.stats{list-style:none;display:flex;justify-content:center;flex-wrap:wrap;gap:12px 40px;margin:30px auto 0;padding:0}
+.stats li{display:flex;flex-direction:column;align-items:center}
+.stats b{font-size:26px;letter-spacing:-.02em}
+.stats span{font-size:13.5px;color:var(--muted)}
+.lead code{font-size:.85em}
