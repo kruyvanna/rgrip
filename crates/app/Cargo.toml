@@ -14,3 +14,8 @@ earcutr = "0.4"
 rustybuzz = "0.20"
 ab_glyph = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSString"] }

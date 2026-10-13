@@ -4,6 +4,7 @@ mod grid;
 mod highlight;
 mod map;
 mod shaping;
+mod snapshot;
 mod widgets;
 mod theme;
 mod worker;

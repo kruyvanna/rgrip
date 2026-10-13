@@ -110,6 +110,31 @@ async fn end_to_end() {
 
         let err = conn.execute("select 1;\nselect nope").await.unwrap_err();
         assert!(err.contains("42703") && err.contains("line 2"), "{err}");
+
+        // Inline edits: all-or-nothing, one row each.
+        use rgrip_core::edit::update_sql;
+        let names = || async {
+            let out = conn.execute(&format!("select name, meta::text from {schema}.items order by id")).await.unwrap();
+            out.statements[0].result.as_ref().unwrap().rows.clone()
+        };
+        let ok = [
+            update_sql(&schema, "items", &[("id", Some("1"))], &[("name", Some("a'2")), ("meta", Some(r#"{"k": 2}"#))]),
+            update_sql(&schema, "items", &[("id", Some("2"))], &[("tags", Some("{p,q}"))]),
+        ];
+        assert_eq!(conn.apply_updates(&ok).await.unwrap(), 2);
+        assert_eq!(names().await[0], [Some("a'2".to_string()), Some(r#"{"k": 2}"#.to_string())]);
+        // A row that no longer exists rolls back the other change too.
+        let gone = [
+            update_sql(&schema, "items", &[("id", Some("3"))], &[("name", Some("changed"))]),
+            update_sql(&schema, "items", &[("id", Some("999"))], &[("name", Some("x"))]),
+        ];
+        let err = conn.apply_updates(&gone).await.unwrap_err();
+        assert!(err.contains("change 2 matched 0 rows"), "{err}");
+        assert_eq!(names().await[2][0].as_deref(), Some("c"));
+        // A bad value (NOT NULL) fails cleanly, and the connection still works.
+        let bad = [update_sql(&schema, "items", &[("id", Some("3"))], &[("name", None)])];
+        assert!(conn.apply_updates(&bad).await.unwrap_err().contains("23502"));
+        assert_eq!(names().await[2][0].as_deref(), Some("c"));
     }
     .await;
 

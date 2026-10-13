@@ -21,6 +21,8 @@ pub enum Cmd {
     /// `page: Some(offset)` fetches one page of a read-only query.
     Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize> },
     TableData { conn: ConnId, tab: TabId, query: TableQuery },
+    /// Inline-edit UPDATEs, applied in one transaction.
+    SaveEdits { conn: ConnId, tab: TabId, statements: Vec<String> },
     Cancel(ConnId),
     /// Look for a newer release.
     CheckUpdate,
@@ -40,7 +42,10 @@ pub enum Ev {
     Columns { conn: ConnId, schema: String, table: String, result: Result<Vec<ColumnInfo>, String> },
     Catalog { conn: ConnId, result: Result<Catalog, String> },
     QueryDone { tab: TabId, result: Result<QueryOutput, String> },
-    TablePage { tab: TabId, result: Result<ResultSet, String> },
+    /// `key`: the table's primary key columns (empty: no key, read-only).
+    TablePage { tab: TabId, result: Result<ResultSet, String>, key: Vec<String> },
+    /// Rows updated, or why nothing was saved.
+    EditsSaved { tab: TabId, result: Result<usize, String> },
     TableCount { tab: TabId, result: Result<i64, String> },
     /// Path and row count, or an error.
     Exported(Result<(std::path::PathBuf, usize), String>),
@@ -177,15 +182,26 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
         Cmd::TableData { conn, tab, query } => {
             let c = match get(&conns, &conn) {
                 Ok(c) => c,
-                Err(e) => return emit.send(Ev::TablePage { tab, result: Err(e) }),
+                Err(e) => return emit.send(Ev::TablePage { tab, result: Err(e), key: Vec::new() }),
             };
             let page = c.table_page(&query).await;
             let ok = page.is_ok();
-            emit.send(Ev::TablePage { tab, result: page });
+            let key = match c.columns(&query.schema, &query.table).await {
+                Ok(cols) => cols.into_iter().filter(|c| c.primary_key).map(|c| c.name).collect(),
+                Err(_) => Vec::new(),
+            };
+            emit.send(Ev::TablePage { tab, result: page, key });
             if ok {
                 let count = c.table_count(&query).await;
                 emit.send(Ev::TableCount { tab, result: count });
             }
+        }
+        Cmd::SaveEdits { conn, tab, statements } => {
+            let result = match get(&conns, &conn) {
+                Ok(c) => c.apply_updates(&statements).await,
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::EditsSaved { tab, result });
         }
         Cmd::ExportAll { conn, sql, format, table, path } => {
             let result = match get(&conns, &conn) {

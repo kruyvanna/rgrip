@@ -47,6 +47,16 @@ fn script_runs(text: &str) -> Vec<&str> {
     runs
 }
 
+fn shape_run(face: &rustybuzz::Face, run: &str) -> rustybuzz::GlyphBuffer {
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(run);
+    buffer.guess_segment_properties();
+    // Zero-width spaces (common in Khmer) and stray marks would otherwise
+    // show up as boxes.
+    buffer.set_flags(rustybuzz::BufferFlags::REMOVE_DEFAULT_IGNORABLES | rustybuzz::BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE);
+    rustybuzz::shape(face, &[], buffer)
+}
+
 struct Shaper {
     bytes: &'static [u8],
     cache: Mutex<HashMap<(String, u32), Arc<Shaped>>>,
@@ -100,17 +110,17 @@ pub fn shape(ctx: &egui::Context, text: &str, size: f32) -> Option<Arc<Shaped>> 
     let mut placed = Vec::new();
     // HarfBuzz shapes one script per buffer, so mixed text is shaped run by run.
     for run in script_runs(text) {
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(run);
-        buffer.guess_segment_properties();
-        let glyphs = rustybuzz::shape(&face, &[], buffer);
+        let glyphs = shape_run(&face, run);
         for (info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
             let x = pen + pos.x_offset as f32 * scale;
             let y = ascent + pad - pos.y_offset as f32 * scale;
             if pen > max_width {
                 break;
             }
-            placed.push(GlyphId(info.glyph_id as u16).with_scale_and_position(glyph_scale, point(x + pad, y)));
+            // Glyph 0 is the font's "missing" box.
+            if info.glyph_id != 0 {
+                placed.push(GlyphId(info.glyph_id as u16).with_scale_and_position(glyph_scale, point(x + pad, y)));
+            }
             pen += pos.x_advance as f32 * scale;
         }
     }
@@ -174,7 +184,29 @@ pub fn label(ui: &mut egui::Ui, text: &str, size: f32, color: Color32) -> egui::
 
 #[cfg(test)]
 mod tests {
-    use super::script_runs;
+    use super::{script_runs, shape_run};
+
+    #[test]
+    fn no_missing_glyph_boxes() {
+        // The fonts the app may load (see theme::install_fonts).
+        let home = std::env::var("HOME").unwrap_or_default();
+        let fonts = [
+            format!("{home}/Library/Fonts/KantumruyPro-VariableFont_wght.ttf"),
+            "/Library/Fonts/KantumruyPro-VariableFont_wght.ttf".to_string(),
+            "/System/Library/Fonts/Supplemental/Khmer Sangam MN.ttf".to_string(),
+        ];
+        for bytes in fonts.iter().filter_map(|p| std::fs::read(p).ok()) {
+            let face = rustybuzz::Face::from_slice(&bytes, 0).unwrap();
+            let dotted = face.glyph_index('\u{25CC}').map_or(u32::MAX, |g| g.0 as u32);
+            // Zero-width space, a mark with no base, a doubled vowel sign.
+            for text in ["ការ៉េ\u{200B}រឹ", "ការ៉េ\u{17B9}រ", "ការ៉េ\u{17C1}\u{17C1}"] {
+                for run in script_runs(text) {
+                    let glyphs = shape_run(&face, run);
+                    assert!(glyphs.glyph_infos().iter().all(|g| g.glyph_id != 0 && g.glyph_id != dotted), "{text:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn runs() {

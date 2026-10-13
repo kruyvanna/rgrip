@@ -136,6 +136,12 @@ struct TableView {
     grid: GridState,
     show_map: bool,
     map: crate::map::MapView,
+    /// Primary key columns; empty means the table can't be edited inline.
+    key: Vec<String>,
+    /// Pending inline edits: (row, col) → new value.
+    changes: std::collections::BTreeMap<(usize, usize), Option<String>>,
+    editor: Option<grid::CellEditor>,
+    saving: bool,
 }
 
 impl TableView {
@@ -293,6 +299,8 @@ enum TabAction {
     /// Write every row of the current query/table to a file.
     ExportAll(export::Format, std::path::PathBuf),
     Run { all: bool },
+    /// Write a table tab's pending inline edits.
+    SaveEdits,
     /// Next (`true`) or previous page of a paged console query.
     Page(bool),
     Cancel,
@@ -473,11 +481,29 @@ impl App {
                         self.worker.send(Cmd::Catalog(conn));
                     }
                 }
-                Ev::TablePage { tab, result } => {
+                Ev::TablePage { tab, result, key } => {
                     if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab) {
                         t.loading = false;
                         t.grid = GridState::default();
                         t.data = Some(result);
+                        t.key = key;
+                        // Edits are keyed by row index: they belong to the old page.
+                        t.changes.clear();
+                        t.editor = None;
+                    }
+                }
+                Ev::EditsSaved { tab, result } => {
+                    let Some(ti) = self.tabs.iter().position(|t| t.id == tab) else { continue };
+                    if let TabKind::Table(t) = &mut self.tabs[ti].kind {
+                        t.saving = false;
+                        match result {
+                            Ok(n) => {
+                                t.changes.clear();
+                                self.toast = Some((format!("Saved {}", plural(n, "row")), theme::OK(), Instant::now()));
+                                self.tab_action(ti, TabAction::Reload);
+                            }
+                            Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
+                        }
                     }
                 }
                 Ev::Exported(result) => {
@@ -609,6 +635,10 @@ impl App {
                 grid: GridState::default(),
                 show_map: false,
                 map: Default::default(),
+                key: Vec::new(),
+                changes: Default::default(),
+                editor: None,
+                saving: false,
             }),
         );
         self.tab_action(self.active, TabAction::Reload);
@@ -920,6 +950,20 @@ impl App {
                     c.running = None;
                 } else if c.running.is_some() {
                     self.worker.send(Cmd::Cancel(tab.conn.clone()));
+                }
+            }
+            (TabAction::SaveEdits, TabKind::Table(t)) => {
+                let Some(Ok(rs)) = &t.data else { return };
+                if t.changes.is_empty() || t.saving || !connected {
+                    return;
+                }
+                match edit_statements(t, rs) {
+                    Ok(statements) => {
+                        t.saving = true;
+                        t.editor = None;
+                        self.worker.send(Cmd::SaveEdits { conn: tab.conn.clone(), tab: tab.id, statements });
+                    }
+                    Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
                 }
             }
             (TabAction::Reload, TabKind::Table(t)) => {
@@ -1864,7 +1908,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
                 View::Result(n) if n < sets.len() => {
                     let row_offset = if paged.is_some() { *offset } else { 0 };
                     let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()) };
-                    grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, None, row_offset, &source);
+                    grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, None, row_offset, &source, None);
                 }
                 View::Map(n) if n < sets.len() => {
                     let cols = sets[n].geometry_columns().to_vec();
@@ -1920,8 +1964,13 @@ fn export_menu(ui: &mut Ui, rs: &ResultSet, table: &str, can_export_all: bool) -
         ui.set_min_width(190.0);
         ui.menu_button("Copy as", |ui| {
             for f in &formats {
-                if ui.button(f.label()).clicked() {
-                    ui.ctx().copy_text(export::export(rs, *f, table));
+                let label = if *f == export::Format::Svg { "Image (PNG)" } else { f.label() };
+                if ui.button(label).clicked() {
+                    if *f == export::Format::Svg {
+                        crate::snapshot::copy_table(ui.ctx(), rs, table);
+                    } else {
+                        ui.ctx().copy_text(export::export(rs, *f, table));
+                    }
                     ui.close();
                 }
             }
@@ -1999,8 +2048,32 @@ fn output_log(ui: &mut Ui, out: &QueryOutput) {
     });
 }
 
+/// One UPDATE per edited row, matched on the primary key values as loaded.
+fn edit_statements(t: &TableView, rs: &ResultSet) -> Result<Vec<String>, String> {
+    let key_cols: Vec<usize> = t
+        .key
+        .iter()
+        .map(|k| rs.columns.iter().position(|c| c == k).ok_or(format!("Primary key column {k} isn't in the result")))
+        .collect::<Result<_, _>>()?;
+    let mut rows: std::collections::BTreeMap<usize, Vec<(&str, Option<&str>)>> = Default::default();
+    for ((row, col), value) in &t.changes {
+        rows.entry(*row).or_default().push((rs.columns[*col].as_str(), value.as_deref()));
+    }
+    Ok(rows
+        .into_iter()
+        .map(|(row, set)| {
+            let key: Vec<(&str, Option<&str>)> =
+                key_cols.iter().map(|&c| (rs.columns[c].as_str(), rs.rows[row][c].as_deref())).collect();
+            rgrip_core::edit::update_sql(&t.schema, &t.table, &key, &set)
+        })
+        .collect())
+}
+
 fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> {
     let mut action = None;
+    if !t.changes.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
+        action = Some(TabAction::SaveEdits);
+    }
     toolbar(ui, |ui| {
         ui.label(RichText::new(format!("{}.{}", t.schema, t.table)).strong());
         ui.add_space(8.0);
@@ -2011,12 +2084,18 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 .desired_width(320.0)
                 .margin(Margin::symmetric(8, 4)),
         );
+        // Reloading drops pending edits, so it waits for Save / Discard.
+        let locked = !t.changes.is_empty();
         if filter.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            t.applied_filter = t.filter.clone();
-            t.page = 0;
-            action = Some(TabAction::Reload);
+            if locked {
+                action = Some(TabAction::Notify("Save or discard your changes first".into()));
+            } else {
+                t.applied_filter = t.filter.clone();
+                t.page = 0;
+                action = Some(TabAction::Reload);
+            }
         }
-        if ghost_button(ui, "↻").on_hover_text("Reload").clicked() {
+        if ui.add_enabled_ui(!locked, |ui| ghost_button(ui, "↻").on_hover_text("Reload")).inner.clicked() {
             action = Some(TabAction::Reload);
         }
         if let Some(Ok(rs)) = &t.data {
@@ -2030,8 +2109,25 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 }
             }
         }
-        if t.loading {
+        if t.loading || t.saving {
             ui.add(egui::Spinner::new().size(12.0));
+        }
+        if locked {
+            ui.add_space(8.0);
+            let cells = t.changes.len();
+            ui.label(RichText::new(plural(cells, "change")).small().color(theme::ACCENT()));
+            let save = Button::new(RichText::new("Save").color(theme::BG())).fill(theme::ACCENT());
+            if ui.add_enabled(!t.saving, save).on_hover_text("Write the changes in one transaction  ⌘S").clicked() {
+                action = Some(TabAction::SaveEdits);
+            }
+            if ui.add_enabled(!t.saving, Button::new("Discard")).clicked() {
+                t.changes.clear();
+                t.editor = None;
+            }
+        } else if matches!(&t.data, Some(Ok(_))) && t.key.is_empty() && !t.loading {
+            ui.add_space(8.0);
+            ui.label(RichText::new("read-only").small().color(theme::FAINT()))
+                .on_hover_text("No primary key: rows can't be identified for editing");
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2049,11 +2145,11 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 Some(total) => (t.page + 1) * PAGE_SIZE >= total,
                 None => rows < PAGE_SIZE,
             };
-            if ui.add_enabled(!last_page && !t.loading, Button::new("›")).clicked() {
+            if ui.add_enabled(!last_page && !t.loading && !locked, Button::new("›")).clicked() {
                 t.page += 1;
                 action = Some(TabAction::Reload);
             }
-            if ui.add_enabled(t.page > 0 && !t.loading, Button::new("‹")).clicked() {
+            if ui.add_enabled(t.page > 0 && !t.loading && !locked, Button::new("‹")).clicked() {
                 t.page -= 1;
                 action = Some(TabAction::Reload);
             }
@@ -2082,26 +2178,44 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
             let (table_name, table_sql) = (format!("{}.{}", t.schema, t.table), rgrip_core::postgres::table_select_sql(&t.query()));
             let sort = t.order.as_ref().map(|(c, asc)| Sort { column: c, ascending: *asc });
             let offset = (t.page * PAGE_SIZE) as usize;
-            if let Some(GridEvent::HeaderClicked(i)) =
-                grid::show(
-                    ui,
-                    Id::new(("table-grid", tab_id)),
-                    rs,
-                    &mut t.grid,
-                    sort,
-                    offset,
-                    &grid::Source { table: &table_name, sql: Some(&table_sql) },
-                )
-            {
-                let col = rs.columns[i].clone();
-                // Cycle: ascending → descending → unsorted.
-                t.order = match t.order.take() {
-                    Some((c, true)) if c == col => Some((c, false)),
-                    Some((c, false)) if c == col => None,
-                    _ => Some((col, true)),
-                };
-                t.page = 0;
-                action = Some(TabAction::Reload);
+            let editing = (!t.key.is_empty() && !t.saving).then_some(grid::Editing { changes: &t.changes, editor: &mut t.editor });
+            let event = grid::show(
+                ui,
+                Id::new(("table-grid", tab_id)),
+                rs,
+                &mut t.grid,
+                sort,
+                offset,
+                &grid::Source { table: &table_name, sql: Some(&table_sql) },
+                editing,
+            );
+            match event {
+                Some(GridEvent::Change { row, col, value }) => {
+                    if rs.rows[row][col] == value {
+                        t.changes.remove(&(row, col));
+                    } else {
+                        t.changes.insert((row, col), value);
+                    }
+                }
+                Some(GridEvent::Revert { row, col }) => {
+                    t.changes.remove(&(row, col));
+                }
+                // Sorting reloads the page, which would drop pending edits.
+                Some(GridEvent::HeaderClicked(_)) if !t.changes.is_empty() => {
+                    action = Some(TabAction::Notify("Save or discard your changes first".into()));
+                }
+                Some(GridEvent::HeaderClicked(i)) => {
+                    let col = rs.columns[i].clone();
+                    // Cycle: ascending → descending → unsorted.
+                    t.order = match t.order.take() {
+                        Some((c, true)) if c == col => Some((c, false)),
+                        Some((c, false)) if c == col => None,
+                        _ => Some((col, true)),
+                    };
+                    t.page = 0;
+                    action = Some(TabAction::Reload);
+                }
+                None => {}
             }
         }
     }

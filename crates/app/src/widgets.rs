@@ -28,6 +28,10 @@ pub enum Icon {
     Sun,
     /// Appearance: dark (a crescent moon).
     Moon,
+    /// Copy to clipboard (two overlapping sheets).
+    Copy,
+    /// Close (an ×).
+    Close,
 }
 
 pub fn paint_icon(p: &Painter, c: Pos2, icon: Icon) {
@@ -133,6 +137,19 @@ pub fn paint_icon_tinted(p: &Painter, c: Pos2, icon: Icon, tint: Option<Color32>
             }
             p.add(egui::Shape::closed_line(pts, thin(color_or(theme::VIEW()))));
         }
+        Icon::Copy => {
+            let color = color_or(theme::FAINT());
+            let back = Rect::from_min_size(c + vec2(-5.0, -5.0), vec2(7.5, 8.5));
+            let front = back.translate(vec2(3.0, 2.5));
+            p.rect_stroke(back, CornerRadius::same(2), thin(color.gamma_multiply(0.7)), StrokeKind::Inside);
+            p.rect_filled(front, CornerRadius::same(2), theme::POPUP());
+            p.rect_stroke(front, CornerRadius::same(2), thin(color), StrokeKind::Inside);
+        }
+        Icon::Close => {
+            let s = Stroke::new(1.4, color_or(theme::FAINT()));
+            p.line_segment([c + vec2(-4.0, -4.0), c + vec2(4.0, 4.0)], s);
+            p.line_segment([c + vec2(-4.0, 4.0), c + vec2(4.0, -4.0)], s);
+        }
         Icon::Console => {
             let s = thin(theme::ACCENT());
             p.line_segment([c + vec2(-5.0, -3.5), c + vec2(-1.5, 0.0)], s);
@@ -140,6 +157,14 @@ pub fn paint_icon_tinted(p: &Painter, c: Pos2, icon: Icon, tint: Option<Color32>
             p.line_segment([c + vec2(0.5, 3.5), c + vec2(5.0, 3.5)], s);
         }
     }
+}
+
+/// A small frameless icon button; brightens on hover.
+pub fn icon_button(ui: &mut Ui, icon: Icon, hover: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+    let tint = if response.hovered() { theme::TEXT() } else { theme::FAINT() };
+    paint_icon_tinted(ui.painter(), rect.center(), icon, Some(tint));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hover)
 }
 
 pub fn paint_chevron(p: &Painter, c: Pos2, open: bool, color: Color32) {

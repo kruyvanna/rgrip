@@ -144,7 +144,7 @@ pub fn export(rs: &ResultSet, format: Format, table: &str) -> String {
         Format::GeoJson => geojson(rs, &kinds),
         Format::Markdown => markdown(rs, &kinds),
         Format::SqlInsert => sql_insert(rs, &kinds, table),
-        Format::Svg => svg(rs, &kinds),
+        Format::Svg => svg(rs, &kinds, false),
     }
 }
 
@@ -286,18 +286,47 @@ fn sql_insert(rs: &ResultSet, kinds: &[Kind], table: &str) -> String {
 /// A light, readable picture of the table: bold header, zebra rows,
 /// right-aligned numbers, greyed NULLs. Long values are shortened and very
 /// long results are cut off with a note, so the image stays legible.
-fn svg(rs: &ResultSet, kinds: &[Kind]) -> String {
+/// The SVG table for rasterising with usvg/resvg (see [`svg`]'s `raster`).
+pub fn svg_for_raster(rs: &ResultSet) -> String {
+    svg(rs, &infer_kinds(rs), true)
+}
+
+/// `raster`: prefix mixed Khmer cells with an invisible Khmer sign. usvg
+/// shapes a whole cell as the script of its first letter, so `<div>ផ្លូវ`
+/// would skip Khmer reordering. Browsers itemise scripts themselves, so
+/// saved files don't need (or get) it.
+fn svg(rs: &ResultSet, kinds: &[Kind], raster: bool) -> String {
+    let khmer_hint = |v: &str| -> String {
+        let first_khmer = v.chars().find(|c| c.is_alphanumeric()).is_some_and(is_khmer);
+        if raster && !first_khmer && v.chars().any(is_khmer) { format!("\u{17B4}{v}") } else { v.to_string() }
+    };
     const MAX_ROWS: usize = 500;
     const MAX_CHARS: usize = 48;
     const FONT: f32 = 13.0;
     const PAD_X: f32 = 12.0;
     const ROW_H: f32 = 28.0;
-    const FONTS: &str = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, 'Noto Sans Khmer', 'Khmer Sangam MN', sans-serif";
+    const FONTS: &str = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif";
+    // Cells with Khmer use a Khmer font for the whole cell (these include
+    // Latin too), so the text is shaped by one font instead of falling
+    // back glyph by glyph, which breaks clusters in some renderers.
+    const KHMER_FONTS: &str = "'Kantumruy Pro', 'Khmer Sangam MN', 'Khmer MN', 'Noto Sans Khmer', 'Khmer OS', sans-serif";
+    let font_attr = |v: &str| {
+        if v.chars().any(is_khmer) {
+            format!(" font-family=\"{KHMER_FONTS}\"")
+        } else {
+            String::new()
+        }
+    };
 
     let shorten = |s: &str| -> String {
         let s: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
         if s.chars().count() > MAX_CHARS {
-            s.chars().take(MAX_CHARS - 1).collect::<String>() + "…"
+            let mut cut: String = s.chars().take(MAX_CHARS - 1).collect();
+            // Don't end on a Khmer subscript sign (it needs a consonant after).
+            while cut.ends_with('\u{17D2}') {
+                cut.pop();
+            }
+            cut + "…"
         } else {
             s
         }
@@ -339,13 +368,19 @@ fn svg(rs: &ResultSet, kinds: &[Kind]) -> String {
         let tx = if right { x + widths[i] - PAD_X } else { x + PAD_X };
         let anchor = if right { " text-anchor=\"end\"" } else { "" };
         out += &format!(
-            "<text x=\"{tx}\" y=\"{}\" font-weight=\"600\" fill=\"#1f2328\"{anchor}>{}</text>\n",
+            "<text x=\"{tx}\" y=\"{}\" font-weight=\"600\" fill=\"#1f2328\"{anchor}{}>{}</text>\n",
             baseline(0),
+            font_attr(name),
             xml_escape(name)
         );
         for (r, row) in cells.iter().enumerate() {
             out += &match &row[i] {
-                Some(v) => format!("<text x=\"{tx}\" y=\"{}\" fill=\"#1f2328\"{anchor}>{}</text>\n", baseline(r + 1), xml_escape(v)),
+                Some(v) => format!(
+                    "<text x=\"{tx}\" y=\"{}\" fill=\"#1f2328\"{anchor}{}>{}</text>\n",
+                    baseline(r + 1),
+                    font_attr(v),
+                    xml_escape(&khmer_hint(v))
+                ),
                 None => format!("<text x=\"{tx}\" y=\"{}\" fill=\"#8c959f\" font-style=\"italic\"{anchor}>NULL</text>\n", baseline(r + 1)),
             };
         }
@@ -379,6 +414,10 @@ fn text_width(s: &str, font: f32) -> f32 {
         })
         .sum::<f32>()
         * font
+}
+
+fn is_khmer(c: char) -> bool {
+    matches!(c, '\u{1780}'..='\u{17FF}' | '\u{19E0}'..='\u{19FF}')
 }
 
 fn xml_escape(s: &str) -> String {
@@ -500,6 +539,23 @@ mod tests {
         if let Ok(path) = std::env::var("RGRIP_SVG_SAMPLE") {
             std::fs::write(path, &out).unwrap();
         }
+    }
+
+    #[test]
+    fn raster_svg_hints_khmer_script() {
+        let s = |v: &str| Some(v.to_string());
+        let rs = ResultSet {
+            columns: vec!["a".into()],
+            rows: vec![vec![s("<div>ផ្លូវ")], vec![s("ផ្លូវ")], vec![s("plain")]],
+            ..Default::default()
+        };
+        let raster = svg_for_raster(&rs);
+        // Mixed cell starts with the invisible Khmer sign; pure ones don't.
+        assert!(raster.contains(">\u{17B4}&lt;div&gt;ផ្លូវ</text>"));
+        assert!(raster.contains(">ផ្លូវ</text>") && raster.contains(">plain</text>"));
+        assert!(raster.contains("font-family=\"'Kantumruy Pro'"));
+        // Saved files stay clean.
+        assert!(!export(&rs, Format::Svg, "t").contains('\u{17B4}'));
     }
 
     #[test]

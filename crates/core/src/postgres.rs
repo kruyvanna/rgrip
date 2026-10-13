@@ -417,6 +417,39 @@ impl PgConn {
         Ok(row.get(0))
     }
 
+    /// Run inline-edit UPDATEs in one transaction. Each must change exactly
+    /// one row (the row may have changed or gone since it was loaded);
+    /// otherwise nothing is saved. Returns the number of rows updated.
+    pub async fn apply_updates(&self, statements: &[String]) -> Result<usize, String> {
+        let batch = format!("begin;\n{}", statements.join("\n"));
+        let messages = match self.client.simple_query(&batch).await {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = self.client.batch_execute("rollback").await;
+                return Err(format_error(&e, None));
+            }
+        };
+        // The first count is BEGIN's.
+        let counts: Vec<u64> = messages
+            .iter()
+            .filter_map(|m| match m {
+                SimpleQueryMessage::CommandComplete(n) => Some(*n),
+                _ => None,
+            })
+            .skip(1)
+            .collect();
+        if let Some(i) = counts.iter().position(|&n| n != 1) {
+            let _ = self.client.batch_execute("rollback").await;
+            return Err(format!(
+                "Nothing saved: change {} matched {} rows instead of 1 (was the row changed or deleted?)",
+                i + 1,
+                counts[i]
+            ));
+        }
+        self.client.batch_execute("commit").await.map_err(|e| format_error(&e, None))?;
+        Ok(counts.len())
+    }
+
     pub async fn cancel(&self) -> Result<(), String> {
         self.cancel.cancel_query(self.tls.clone()).await.map_err(|e| e.to_string())
     }

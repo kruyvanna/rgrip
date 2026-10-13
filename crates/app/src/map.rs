@@ -476,7 +476,7 @@ impl MapView {
                         ui.horizontal(|ui| {
                             feature_title(ui, rs, row, self.column);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(egui::Button::new("×").frame(false)).clicked() {
+                                if crate::widgets::icon_button(ui, crate::widgets::Icon::Close, "Close").clicked() {
                                     close = true;
                                 }
                                 ui.menu_button(RichText::new("Copy").size(12.0), |ui| {
@@ -495,8 +495,17 @@ impl MapView {
                             });
                         });
                         ui.add_space(6.0);
+                        // Size the value column so the copy icons sit at the
+                        // right edge, under the close button.
+                        let (gap, icon_w) = (10.0, 18.0);
+                        let label_w = rs
+                            .columns
+                            .iter()
+                            .map(|c| ui.fonts_mut(|f| f.layout_no_wrap(c.clone(), egui::FontId::proportional(12.0), theme::MUTED()).size().x))
+                            .fold(0.0, f32::max);
+                        let value_w = (ui.available_width() - label_w - icon_w - 2.0 * gap).max(80.0);
                         egui::ScrollArea::vertical().max_height(rect.height() - 120.0).show(ui, |ui| {
-                            egui::Grid::new("map-attrs").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
+                            egui::Grid::new("map-attrs").num_columns(3).spacing([gap, 6.0]).show(ui, |ui| {
                                 for (i, name) in rs.columns.iter().enumerate() {
                                     ui.label(RichText::new(name).size(12.0).color(theme::MUTED()));
                                     let value = rs.rows[row][i].as_deref();
@@ -506,7 +515,8 @@ impl MapView {
                                         Some(v) => Some(geo::parse_hex(v).map_or_else(|| v.to_string(), |g| g.geometry.to_wkt())),
                                     };
                                     ui.scope(|ui| {
-                                        ui.set_max_width(220.0);
+                                        ui.set_min_width(value_w);
+                                        ui.set_max_width(value_w);
                                         match value {
                                             None => {
                                                 ui.label(RichText::new("NULL").italics().color(theme::FAINT()));
@@ -529,10 +539,7 @@ impl MapView {
                                     });
                                     match copy_text {
                                         Some(text) => {
-                                            if ui.add(egui::Button::new(RichText::new("⧉").size(12.0).color(theme::FAINT())).frame(false))
-                                                .on_hover_text("Copy")
-                                                .clicked()
-                                            {
+                                            if crate::widgets::icon_button(ui, crate::widgets::Icon::Copy, "Copy value").clicked() {
                                                 ui.ctx().copy_text(text);
                                             }
                                         }
