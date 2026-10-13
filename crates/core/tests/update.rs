@@ -108,3 +108,17 @@ async fn check_download_verify_install() {
 async fn live_check() {
     println!("{:?}", update::check().await);
 }
+
+/// Against the real GitHub API: an older version finds and verifies the
+/// latest release (network; run with `--ignored`).
+#[tokio::test]
+#[ignore]
+async fn live_update_from_older_version() {
+    let api = format!("https://api.github.com/repos/{}", update::REPO);
+    let release = update::check_at(&api, "0.0.1-alpha").await.unwrap().expect("a newer release");
+    println!("found {} sha {:?}", release.version, release.sha256);
+    let dir = std::env::temp_dir();
+    let zip = update::download(&release, &dir).await.unwrap();
+    println!("downloaded and verified {}", zip.display());
+    let _ = std::fs::remove_file(zip);
+}
