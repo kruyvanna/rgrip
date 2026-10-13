@@ -15,17 +15,20 @@ use walkers::{HttpOptions, HttpTiles, MapMemory, Plugin, Projector, TileId, lon_
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Basemap {
     Dark,
+    /// Minimal white/grey canvas.
     Light,
+    Streets,
     Satellite,
 }
 
 impl Basemap {
-    const ALL: [Basemap; 3] = [Basemap::Dark, Basemap::Light, Basemap::Satellite];
+    const ALL: [Basemap; 4] = [Basemap::Dark, Basemap::Light, Basemap::Streets, Basemap::Satellite];
 
     fn label(self) -> &'static str {
         match self {
             Basemap::Dark => "Dark",
-            Basemap::Light => "Streets",
+            Basemap::Light => "Light",
+            Basemap::Streets => "Streets",
             Basemap::Satellite => "Satellite",
         }
     }
@@ -38,6 +41,24 @@ impl TileSource for EsriDarkGray {
     fn tile_url(&self, t: TileId) -> String {
         format!(
             "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{}/{}/{}",
+            t.zoom, t.y, t.x
+        )
+    }
+    fn attribution(&self) -> Attribution {
+        Attribution { text: "Esri, HERE, Garmin, © OpenStreetMap contributors", url: "https://www.esri.com", logo_light: None, logo_dark: None }
+    }
+    fn max_zoom(&self) -> u8 {
+        16
+    }
+}
+
+/// Esri Light Gray Canvas: clean white basemap (CARTO Positron now needs an API key).
+struct EsriLightGray;
+
+impl TileSource for EsriLightGray {
+    fn tile_url(&self, t: TileId) -> String {
+        format!(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{}/{}/{}",
             t.zoom, t.y, t.x
         )
     }
@@ -68,7 +89,8 @@ impl TileSource for GoogleSatellite {
 fn attribution(b: Basemap) -> &'static str {
     match b {
         Basemap::Dark => EsriDarkGray.attribution().text,
-        Basemap::Light => "© OpenStreetMap contributors",
+        Basemap::Light => EsriLightGray.attribution().text,
+        Basemap::Streets => "© OpenStreetMap contributors",
         Basemap::Satellite => GoogleSatellite.attribution().text,
     }
 }
@@ -159,6 +181,8 @@ pub struct MapView {
     fitted: Option<usize>,
     pub selected: Option<usize>,
     column: usize,
+    /// Column to show when it appears (e.g. after reprojecting).
+    pub prefer: Option<String>,
     cache: Option<(usize, MapData)>,
 }
 
@@ -170,14 +194,16 @@ impl Default for MapView {
             // Debug builds: RGRIP_DEMO_BASEMAP=satellite|streets for screenshots.
             basemap: match std::env::var("RGRIP_DEMO_BASEMAP").as_deref() {
                 Ok("satellite") if cfg!(debug_assertions) => Basemap::Satellite,
-                Ok("streets") if cfg!(debug_assertions) => Basemap::Light,
-                // Match the app: dark basemap in dark mode, streets in light.
+                Ok("streets") if cfg!(debug_assertions) => Basemap::Streets,
+                Ok("light") if cfg!(debug_assertions) => Basemap::Light,
+                // Match the app: dark canvas in dark themes, light canvas in light ones.
                 _ if theme::is_dark() => Basemap::Dark,
                 _ => Basemap::Light,
             },
             fitted: None,
             selected: None,
             column: 0,
+            prefer: None,
             cache: None,
         }
     }
@@ -197,7 +223,8 @@ impl MapView {
         let basemap = self.basemap;
         self.tiles.entry(basemap).or_insert_with(|| match basemap {
             Basemap::Dark => HttpTiles::with_options(EsriDarkGray, http_options(), ctx.clone()),
-            Basemap::Light => HttpTiles::with_options(OpenStreetMap, http_options(), ctx.clone()),
+            Basemap::Light => HttpTiles::with_options(EsriLightGray, http_options(), ctx.clone()),
+            Basemap::Streets => HttpTiles::with_options(OpenStreetMap, http_options(), ctx.clone()),
             Basemap::Satellite => HttpTiles::with_options(GoogleSatellite, http_options(), ctx.clone()),
         })
     }
@@ -217,7 +244,13 @@ impl MapView {
     }
 
     /// Show the map for `rs`; `geom_cols` are its geometry columns.
-    pub fn show(&mut self, ui: &mut Ui, rs: &ResultSet, geom_cols: &[usize]) {
+    /// With `can_reproject`, unsupported SRIDs offer a "Reproject" button;
+    /// returns the geometry column the user asked to reproject.
+    pub fn show(&mut self, ui: &mut Ui, rs: &ResultSet, geom_cols: &[usize], can_reproject: bool) -> Option<String> {
+        if let Some(i) = self.prefer.as_ref().and_then(|p| rs.columns.iter().position(|c| c == p)).filter(|i| geom_cols.contains(i)) {
+            self.column = i;
+            self.prefer = None;
+        }
         if !geom_cols.contains(&self.column) {
             self.column = geom_cols[0];
         }
@@ -254,7 +287,7 @@ impl MapView {
             self.selected = c;
         }
 
-        self.overlay(ui, rect, &data, rs, geom_cols);
+        let reproject = self.overlay(ui, rect, &data, rs, geom_cols, can_reproject);
         if let Some(i) = hovered.filter(|_| self.selected.is_none() || hovered != self.selected) {
             let f = &data.features[i];
             egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("map-hover"), egui::PopupAnchor::Pointer)
@@ -264,9 +297,19 @@ impl MapView {
             self.details(ui, rect, rs, data.features[i].row);
         }
         self.cache = Some((key, data));
+        reproject
     }
 
-    fn overlay(&mut self, ui: &mut Ui, rect: Rect, data: &MapData, rs: &ResultSet, geom_cols: &[usize]) {
+    fn overlay(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        data: &MapData,
+        rs: &ResultSet,
+        geom_cols: &[usize],
+        can_reproject: bool,
+    ) -> Option<String> {
+        let mut reproject = None;
         let panel = |ui: &mut Ui, pos: Pos2, align: Align2, id: &str, add: &mut dyn FnMut(&mut Ui)| {
             egui::Area::new(egui::Id::new(id))
                 .order(egui::Order::Foreground)
@@ -306,7 +349,15 @@ impl MapView {
             if data.skipped > 0 {
                 let srids = data.srids.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ");
                 ui.label(RichText::new(format!("{} not shown (SRID {srids})", data.skipped)).size(11.5).color(theme::WARN()))
-                    .on_hover_text("Only WGS84, Web Mercator and UTM can be drawn.\nUse ST_Transform(geom, 4326) in the query.");
+                    .on_hover_text("Only WGS84, Web Mercator and UTM are drawn directly.");
+                if can_reproject
+                    && ui
+                        .button("Reproject to 4326")
+                        .on_hover_text("Re-run the query with ST_Transform(…, 4326) in PostGIS")
+                        .clicked()
+                {
+                    reproject = Some(rs.columns[self.column].clone());
+                }
             }
         });
         if fit {
@@ -319,6 +370,7 @@ impl MapView {
         let back = Rect::from_min_size(pos, galley.size()).expand2(vec2(5.0, 2.0));
         ui.painter().rect_filled(back, 4.0, theme::POPUP().gamma_multiply(0.85));
         ui.painter().galley(pos, galley, theme::MUTED());
+        reproject
     }
 
     fn details(&mut self, ui: &mut Ui, rect: Rect, rs: &ResultSet, row: usize) {

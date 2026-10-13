@@ -312,6 +312,24 @@ fn utm_to_wgs84(c: Coord, zone: u8, north: bool) -> Coord {
     [lon.to_degrees(), lat.to_degrees()]
 }
 
+/// SRID declared by a column type such as `geometry(Point,32648)`;
+/// `Some(0)` for an unconstrained geometry, `None` for non-spatial types.
+pub fn column_srid(ty: &str) -> Option<i32> {
+    let t = ty.trim().to_ascii_lowercase();
+    let (default, rest) = if let Some(r) = t.strip_prefix("geometry") {
+        (0, r)
+    } else if let Some(r) = t.strip_prefix("geography") {
+        (4326, r)
+    } else {
+        return None;
+    };
+    if !(rest.is_empty() || rest.starts_with('(') || rest.starts_with('[')) {
+        return None;
+    }
+    let srid = rest.trim_start_matches('(').split(')').next().and_then(|m| m.split(',').nth(1)).and_then(|s| s.trim().parse().ok());
+    Some(srid.unwrap_or(default))
+}
+
 /// Columns whose sampled non-null values all decode as geometries.
 pub fn geometry_columns(rs: &ResultSet) -> Vec<usize> {
     (0..rs.columns.len())
@@ -358,6 +376,17 @@ mod tests {
         let g = parse_hex(gc).unwrap();
         assert_eq!(g.geometry.to_wkt(), "GEOMETRYCOLLECTION (POINT (1 2), LINESTRING (0 0, 1 1))");
         assert_eq!(g.srid, Some(4326));
+    }
+
+    #[test]
+    fn column_srids() {
+        assert_eq!(column_srid("geometry(Point,32648)"), Some(32648));
+        assert_eq!(column_srid("geometry(MultiPolygon, 4326)"), Some(4326));
+        assert_eq!(column_srid("geometry"), Some(0));
+        assert_eq!(column_srid("geography(Point)"), Some(4326));
+        assert_eq!(column_srid("geometry[]"), Some(0));
+        assert_eq!(column_srid("geometrytype"), None);
+        assert_eq!(column_srid("text"), None);
     }
 
     #[test]

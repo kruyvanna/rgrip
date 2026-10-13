@@ -29,6 +29,8 @@ pub enum ItemKind {
     Schema,
     Function,
     Keyword,
+    /// Generated SQL, e.g. `ST_Transform(geom, 4326)` for a geometry column.
+    Snippet,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +39,8 @@ pub struct Suggestion {
     pub insert: String,
     pub kind: ItemKind,
     pub detail: String,
+    /// Overrides [`Completion::replace`] (e.g. to also replace `alias.`).
+    pub replace: Option<Range<usize>>,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +63,55 @@ const KEYWORDS: &[&str] = &[
     "create table", "create index", "create view", "alter table", "drop table", "truncate",
     "with", "case", "when", "then", "else", "end", "true", "false", "null", "default",
     "primary key", "references", "begin", "commit", "rollback", "explain", "explain analyze",
+];
+
+/// PostGIS functions with their usual arguments (shown as detail).
+const POSTGIS_FUNCTIONS: &[(&str, &str)] = &[
+    ("ST_Transform", "geom, srid"),
+    ("ST_SetSRID", "geom, srid"),
+    ("ST_SRID", "geom"),
+    ("ST_AsText", "geom"),
+    ("ST_AsEWKT", "geom"),
+    ("ST_AsGeoJSON", "geom"),
+    ("ST_GeomFromText", "wkt, srid"),
+    ("ST_GeomFromGeoJSON", "json"),
+    ("ST_MakePoint", "x, y"),
+    ("ST_Point", "x, y, srid"),
+    ("ST_MakeEnvelope", "xmin, ymin, xmax, ymax, srid"),
+    ("ST_X", "point"),
+    ("ST_Y", "point"),
+    ("ST_Area", "geom"),
+    ("ST_Length", "geom"),
+    ("ST_Perimeter", "geom"),
+    ("ST_Distance", "a, b"),
+    ("ST_DWithin", "a, b, distance"),
+    ("ST_Intersects", "a, b"),
+    ("ST_Contains", "a, b"),
+    ("ST_Within", "a, b"),
+    ("ST_Touches", "a, b"),
+    ("ST_Covers", "a, b"),
+    ("ST_Buffer", "geom, radius"),
+    ("ST_Centroid", "geom"),
+    ("ST_PointOnSurface", "geom"),
+    ("ST_Envelope", "geom"),
+    ("ST_Extent", "geom"),
+    ("ST_Union", "geom"),
+    ("ST_Collect", "geom"),
+    ("ST_Intersection", "a, b"),
+    ("ST_Difference", "a, b"),
+    ("ST_Simplify", "geom, tolerance"),
+    ("ST_SimplifyPreserveTopology", "geom, tolerance"),
+    ("ST_IsValid", "geom"),
+    ("ST_MakeValid", "geom"),
+    ("ST_GeometryType", "geom"),
+    ("ST_NPoints", "geom"),
+    ("ST_Dump", "geom"),
+    ("ST_ClosestPoint", "a, b"),
+    ("ST_ShortestLine", "a, b"),
+    ("ST_LineInterpolatePoint", "line, fraction"),
+    ("ST_Azimuth", "a, b"),
+    ("ST_Force2D", "geom"),
+    ("ST_Multi", "geom"),
 ];
 
 const FUNCTIONS: &[&str] = &[
@@ -278,8 +331,9 @@ fn is_clause(t: &Token) -> bool {
     CLAUSE_WORDS.iter().any(|w| t.is_word(w))
 }
 
+/// Postgres catalogs and PostGIS's own helper schemas.
 fn is_system_schema(s: &str) -> bool {
-    s == "pg_catalog" || s == "information_schema"
+    matches!(s, "pg_catalog" | "information_schema" | "tiger" | "tiger_data" | "topology")
 }
 
 impl Catalog {
@@ -296,6 +350,13 @@ impl Catalog {
                     .copied()
             }
         }
+    }
+
+    /// PostGIS is installed (its catalog table or geometry columns exist).
+    pub fn has_postgis(&self) -> bool {
+        self.tables.iter().any(|t| {
+            t.name == "spatial_ref_sys" || t.columns.iter().any(|(_, ty)| crate::geo::column_srid(ty).is_some())
+        })
     }
 
     fn schemas(&self) -> Vec<&str> {
@@ -375,6 +436,13 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Op
         [.., q, dot] if dot.is_punct('.') && dot.end == replace.start => q.word().map(str::to_string),
         _ => None,
     };
+    // Where `alias.` starts, so snippets can replace it too.
+    let qualifier_start = match before {
+        [.., q, dot] if dot.is_punct('.') && dot.end == replace.start => Some(q.start),
+        _ => None,
+    };
+    let postgis = catalog.has_postgis();
+    let in_select = last_clause(before) == Some("select");
     if prefix.is_empty() && qualifier.is_none() && !forced {
         return None;
     }
@@ -393,6 +461,10 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Op
             .or_else(|| catalog.resolve(&TableRef { schema: None, table: q.clone(), alias: None }));
         if let Some(t) = target {
             push_columns(&mut items, t, false);
+            if postgis {
+                let qualified = qualifier_start.map(|start| (format!("{}.", sql_ident_text(&sql[start..replace.start - 1])), start..replace.end));
+                push_geometry_snippets(&mut items, t, qualified, in_select);
+            }
         }
         for t in catalog.tables.iter().filter(|t| t.schema == q) {
             push_table(&mut items, t, false);
@@ -408,7 +480,7 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Op
                         label: s.to_string(),
                         insert: ident(s),
                         kind: ItemKind::Schema,
-                        detail: "schema".into(),
+                        detail: "schema".into(), replace: None
                     });
                 }
             }
@@ -416,6 +488,14 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Op
             Context::Expr => {
                 for (_, t) in &resolved {
                     push_columns(&mut items, t, resolved.len() > 1);
+                }
+                if postgis {
+                    for (r, t) in &resolved {
+                        // With several tables, qualify generated SQL by alias/name.
+                        let q = (resolved.len() > 1).then(|| format!("{}.", r.alias.as_deref().unwrap_or(&r.table)));
+                        push_geometry_snippets(&mut items, t, q.map(|q| (q, replace.clone())), in_select);
+                    }
+                    push_postgis_functions(&mut items);
                 }
                 push_functions(&mut items, &prefix);
                 push_keywords(&mut items, &prefix);
@@ -494,7 +574,7 @@ fn push_columns(items: &mut Vec<Suggestion>, t: &CatalogTable, show_table: bool)
             detail: match crate::sql::short_type(ty) {
                 ty if show_table => format!("{} · {ty}", t.name),
                 ty => ty,
-            },
+            }, replace: None
         });
     }
 }
@@ -506,14 +586,69 @@ fn push_table(items: &mut Vec<Suggestion>, t: &CatalogTable, qualify: bool) {
         TableKind::View | TableKind::MaterializedView => ItemKind::View,
         _ => ItemKind::Table,
     };
-    items.push(Suggestion { label: t.name.clone(), insert, kind, detail: t.schema.clone() });
+    items.push(Suggestion { label: t.name.clone(), insert, kind, detail: t.schema.clone(), replace: None });
+}
+
+fn push_postgis_functions(items: &mut Vec<Suggestion>) {
+    for (name, args) in POSTGIS_FUNCTIONS {
+        items.push(Suggestion {
+            label: name.to_string(),
+            insert: format!("{name}("),
+            kind: ItemKind::Function,
+            detail: format!("({args})"),
+            replace: None,
+        });
+    }
+}
+
+/// The SQL text of an identifier as typed (keeps quotes).
+fn sql_ident_text(s: &str) -> String {
+    s.trim().to_string()
+}
+
+/// Generated expressions for each geometry column: reprojection to WGS84
+/// (when stored in another SRID), GeoJSON, WKT and Web Mercator.
+/// `qualified` is the `alias.` prefix and the range it should replace.
+fn push_geometry_snippets(
+    items: &mut Vec<Suggestion>,
+    t: &CatalogTable,
+    qualified: Option<(String, Range<usize>)>,
+    in_select: bool,
+) {
+    let (q, range) = match qualified {
+        Some((q, r)) => (q, Some(r)),
+        None => (String::new(), None),
+    };
+    for (col, ty) in &t.columns {
+        let Some(srid) = crate::geo::column_srid(ty) else { continue };
+        let c = format!("{q}{}", ident(col));
+        let alias = if in_select { format!(" AS {}", ident(col)) } else { String::new() };
+        let mut add = |label: String, insert: String, detail: String| {
+            items.push(Suggestion { label, insert, kind: ItemKind::Snippet, detail, replace: range.clone() });
+        };
+        let wgs84 = if srid != 4326 && srid != 0 { format!("ST_Transform({c}, 4326)") } else { c.clone() };
+        if srid != 4326 && srid != 0 {
+            add(format!("ST_Transform({col}, 4326)"), format!("{wgs84}{alias}"), format!("SRID {srid} → 4326"));
+        }
+        add(format!("ST_AsGeoJSON({col})"), format!("ST_AsGeoJSON({wgs84})"), "GeoJSON (WGS84)".into());
+        add(format!("ST_AsText({col})"), format!("ST_AsText({c})"), "WKT".into());
+        if srid != 3857 && srid != 0 {
+            add(format!("ST_Transform({col}, 3857)"), format!("ST_Transform({c}, 3857){alias}"), format!("SRID {srid} → 3857"));
+        }
+    }
+}
+
+fn last_clause(before: &[Token]) -> Option<&str> {
+    before.iter().rev().find_map(|t| {
+        t.word().filter(|w| ["select", "from", "where", "on", "by", "set", "having", "join", "values"].contains(w))
+    })
 }
 
 fn push_functions(items: &mut Vec<Suggestion>, prefix: &str) {
     for f in FUNCTIONS {
         let name = match_case(f, prefix);
         let insert = if matches!(*f, "current_date" | "current_timestamp") { name.clone() } else { format!("{name}(") };
-        items.push(Suggestion { label: f.to_string(), insert, kind: ItemKind::Function, detail: "function".into() });
+        items.push(Suggestion { label: f.to_string(), insert, kind: ItemKind::Function, detail: "function".into(), replace: None });
     }
 }
 
@@ -523,7 +658,7 @@ fn push_keywords(items: &mut Vec<Suggestion>, prefix: &str) {
             label: k.to_string(),
             insert: format!("{} ", match_case(k, prefix)),
             kind: ItemKind::Keyword,
-            detail: String::new(),
+            detail: String::new(), replace: None
         });
     }
 }
@@ -545,7 +680,14 @@ fn rank(items: Vec<Suggestion>, prefix: &str) -> Vec<Suggestion> {
         .enumerate()
         .filter_map(|(order, s)| {
             let l = s.label.to_lowercase();
-            let quality = if p.is_empty() || l.starts_with(&p) {
+            // Snippets match on the column they're generated for: the
+            // innermost argument of e.g. `ST_AsGeoJSON(geom)`.
+            let key = if s.kind == ItemKind::Snippet {
+                l.rsplit('(').next().and_then(|r| r.split([',', ')']).next()).unwrap_or(&l).trim().to_string()
+            } else {
+                l.clone()
+            };
+            let quality = if p.is_empty() || key.starts_with(&p) || l.starts_with(&p) {
                 0
             } else if l.split(['_', ' ', '.']).any(|part| part.starts_with(&p)) {
                 1
@@ -577,6 +719,7 @@ fn rank(items: Vec<Suggestion>, prefix: &str) -> Vec<Suggestion> {
 fn kind_rank(k: ItemKind) -> u8 {
     match k {
         ItemKind::Column => 0,
+        ItemKind::Snippet => 1,
         ItemKind::Table | ItemKind::View => 1,
         ItemKind::Schema => 2,
         ItemKind::Keyword => 3,
@@ -710,6 +853,66 @@ mod tests {
         let l = labels("select cr| from users");
         assert_eq!(l[0], "created_at");
         assert!(!l.iter().any(|x| x.starts_with("pg_")), "{l:?}");
+    }
+
+    fn spatial_catalog() -> Catalog {
+        let mut c = catalog();
+        c.tables.push(CatalogTable {
+            schema: "public".into(),
+            name: "parcels".into(),
+            kind: TableKind::Table,
+            columns: vec![("id".into(), "integer".into()), ("geom".into(), "geometry(Polygon,32648)".into())],
+        });
+        c.tables.push(CatalogTable {
+            schema: "public".into(),
+            name: "spatial_ref_sys".into(),
+            kind: TableKind::Table,
+            columns: vec![("srid".into(), "integer".into())],
+        });
+        c
+    }
+
+    fn complete_with(input: &str, catalog: &Catalog) -> Vec<Suggestion> {
+        let cursor = input.find('|').unwrap();
+        let sql = input.replace('|', "");
+        complete(&sql, cursor, catalog, false).map(|c| c.items).unwrap_or_default()
+    }
+
+    #[test]
+    fn postgis_functions_only_with_postgis() {
+        let with = complete_with("select st_tr| from parcels", &spatial_catalog());
+        assert!(with.iter().any(|s| s.label == "ST_Transform" && s.insert == "ST_Transform("));
+        let without = complete_with("select st_tr| from users", &catalog());
+        assert!(!without.iter().any(|s| s.label == "ST_Transform"));
+    }
+
+    #[test]
+    fn geometry_snippets_reproject_by_srid() {
+        let items = complete_with("select id, ge| from parcels", &spatial_catalog());
+        // The column first, then its generated expressions.
+        assert_eq!(items[0].label, "geom");
+        assert_eq!(items[1].label, "ST_Transform(geom, 4326)");
+        let t = &items[1];
+        assert_eq!(t.insert, "ST_Transform(geom, 4326) AS geom");
+        assert_eq!(t.detail, "SRID 32648 → 4326");
+        let gj = items.iter().find(|s| s.label == "ST_AsGeoJSON(geom)").unwrap();
+        assert_eq!(gj.insert, "ST_AsGeoJSON(ST_Transform(geom, 4326))");
+        // Outside the select list there's no alias.
+        let w = complete_with("select * from parcels where st_| ", &spatial_catalog());
+        assert!(w.iter().any(|s| s.insert == "ST_Transform(geom, 4326)"));
+    }
+
+    #[test]
+    fn geometry_snippets_replace_the_alias() {
+        let input = "select p.| from parcels p";
+        let cursor = input.find('|').unwrap();
+        let sql = input.replace('|', "");
+        let c = complete(&sql, cursor, &spatial_catalog(), false).unwrap();
+        let t = c.items.iter().find(|s| s.label == "ST_Transform(geom, 4326)").unwrap();
+        assert_eq!(t.insert, "ST_Transform(p.geom, 4326) AS geom");
+        assert_eq!(t.replace, Some(7..9)); // replaces "p."
+        // Plain columns still complete after the dot.
+        assert!(c.items.iter().any(|s| s.label == "geom" && s.replace.is_none()));
     }
 
     #[test]

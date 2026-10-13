@@ -20,10 +20,24 @@ pub enum Icon {
     Function,
     /// Saved query (a small document).
     Query,
+    /// Generated spatial SQL (a globe).
+    Globe,
+    /// Appearance: follow the system (a monitor).
+    System,
+    /// Appearance: light (a sun).
+    Sun,
+    /// Appearance: dark (a crescent moon).
+    Moon,
 }
 
 pub fn paint_icon(p: &Painter, c: Pos2, icon: Icon) {
+    paint_icon_tinted(p, c, icon, None);
+}
+
+/// `tint` overrides the icon's own color (e.g. for selected states).
+pub fn paint_icon_tinted(p: &Painter, c: Pos2, icon: Icon, tint: Option<Color32>) {
     let thin = |color| Stroke::new(1.2, color);
+    let color_or = |default: Color32| tint.unwrap_or(default);
     match icon {
         Icon::Database(status) => {
             // Cylinder: body plus two rims, with a status dot.
@@ -68,6 +82,56 @@ pub fn paint_icon(p: &Painter, c: Pos2, icon: Icon) {
             for dy in [-1.5, 1.0] {
                 p.line_segment([pos2(r.left() + 2.2, c.y + dy), pos2(r.right() - 2.2, c.y + dy)], thin(theme::MUTED()));
             }
+        }
+        Icon::Globe => {
+            let s = thin(color_or(theme::GEO()));
+            p.circle_stroke(c, 5.5, s);
+            p.line_segment([c - vec2(5.5, 0.0), c + vec2(5.5, 0.0)], s);
+            // Meridian: a narrow ellipse.
+            let pts: Vec<Pos2> = (0..=24)
+                .map(|i| {
+                    let a = i as f32 / 24.0 * std::f32::consts::TAU;
+                    c + vec2(a.cos() * 2.4, a.sin() * 5.5)
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, s));
+        }
+        Icon::System => {
+            let s = thin(color_or(theme::MUTED()));
+            let screen = Rect::from_center_size(c - vec2(0.0, 1.5), vec2(13.0, 9.0));
+            p.rect_stroke(screen, CornerRadius::same(2), s, StrokeKind::Inside);
+            p.line_segment([pos2(c.x, screen.bottom()), pos2(c.x, screen.bottom() + 2.5)], s);
+            p.line_segment([pos2(c.x - 3.5, screen.bottom() + 2.5), pos2(c.x + 3.5, screen.bottom() + 2.5)], s);
+        }
+        Icon::Sun => {
+            let s = thin(color_or(theme::WARN()));
+            p.circle_stroke(c, 3.0, s);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                let d = vec2(a.cos(), a.sin());
+                p.line_segment([c + d * 5.0, c + d * 6.8], s);
+            }
+        }
+        Icon::Moon => {
+            // Crescent outline: outer arc minus an offset inner circle.
+            let (r, inner_c, inner_r) = (6.0, c + vec2(3.2, -2.4), 5.0);
+            let inside = |q: Pos2, center: Pos2, radius: f32| (q - center).length() < radius;
+            let mut pts = Vec::new();
+            for i in 0..=72 {
+                let a = i as f32 / 72.0 * std::f32::consts::TAU;
+                let q = c + vec2(a.cos(), a.sin()) * r;
+                if !inside(q, inner_c, inner_r) {
+                    pts.push(q);
+                }
+            }
+            for i in (0..=72).rev() {
+                let a = i as f32 / 72.0 * std::f32::consts::TAU;
+                let q = inner_c + vec2(a.cos(), a.sin()) * inner_r;
+                if inside(q, c, r) {
+                    pts.push(q);
+                }
+            }
+            p.add(egui::Shape::closed_line(pts, thin(color_or(theme::VIEW()))));
         }
         Icon::Console => {
             let s = thin(theme::ACCENT());

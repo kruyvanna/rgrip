@@ -66,8 +66,9 @@ pub fn handle_keys(ui: &Ui, popup: &mut Option<Popup>) -> Keys {
 /// Returns the new (empty) char selection.
 pub fn accept(ctx: &egui::Context, editor: Id, sql: &mut String, c: &Completion, index: usize) -> Range<usize> {
     let item = &c.items[index];
-    sql.replace_range(c.replace.clone(), &item.insert);
-    let byte = c.replace.start + item.insert.len();
+    let range = item.replace.clone().unwrap_or_else(|| c.replace.clone());
+    sql.replace_range(range.clone(), &item.insert);
+    let byte = range.start + item.insert.len();
     let at = sql[..byte].chars().count();
     if let Some(mut state) = TextEdit::load_state(ctx, editor) {
         state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(at))));
@@ -153,6 +154,7 @@ fn paint_row(ui: &Ui, rect: egui::Rect, item: &rgrip_core::complete::Suggestion,
         ItemKind::Schema => Icon::Schema,
         ItemKind::Function => Icon::Function,
         ItemKind::Keyword => Icon::Keyword,
+        ItemKind::Snippet => Icon::Globe,
     };
     widgets::paint_icon(&p, egui::pos2(rect.left() + 14.0, cy), icon);
 

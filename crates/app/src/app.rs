@@ -276,6 +276,8 @@ enum NameTarget {
 }
 
 enum TabAction {
+    /// Wrap the console's query to add `ST_Transform(col, 4326)` and re-run.
+    Reproject(String),
     /// Save the console's SQL (asks for a name the first time).
     Save,
     /// Write every row of the current query/table to a file.
@@ -881,6 +883,15 @@ impl App {
                 self.toast = Some((format!("Exporting to {}…", path.display()), theme::MUTED(), Instant::now()));
                 self.worker.send(Cmd::ExportAll { conn: tab.conn.clone(), sql, format, table, path });
             }
+            (TabAction::Reproject(col), TabKind::Console(c)) => {
+                let Some(query) = c.paged.clone() else { return };
+                let alias = format!("{col}_4326");
+                c.sql = reproject_sql(&query, &col, &alias);
+                c.map.prefer = Some(alias);
+                c.view = View::Map(0);
+                c.cursor = 0..0;
+                return self.tab_action(ti, TabAction::Run { all: true });
+            }
             (TabAction::Cancel, TabKind::Console(c)) => {
                 if c.pending.take().is_some() {
                     c.running = None;
@@ -1088,32 +1099,35 @@ impl App {
     }
 
     fn settings_menu(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        const WIDTH: f32 = 260.0;
         let button = icon_button(ui, "⚙").on_hover_text("Settings");
-        egui::Popup::menu(&button).show(|ui| {
-            ui.set_min_width(210.0);
-            ui.label(RichText::new("Appearance").size(11.5).color(theme::FAINT()));
-            ui.horizontal(|ui| {
-                for (choice, label) in [(ThemeChoice::System, "System"), (ThemeChoice::Light, "Light"), (ThemeChoice::Dark, "Dark")] {
-                    if ui.selectable_label(self.settings.theme == choice, label).clicked() {
-                        actions.push(Action::SetTheme(choice));
-                    }
-                }
-            });
+        let mut popup = egui::Popup::menu(&button);
+        // Debug builds: RGRIP_DEMO_MENU=settings opens this menu (screenshots).
+        if cfg!(debug_assertions) && std::env::var("RGRIP_DEMO_MENU").as_deref() == Ok("settings") {
+            popup = popup.open(true);
+        }
+        popup.show(|ui| {
+            ui.set_width(WIDTH);
+            menu_heading(ui, "Appearance");
+            if let Some(choice) = appearance_switch(ui, self.settings.theme, WIDTH) {
+                actions.push(Action::SetTheme(choice));
+            }
+            ui.add_space(4.0);
             for (dark, label, themes, current) in [
                 (true, "Dark theme", theme::DARK_THEMES, &self.settings.dark_theme),
                 (false, "Light theme", theme::LIGHT_THEMES, &self.settings.light_theme),
             ] {
-                ui.menu_button(format!("{label}: {current}"), |ui| {
-                    ui.set_min_width(200.0);
+                ui.menu_button(format!("{label}:  {current}"), |ui| {
+                    ui.set_width(220.0);
                     for t in themes {
-                        if theme_row(ui, t, t.name == current.as_str()).clicked() {
+                        if theme_row(ui, t, t.name == current.as_str(), 220.0).clicked() {
                             actions.push(Action::SetPalette(dark, t.name));
                         }
                     }
                 });
             }
             ui.separator();
-            ui.label(RichText::new("Updates").size(11.5).color(theme::FAINT()));
+            menu_heading(ui, "Updates");
             let busy = matches!(self.update, UpdateState::Checking { .. } | UpdateState::Installing(_));
             if ui.add_enabled(!busy, Button::new("Check for updates…")).clicked() {
                 actions.push(Action::CheckUpdate);
@@ -1244,20 +1258,63 @@ impl App {
     }
 }
 
-/// A theme entry: swatch of its background, accent and text, plus its name.
-fn theme_row(ui: &mut Ui, t: &theme::Palette, selected: bool) -> egui::Response {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 14.0), Sense::hover());
-        let p = ui.painter();
-        p.rect_filled(rect, 4.0, t.bg);
-        p.rect_stroke(rect, 4.0, Stroke::new(1.0, theme::BORDER()), egui::StrokeKind::Inside);
-        p.circle_filled(rect.center() - egui::vec2(4.5, 0.0), 3.5, t.accent);
-        p.circle_filled(rect.center() + egui::vec2(4.5, 0.0), 3.5, t.text);
-        let label = egui::Button::selectable(selected, t.name).min_size(egui::vec2(ui.available_width(), 0.0));
-        ui.add(label)
-    })
-    .inner
+fn menu_heading(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).size(11.5).color(theme::FAINT()));
+}
+
+/// System / Light / Dark segmented control with icons, filling `width`.
+fn appearance_switch(ui: &mut Ui, current: ThemeChoice, width: f32) -> Option<ThemeChoice> {
+    let options = [
+        (ThemeChoice::System, Icon::System, "System"),
+        (ThemeChoice::Light, Icon::Sun, "Light"),
+        (ThemeChoice::Dark, Icon::Moon, "Dark"),
+    ];
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 30.0), Sense::hover());
+    ui.painter().rect_filled(rect, 7.0, theme::HOVER());
+    let seg_w = (width - 4.0) / options.len() as f32;
+    let mut picked = None;
+    for (i, (choice, icon, label)) in options.into_iter().enumerate() {
+        let seg = egui::Rect::from_min_size(rect.min + egui::vec2(2.0 + i as f32 * seg_w, 2.0), egui::vec2(seg_w, 26.0));
+        let resp = ui.interact(seg, Id::new(("appearance", i)), Sense::click());
+        let selected = current == choice;
+        if selected {
+            ui.painter().rect_filled(seg, 5.0, theme::SURFACE());
+            ui.painter().rect_stroke(seg, 5.0, Stroke::new(1.0, theme::BORDER()), egui::StrokeKind::Inside);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(seg, 5.0, theme::SELECTED().gamma_multiply(0.5));
+        }
+        let text_color = if selected { theme::TEXT() } else { theme::MUTED() };
+        let galley = ui.painter().layout_no_wrap(label.into(), FontId::proportional(12.5), text_color);
+        let total = 16.0 + 6.0 + galley.size().x;
+        let left = seg.center().x - total / 2.0;
+        let tint = (!selected).then(theme::MUTED);
+        widgets::paint_icon_tinted(ui.painter(), egui::pos2(left + 8.0, seg.center().y), icon, tint);
+        ui.painter().galley(egui::pos2(left + 22.0, seg.center().y - galley.size().y / 2.0), galley, text_color);
+        if resp.clicked() && !selected {
+            picked = Some(choice);
+        }
+    }
+    picked
+}
+
+/// A theme entry: swatch (background, accent, text), name, check when active.
+fn theme_row(ui: &mut Ui, t: &theme::Palette, selected: bool, width: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 26.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, 5.0, theme::HOVER());
+    }
+    let swatch = egui::Rect::from_min_size(egui::pos2(rect.left() + 6.0, rect.center().y - 7.0), egui::vec2(26.0, 14.0));
+    p.rect_filled(swatch, 4.0, t.bg);
+    p.rect_stroke(swatch, 4.0, Stroke::new(1.0, theme::BORDER()), egui::StrokeKind::Inside);
+    p.circle_filled(swatch.center() - egui::vec2(4.5, 0.0), 3.5, t.accent);
+    p.circle_filled(swatch.center() + egui::vec2(4.5, 0.0), 3.5, t.text);
+    let color = if selected { theme::TEXT() } else { theme::MUTED() };
+    p.text(egui::pos2(swatch.right() + 9.0, rect.center().y), egui::Align2::LEFT_CENTER, t.name, FontId::proportional(13.0), color);
+    if selected {
+        p.text(egui::pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, "✓", FontId::proportional(13.0), theme::ACCENT());
+    }
+    resp
 }
 
 fn status_style(s: &Status) -> (Color32, String) {
@@ -1733,7 +1790,9 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
                     if cols.is_empty() {
                         centered(ui, |ui| muted(ui, "No geometry columns in this result"));
                     } else {
-                        map.show(ui, sets[n], &cols);
+                        if let Some(col) = map.show(ui, sets[n], &cols, paged.is_some()) {
+                            action = Some(TabAction::Reproject(col));
+                        }
                     }
                 }
                 _ => output_log(ui, out),
@@ -1936,7 +1995,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
         }
         Some(Ok(rs)) if t.show_map && !rs.geometry_columns().is_empty() => {
             let cols = rs.geometry_columns().to_vec();
-            t.map.show(ui, rs, &cols);
+            t.map.show(ui, rs, &cols, false);
         }
         Some(Ok(rs)) => {
             let sort = t.order.as_ref().map(|(c, asc)| Sort { column: c, ascending: *asc });
@@ -1960,6 +2019,13 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
 }
 
 // ---- saved query name prompt -------------------------------------------
+
+/// `query` wrapped to add `col` reprojected to WGS84 as `alias`.
+fn reproject_sql(query: &str, col: &str, alias: &str) -> String {
+    let id = |s: &str| if complete::needs_quotes(s) { sql::quote_ident(s) } else { s.to_string() };
+    let body = query.trim().trim_end_matches(';').trim_end();
+    format!("select q.*, ST_Transform(q.{}, 4326) as {}\nfrom (\n{body}\n) q;", id(col), id(alias))
+}
 
 /// First meaningful line of SQL, shortened, as a default query name.
 fn default_query_name(sql: &str, n: usize) -> String {
@@ -2570,6 +2636,15 @@ mod tests {
         assert_eq!(run(CloseWhich::ToTheRight(1), 0), (vec![0, 1], 0));
         assert_eq!(run(CloseWhich::All, 2), (vec![], 0));
         assert_eq!(run(CloseWhich::One(9), 1), (vec![0, 1, 2, 3], 1));
+    }
+
+    #[test]
+    fn reprojection_query() {
+        assert_eq!(
+            reproject_sql("select * from parcels where id < 10;\n", "geom", "geom_4326"),
+            "select q.*, ST_Transform(q.geom, 4326) as geom_4326\nfrom (\nselect * from parcels where id < 10\n) q;"
+        );
+        assert!(reproject_sql("select 1", "Geom Col", "Geom Col_4326").contains("q.\"Geom Col\""));
     }
 
     #[test]
