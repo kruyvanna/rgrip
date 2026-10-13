@@ -97,11 +97,11 @@ pub fn show(ui: &Ui, id: Id, p: &mut Popup, out: &TextEditOutput, sql: &str, edi
         .constrain(true)
         .show(ui.ctx(), |ui| {
             Frame::new()
-                .fill(theme::POPUP)
-                .stroke(Stroke::new(1.0, theme::BORDER))
+                .fill(theme::POPUP())
+                .stroke(Stroke::new(1.0, theme::BORDER()))
                 .corner_radius(CornerRadius::same(8))
                 .inner_margin(Margin::same(4))
-                .shadow(Shadow { offset: [0, 8], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(140) })
+                .shadow(Shadow { offset: [0, 8], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(if theme::is_dark() { 140 } else { 40 }) })
                 .show(ui, |ui| {
                     ui.set_width(WIDTH);
                     ui.spacing_mut().item_spacing.y = 0.0;
@@ -112,12 +112,12 @@ pub fn show(ui: &Ui, id: Id, p: &mut Popup, out: &TextEditOutput, sql: &str, edi
                             for (i, item) in p.completion.items.iter().enumerate() {
                                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::click());
                                 if i == p.selected {
-                                    ui.painter().rect_filled(rect, 5.0, theme::ACCENT.gamma_multiply(0.22));
+                                    ui.painter().rect_filled(rect, 5.0, theme::ACCENT().gamma_multiply(0.22));
                                     if p.scroll {
                                         resp.scroll_to_me(None);
                                     }
                                 } else if resp.hovered() {
-                                    ui.painter().rect_filled(rect, 5.0, theme::HOVER);
+                                    ui.painter().rect_filled(rect, 5.0, theme::HOVER());
                                 }
                                 paint_row(ui, rect, item, &p.completion.prefix);
                                 if resp.clicked() {
@@ -128,7 +128,7 @@ pub fn show(ui: &Ui, id: Id, p: &mut Popup, out: &TextEditOutput, sql: &str, edi
                     ui.add_space(3.0);
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
-                        let hint = |ui: &mut Ui, t: &str| ui.label(egui::RichText::new(t).size(11.0).color(theme::FAINT));
+                        let hint = |ui: &mut Ui, t: &str| ui.label(egui::RichText::new(t).size(11.0).color(theme::FAINT()));
                         hint(ui, "↩ insert    ↑↓ select    esc dismiss    ⌃space suggest");
                     });
                     ui.add_space(2.0);
@@ -163,19 +163,19 @@ fn paint_row(ui: &Ui, rect: egui::Rect, item: &rgrip_core::complete::Suggestion,
         Align2::RIGHT_CENTER,
         &item.detail,
         detail_font,
-        theme::FAINT,
+        theme::FAINT(),
     );
 
     let font = FontId::monospace(12.5);
     let mut job = LayoutJob::default();
     let split = matched_prefix_len(&item.label, prefix);
     let fmt = |color| TextFormat { font_id: font.clone(), color, ..Default::default() };
-    job.append(&item.label[..split], 0.0, fmt(theme::ACCENT));
-    job.append(&item.label[split..], 0.0, fmt(theme::TEXT));
+    job.append(&item.label[..split], 0.0, fmt(theme::ACCENT()));
+    job.append(&item.label[split..], 0.0, fmt(theme::TEXT()));
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let label_pos = egui::pos2(rect.left() + 30.0, cy - galley.size().y / 2.0);
     let clip = egui::Rect::from_min_max(rect.min, egui::pos2(detail.left() - 8.0, rect.max.y));
-    p.with_clip_rect(clip).galley(label_pos, galley, theme::TEXT);
+    p.with_clip_rect(clip).galley(label_pos, galley, theme::TEXT());
 }
 
 /// Byte length of the label's case-insensitive match of `prefix`.

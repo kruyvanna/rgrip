@@ -22,6 +22,10 @@ pub enum Cmd {
     Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize> },
     TableData { conn: ConnId, tab: TabId, query: TableQuery },
     Cancel(ConnId),
+    /// Look for a newer release.
+    CheckUpdate,
+    /// Download, verify and install a release over `app`.
+    InstallUpdate { release: rgrip_core::update::Release, app: std::path::PathBuf },
     /// Run `sql` uncapped and write it to `path`.
     ExportAll { conn: ConnId, sql: String, format: rgrip_core::export::Format, table: String, path: std::path::PathBuf },
 }
@@ -40,6 +44,9 @@ pub enum Ev {
     TableCount { tab: TabId, result: Result<i64, String> },
     /// Path and row count, or an error.
     Exported(Result<(std::path::PathBuf, usize), String>),
+    UpdateChecked(Result<Option<rgrip_core::update::Release>, String>),
+    /// The bundle that was updated (ready to relaunch), or an error.
+    UpdateInstalled(Result<std::path::PathBuf, String>),
 }
 
 pub struct Worker {
@@ -186,6 +193,23 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                 Err(e) => Err(e),
             };
             emit.send(Ev::Exported(result));
+        }
+        Cmd::CheckUpdate => emit.send(Ev::UpdateChecked(rgrip_core::update::check().await)),
+        Cmd::InstallUpdate { release, app } => {
+            let dir = std::env::temp_dir();
+            let result = match rgrip_core::update::download(&release, &dir).await {
+                Ok(zip) => {
+                    let installed = tokio::task::spawn_blocking(move || {
+                        let r = rgrip_core::update::install(&zip, &app).map(|_| app);
+                        let _ = std::fs::remove_file(&zip);
+                        r
+                    })
+                    .await;
+                    installed.unwrap_or_else(|e| Err(e.to_string()))
+                }
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::UpdateInstalled(result));
         }
         Cmd::Cancel(conn) => {
             if let Ok(c) = get(&conns, &conn) {

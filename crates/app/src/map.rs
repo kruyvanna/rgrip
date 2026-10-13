@@ -171,7 +171,9 @@ impl Default for MapView {
             basemap: match std::env::var("RGRIP_DEMO_BASEMAP").as_deref() {
                 Ok("satellite") if cfg!(debug_assertions) => Basemap::Satellite,
                 Ok("streets") if cfg!(debug_assertions) => Basemap::Light,
-                _ => Basemap::Dark,
+                // Match the app: dark basemap in dark mode, streets in light.
+                _ if theme::is_dark() => Basemap::Dark,
+                _ => Basemap::Light,
             },
             fitted: None,
             selected: None,
@@ -272,8 +274,8 @@ impl MapView {
                 .fixed_pos(pos)
                 .show(ui.ctx(), |ui| {
                     Frame::new()
-                        .fill(theme::POPUP.gamma_multiply(0.94))
-                        .stroke(Stroke::new(1.0, theme::BORDER))
+                        .fill(theme::POPUP().gamma_multiply(0.94))
+                        .stroke(Stroke::new(1.0, theme::BORDER()))
                         .corner_radius(8)
                         .inner_margin(Margin::symmetric(8, 6))
                         .show(ui, |ui| ui.horizontal(|ui| add(ui)));
@@ -300,10 +302,10 @@ impl MapView {
             if ui.button("Fit").on_hover_text("Zoom to all features").clicked() {
                 fit = true;
             }
-            ui.label(RichText::new(crate::app::plural(data.features.len(), "feature")).size(11.5).color(theme::MUTED));
+            ui.label(RichText::new(crate::app::plural(data.features.len(), "feature")).size(11.5).color(theme::MUTED()));
             if data.skipped > 0 {
                 let srids = data.srids.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ");
-                ui.label(RichText::new(format!("{} not shown (SRID {srids})", data.skipped)).size(11.5).color(theme::WARN))
+                ui.label(RichText::new(format!("{} not shown (SRID {srids})", data.skipped)).size(11.5).color(theme::WARN()))
                     .on_hover_text("Only WGS84, Web Mercator and UTM can be drawn.\nUse ST_Transform(geom, 4326) in the query.");
             }
         });
@@ -311,14 +313,12 @@ impl MapView {
             self.fit(data, rect.size());
         }
 
-        let text = attribution(self.basemap);
-        ui.painter().text(
-            rect.right_bottom() - vec2(8.0, 6.0),
-            Align2::RIGHT_BOTTOM,
-            text,
-            FontId::proportional(10.0),
-            Color32::from_white_alpha(150),
-        );
+        // Attribution on a small backing so it reads on any basemap.
+        let galley = ui.painter().layout_no_wrap(attribution(self.basemap).into(), FontId::proportional(10.0), theme::MUTED());
+        let pos = rect.right_bottom() - vec2(8.0, 6.0) - galley.size();
+        let back = Rect::from_min_size(pos, galley.size()).expand2(vec2(5.0, 2.0));
+        ui.painter().rect_filled(back, 4.0, theme::POPUP().gamma_multiply(0.85));
+        ui.painter().galley(pos, galley, theme::MUTED());
     }
 
     fn details(&mut self, ui: &mut Ui, rect: Rect, rs: &ResultSet, row: usize) {
@@ -329,8 +329,8 @@ impl MapView {
             .fixed_pos(rect.right_top() + vec2(-12.0, 12.0))
             .show(ui.ctx(), |ui| {
                 Frame::new()
-                    .fill(theme::POPUP)
-                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .fill(theme::POPUP())
+                    .stroke(Stroke::new(1.0, theme::BORDER()))
                     .corner_radius(10)
                     .inner_margin(Margin::same(12))
                     .show(ui, |ui| {
@@ -347,12 +347,12 @@ impl MapView {
                         egui::ScrollArea::vertical().max_height(rect.height() - 120.0).show(ui, |ui| {
                             egui::Grid::new("map-attrs").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                                 for (i, name) in rs.columns.iter().enumerate() {
-                                    ui.label(RichText::new(name).size(12.0).color(theme::MUTED));
+                                    ui.label(RichText::new(name).size(12.0).color(theme::MUTED()));
                                     match rs.rows[row][i].as_deref() {
-                                        None => ui.label(RichText::new("NULL").italics().color(theme::FAINT)),
+                                        None => ui.label(RichText::new("NULL").italics().color(theme::FAINT())),
                                         Some(v) => match geo::parse_hex(v) {
-                                            Some(g) => ui.label(RichText::new(g.summary()).size(12.0).color(theme::GEO)),
-                                            None => shaping::label(ui, v, 12.5, theme::TEXT),
+                                            Some(g) => ui.label(RichText::new(g.summary()).size(12.0).color(theme::GEO())),
+                                            None => shaping::label(ui, v, 12.5, theme::TEXT()),
                                         },
                                     };
                                     ui.end_row();
@@ -376,10 +376,10 @@ fn feature_title(ui: &mut Ui, rs: &ResultSet, row: usize, geom_col: usize) {
         .and_then(|c| rs.rows[row][c].clone());
     match name {
         Some(n) => {
-            shaping::label(ui, &n, 13.5, theme::TEXT);
+            shaping::label(ui, &n, 13.5, theme::TEXT());
         }
         None => {
-            ui.label(RichText::new(format!("Row {}", row + 1)).color(theme::TEXT));
+            ui.label(RichText::new(format!("Row {}", row + 1)).color(theme::TEXT()));
         }
     }
 }
@@ -431,11 +431,11 @@ impl Plugin for Features<'_> {
 
         let style = |i: usize| -> Color32 {
             if Some(i) == self.selected {
-                theme::WARN
+                theme::WARN()
             } else if Some(i) == hit {
                 Color32::WHITE
             } else {
-                theme::GEO
+                theme::GEO()
             }
         };
         let mut shapes = Vec::new();

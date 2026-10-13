@@ -4267,7 +4267,7 @@ dependencies = [
 
 [[package]]
 name = "rgrip"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "ab_glyph",
  "earcutr",
@@ -4282,14 +4282,17 @@ dependencies = [
 
 [[package]]
 name = "rgrip-core"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "directories",
+ "reqwest",
  "russh",
  "rustls",
  "rustls-native-certs",
+ "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",

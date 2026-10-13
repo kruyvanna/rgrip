@@ -28,49 +28,49 @@ pub fn paint_icon(p: &Painter, c: Pos2, icon: Icon) {
         Icon::Database(status) => {
             // Cylinder: body plus two rims, with a status dot.
             let body = Rect::from_center_size(c, vec2(10.0, 11.0));
-            p.rect_stroke(body, CornerRadius::same(3), thin(theme::MUTED), StrokeKind::Inside);
-            p.line_segment([pos2(body.left() + 1.0, c.y - 1.5), pos2(body.right() - 1.0, c.y - 1.5)], thin(theme::MUTED));
-            p.circle_filled(pos2(body.right(), body.bottom()), 3.0, theme::BG);
+            p.rect_stroke(body, CornerRadius::same(3), thin(theme::MUTED()), StrokeKind::Inside);
+            p.line_segment([pos2(body.left() + 1.0, c.y - 1.5), pos2(body.right() - 1.0, c.y - 1.5)], thin(theme::MUTED()));
+            p.circle_filled(pos2(body.right(), body.bottom()), 3.0, theme::BG());
             p.circle_filled(pos2(body.right(), body.bottom()), 2.2, status);
         }
         Icon::Schema => {
             let r = Rect::from_center_size(c + vec2(0.0, 0.5), vec2(12.0, 9.0));
-            p.rect_stroke(r, CornerRadius::same(2), thin(theme::MUTED), StrokeKind::Inside);
-            p.line_segment([pos2(r.left(), r.top() - 1.5), pos2(r.left() + 5.0, r.top() - 1.5)], thin(theme::MUTED));
+            p.rect_stroke(r, CornerRadius::same(2), thin(theme::MUTED()), StrokeKind::Inside);
+            p.line_segment([pos2(r.left(), r.top() - 1.5), pos2(r.left() + 5.0, r.top() - 1.5)], thin(theme::MUTED()));
         }
         Icon::Table | Icon::View => {
-            let color = if matches!(icon, Icon::Table) { theme::ACCENT } else { theme::VIEW };
+            let color = if matches!(icon, Icon::Table) { theme::ACCENT() } else { theme::VIEW() };
             let r = Rect::from_center_size(c, vec2(12.0, 10.0));
             p.rect_stroke(r, CornerRadius::same(2), thin(color), StrokeKind::Inside);
             p.line_segment([pos2(r.left(), r.top() + 3.5), pos2(r.right(), r.top() + 3.5)], thin(color));
             p.line_segment([pos2(c.x, r.top() + 3.5), pos2(c.x, r.bottom())], thin(color.gamma_multiply(0.6)));
         }
         Icon::Column => {
-            p.circle_stroke(c, 2.6, thin(theme::FAINT));
+            p.circle_stroke(c, 2.6, thin(theme::FAINT()));
         }
         Icon::Key => {
-            p.circle_stroke(c - vec2(2.0, 0.0), 2.6, thin(theme::WARN));
-            p.line_segment([c + vec2(0.6, 0.0), c + vec2(5.0, 0.0)], thin(theme::WARN));
-            p.line_segment([c + vec2(4.0, 0.0), c + vec2(4.0, 2.2)], thin(theme::WARN));
+            p.circle_stroke(c - vec2(2.0, 0.0), 2.6, thin(theme::WARN()));
+            p.line_segment([c + vec2(0.6, 0.0), c + vec2(5.0, 0.0)], thin(theme::WARN()));
+            p.line_segment([c + vec2(4.0, 0.0), c + vec2(4.0, 2.2)], thin(theme::WARN()));
         }
         Icon::Keyword => {
-            let s = thin(theme::MUTED);
+            let s = thin(theme::MUTED());
             for (dy, w) in [(-3.0, 9.0), (0.0, 6.0), (3.0, 8.0)] {
                 p.line_segment([c + vec2(-4.5, dy), c + vec2(-4.5 + w, dy)], s);
             }
         }
         Icon::Function => {
-            p.text(c, Align2::CENTER_CENTER, "ƒ", FontId::proportional(13.0), theme::WARN);
+            p.text(c, Align2::CENTER_CENTER, "ƒ", FontId::proportional(13.0), theme::WARN());
         }
         Icon::Query => {
             let r = Rect::from_center_size(c, vec2(9.0, 11.5));
-            p.rect_stroke(r, CornerRadius::same(2), thin(theme::MUTED), StrokeKind::Inside);
+            p.rect_stroke(r, CornerRadius::same(2), thin(theme::MUTED()), StrokeKind::Inside);
             for dy in [-1.5, 1.0] {
-                p.line_segment([pos2(r.left() + 2.2, c.y + dy), pos2(r.right() - 2.2, c.y + dy)], thin(theme::MUTED));
+                p.line_segment([pos2(r.left() + 2.2, c.y + dy), pos2(r.right() - 2.2, c.y + dy)], thin(theme::MUTED()));
             }
         }
         Icon::Console => {
-            let s = thin(theme::ACCENT);
+            let s = thin(theme::ACCENT());
             p.line_segment([c + vec2(-5.0, -3.5), c + vec2(-1.5, 0.0)], s);
             p.line_segment([c + vec2(-1.5, 0.0), c + vec2(-5.0, 3.5)], s);
             p.line_segment([c + vec2(0.5, 3.5), c + vec2(5.0, 3.5)], s);
@@ -114,14 +114,14 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>) -> Response {
     }
     let p = ui.painter().with_clip_rect(rect);
     if row.selected {
-        p.rect_filled(rect, 5.0, theme::ACCENT.gamma_multiply(0.16));
+        p.rect_filled(rect, 5.0, theme::ACCENT().gamma_multiply(0.16));
     } else if resp.hovered() {
-        p.rect_filled(rect, 5.0, theme::HOVER);
+        p.rect_filled(rect, 5.0, theme::HOVER());
     }
     let cy = rect.center().y;
     let mut x = rect.left() + 6.0 + row.depth as f32 * 14.0;
     if let Some(open) = row.open {
-        let color = if resp.hovered() { theme::TEXT } else { theme::FAINT };
+        let color = if resp.hovered() { theme::TEXT() } else { theme::FAINT() };
         paint_chevron(&p, pos2(x + 4.0, cy), open, color);
     }
     x += 14.0;
@@ -140,7 +140,7 @@ pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>) -> Response {
             Align2::LEFT_CENTER,
             detail,
             FontId::proportional(11.5),
-            theme::FAINT,
+            theme::FAINT(),
         );
     }
     resp

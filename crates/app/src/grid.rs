@@ -138,7 +138,7 @@ pub fn show(
                                 text += if s.ascending { "  ↑" } else { "  ↓" };
                             }
                             let r = ui.add(
-                                Label::new(RichText::new(text).size(12.5).color(theme::TEXT))
+                                Label::new(RichText::new(text).size(12.5).color(theme::TEXT()))
                                     .truncate()
                                     .selectable(false)
                                     .sense(Sense::click()),
@@ -156,7 +156,7 @@ pub fn show(
                         row.col(|ui| {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.add_space(8.0);
-                                ui.label(RichText::new((row_offset + i + 1).to_string()).size(11.0).color(theme::FAINT));
+                                ui.label(RichText::new((row_offset + i + 1).to_string()).size(11.0).color(theme::FAINT()));
                             });
                         });
                         for (col, value) in rs.rows[i].iter().enumerate() {
@@ -195,7 +195,7 @@ pub fn show(
 
 fn cell(ui: &mut Ui, cache: &mut Cache, row: usize, col: usize, value: Option<&str>) {
     let Some(s) = value else {
-        ui.add(Label::new(RichText::new("NULL").italics().color(theme::FAINT)).selectable(false));
+        ui.add(Label::new(RichText::new("NULL").italics().color(theme::FAINT())).selectable(false));
         return;
     };
     if cache.geom_cols.contains(&col) {
@@ -204,7 +204,7 @@ fn cell(ui: &mut Ui, cache: &mut Cache, row: usize, col: usize, value: Option<&s
             Some(g) => (g.summary(), cell_text(&g.geometry.to_wkt(), HOVER_CHARS)),
             None => (cell_text(s, CELL_CHARS), String::new()),
         });
-        let r = ui.add(Label::new(RichText::new(summary.as_str()).monospace().color(theme::GEO)).truncate().selectable(false));
+        let r = ui.add(Label::new(RichText::new(summary.as_str()).monospace().color(theme::GEO())).truncate().selectable(false));
         if !wkt.is_empty() {
             let wkt = wkt.clone();
             r.on_hover_ui(|ui| {
@@ -216,7 +216,7 @@ fn cell(ui: &mut Ui, cache: &mut Cache, row: usize, col: usize, value: Option<&s
     let text = cell_text(s, CELL_CHARS);
     let r = if crate::shaping::is_complex(&text) {
         // Khmer needs real shaping, which egui's text layout lacks.
-        crate::shaping::label(ui, &text, 13.5, theme::TEXT)
+        crate::shaping::label(ui, &text, 13.5, theme::TEXT())
     } else {
         ui.add(Label::new(RichText::new(text).monospace()).truncate().selectable(false))
     };
@@ -261,9 +261,9 @@ fn all_tsv(rs: &ResultSet) -> String {
 fn header_bg(ui: &mut Ui) {
     let r = ui.max_rect();
     let p = ui.painter();
-    p.rect_filled(r, 0.0, theme::BG);
-    p.hline(r.x_range(), r.bottom(), Stroke::new(1.0, theme::BORDER));
-    p.vline(r.right(), r.y_range().shrink(7.0), Stroke::new(1.0, theme::BORDER));
+    p.rect_filled(r, 0.0, theme::BG());
+    p.hline(r.x_range(), r.bottom(), Stroke::new(1.0, theme::BORDER()));
+    p.vline(r.right(), r.y_range().shrink(7.0), Stroke::new(1.0, theme::BORDER()));
 }
 
 #[cfg(test)]
@@ -316,7 +316,7 @@ mod perf {
         let rs = heavy_page();
         let ctx = egui::Context::default();
         ctx.set_pixels_per_point(2.0);
-        crate::theme::apply(&ctx);
+        crate::theme::apply(&ctx, rgrip_core::config::ThemeChoice::Dark, "rgrip Dark", "rgrip Light");
         let mut state = GridState::default();
         let mut frame = |scroll: f32| {
             let input = egui::RawInput {

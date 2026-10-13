@@ -8,7 +8,8 @@ use eframe::egui::{
 };
 use crate::completion::{self, Popup};
 use rgrip_core::complete::{self, Catalog};
-use rgrip_core::config::SavedQuery;
+use rgrip_core::config::{SavedQuery, Settings, ThemeChoice};
+use rgrip_core::update::{self, Release};
 use rgrip_core::{config, export, sql, *};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -205,8 +206,16 @@ enum Action {
     ActivateTab(usize),
     Close(CloseWhich),
     OpenSaved(usize),
+    SetTheme(ThemeChoice),
+    /// Pick a palette by name; `true` for the dark list.
+    SetPalette(bool, &'static str),
+    SetAutoUpdate(bool),
+    CheckUpdate,
+    InstallUpdate,
     RenameSaved(usize),
     DeleteSaved(usize),
+    RevealSaved(usize),
+    OpenQueriesFolder,
     Toggle(String),
     Select(String),
 }
@@ -246,6 +255,14 @@ fn close_tabs<T>(tabs: &mut Vec<T>, active: &mut usize, which: CloseWhich) {
     }
 }
 
+enum UpdateState {
+    Idle,
+    /// `manual`: report "up to date" and errors (launch checks stay quiet).
+    Checking { manual: bool },
+    Available(Release),
+    Installing(Release),
+}
+
 struct NamePrompt {
     name: String,
     target: NameTarget,
@@ -281,20 +298,53 @@ pub struct App {
     notice: Option<String>,
     saved: Vec<SavedQuery>,
     name_prompt: Option<NamePrompt>,
+    settings: Settings,
+    update: UpdateState,
+    /// Close the window at the end of this frame (relaunching after an update).
+    ctx_close: bool,
+    was_focused: bool,
+    egui_ctx: egui::Context,
     /// Transient status-bar message (text, color, when).
     toast: Option<(String, Color32, Instant)>,
     /// Keys of expanded explorer nodes.
     expanded: HashSet<String>,
     selected: Option<String>,
-    #[cfg(debug_assertions)]
-    ctx: egui::Context,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&cc.egui_ctx);
+        let settings = config::load_settings();
+        // Debug builds: RGRIP_DEMO_THEME=light|dark and RGRIP_DEMO_PALETTE=<name>
+        // for screenshots (not saved).
+        let mut theme_choice = match std::env::var("RGRIP_DEMO_THEME").as_deref() {
+            Ok("light") if cfg!(debug_assertions) => ThemeChoice::Light,
+            Ok("dark") if cfg!(debug_assertions) => ThemeChoice::Dark,
+            _ => settings.theme,
+        };
+        let (mut dark_name, mut light_name) = (settings.dark_theme.clone(), settings.light_theme.clone());
+        if let Some(name) = std::env::var("RGRIP_DEMO_PALETTE").ok().filter(|_| cfg!(debug_assertions)) {
+            if theme::DARK_THEMES.iter().any(|t| t.name == name) {
+                (dark_name, theme_choice) = (name, ThemeChoice::Dark);
+            } else if theme::LIGHT_THEMES.iter().any(|t| t.name == name) {
+                (light_name, theme_choice) = (name, ThemeChoice::Light);
+            }
+        }
+        theme::apply(&cc.egui_ctx, theme_choice, &dark_name, &light_name);
+        let worker = Worker::spawn(cc.egui_ctx.clone());
+        // Launch checks only in release builds (dev runs restart a lot), or
+        // when a test API is configured.
+        let check_now =
+            settings.check_updates && (!cfg!(debug_assertions) || std::env::var("RGRIP_UPDATE_API").is_ok());
+        if check_now {
+            worker.send(Cmd::CheckUpdate);
+        }
         Self {
-            worker: Worker::spawn(cc.egui_ctx.clone()),
+            update: if check_now { UpdateState::Checking { manual: false } } else { UpdateState::Idle },
+            ctx_close: false,
+            was_focused: true,
+            egui_ctx: cc.egui_ctx.clone(),
+            settings,
+            worker,
             conns: config::load_connections().into_iter().map(Conn::new).collect(),
             tabs: Vec::new(),
             active: 0,
@@ -307,8 +357,6 @@ impl App {
             toast: None,
             expanded: HashSet::new(),
             selected: None,
-            #[cfg(debug_assertions)]
-            ctx: cc.egui_ctx.clone(),
         }
     }
 
@@ -424,12 +472,42 @@ impl App {
                     self.toast = Some(match result {
                         Ok((path, rows)) => (
                             format!("Exported {} to {}", plural(rows, "row"), path.display()),
-                            theme::OK,
+                            theme::OK(),
                             Instant::now(),
                         ),
-                        Err(e) => (format!("Export failed: {e}"), theme::ERROR, Instant::now()),
+                        Err(e) => (format!("Export failed: {e}"), theme::ERROR(), Instant::now()),
                     });
                 }
+                Ev::UpdateChecked(result) => {
+                    let manual = matches!(self.update, UpdateState::Checking { manual: true });
+                    self.update = match result {
+                        Ok(Some(release)) => UpdateState::Available(release),
+                        Ok(None) => {
+                            if manual {
+                                self.toast = Some((format!("rgrip {} is up to date", update::CURRENT), theme::OK(), Instant::now()));
+                            }
+                            UpdateState::Idle
+                        }
+                        Err(e) => {
+                            if manual {
+                                self.toast = Some((e, theme::ERROR(), Instant::now()));
+                            }
+                            UpdateState::Idle
+                        }
+                    };
+                }
+                Ev::UpdateInstalled(result) => match result {
+                    Ok(app) => match update::relaunch(&app) {
+                        Ok(()) => self.ctx_close = true,
+                        Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
+                    },
+                    Err(e) => {
+                        if let UpdateState::Installing(r) = std::mem::replace(&mut self.update, UpdateState::Idle) {
+                            self.update = UpdateState::Available(r);
+                        }
+                        self.toast = Some((e, theme::ERROR(), Instant::now()));
+                    }
+                },
                 Ev::TableCount { tab, result } => {
                     if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab) {
                         t.total = result.ok();
@@ -534,9 +612,34 @@ impl App {
         close_tabs(&mut self.tabs, &mut self.active, CloseWhich::One(i));
     }
 
-    fn persist_queries(&mut self) {
-        if let Err(e) = config::save_queries(&self.saved) {
-            self.notice = Some(format!("Could not save queries: {e}"));
+    fn save_settings(&mut self) {
+        if let Err(e) = config::save_settings(&self.settings) {
+            self.notice = Some(format!("Could not save settings: {e}"));
+        }
+    }
+
+    /// Re-read the queries folder (files may be edited outside the app).
+    fn reload_queries(&mut self) {
+        self.saved = config::load_queries();
+    }
+
+    fn report(&mut self, result: Result<(), String>) {
+        if let Err(e) = result {
+            self.toast = Some((e, theme::ERROR(), Instant::now()));
+        }
+    }
+
+    /// Point consoles linked to saved query `old` at `new` (None = unlink).
+    fn relink(&mut self, old: &str, new: Option<(&str, &str)>) {
+        for tab in &mut self.tabs {
+            if let TabKind::Console(c) = &mut tab.kind {
+                if c.saved_id.as_deref() == Some(old) {
+                    c.saved_id = new.map(|(id, _)| id.to_string());
+                    if let Some((_, name)) = new {
+                        tab.title = name.to_string();
+                    }
+                }
+            }
         }
     }
 
@@ -626,22 +729,75 @@ impl App {
             Action::ActivateTab(i) => self.active = i,
             Action::Close(which) => close_tabs(&mut self.tabs, &mut self.active, which),
             Action::OpenSaved(i) => self.open_saved(i),
+            Action::SetTheme(choice) => {
+                self.settings.theme = choice;
+                theme::set_choice(&self.egui_ctx, choice);
+                self.save_settings();
+            }
+            Action::SetPalette(dark, name) => {
+                if dark {
+                    self.settings.dark_theme = name.into();
+                } else {
+                    self.settings.light_theme = name.into();
+                }
+                theme::set_themes(&self.egui_ctx, &self.settings.dark_theme, &self.settings.light_theme);
+                // Show the chosen theme right away.
+                let wanted = if dark { ThemeChoice::Dark } else { ThemeChoice::Light };
+                if self.settings.theme != ThemeChoice::System || theme::is_dark() != dark {
+                    self.settings.theme = wanted;
+                    theme::set_choice(&self.egui_ctx, wanted);
+                }
+                self.save_settings();
+            }
+            Action::SetAutoUpdate(on) => {
+                self.settings.check_updates = on;
+                self.save_settings();
+            }
+            Action::CheckUpdate => {
+                if !matches!(self.update, UpdateState::Checking { .. } | UpdateState::Installing(_)) {
+                    self.update = UpdateState::Checking { manual: true };
+                    self.worker.send(Cmd::CheckUpdate);
+                }
+            }
+            Action::InstallUpdate => {
+                if let UpdateState::Available(release) = &self.update {
+                    match update::current_bundle() {
+                        Some(app) => {
+                            let release = release.clone();
+                            self.worker.send(Cmd::InstallUpdate { release: release.clone(), app });
+                            self.update = UpdateState::Installing(release);
+                        }
+                        // Running from source: send the user to the release page.
+                        None => self.egui_ctx.open_url(egui::OpenUrl::new_tab(&release.page_url)),
+                    }
+                }
+            }
             Action::RenameSaved(i) => {
                 if let Some(q) = self.saved.get(i) {
                     self.name_prompt = Some(NamePrompt { name: q.name.clone(), target: NameTarget::Rename(q.id.clone()) });
                 }
             }
             Action::DeleteSaved(i) => {
-                if i < self.saved.len() {
-                    let q = self.saved.remove(i);
-                    for tab in &mut self.tabs {
-                        if let TabKind::Console(c) = &mut tab.kind {
-                            if c.saved_id.as_ref() == Some(&q.id) {
-                                c.saved_id = None;
-                            }
-                        }
+                if let Some(q) = self.saved.get(i).cloned() {
+                    let result = config::delete_query(&q);
+                    if result.is_ok() {
+                        self.relink(&q.id, None);
+                        self.toast = Some((format!("Moved “{}” to the Trash", q.name), theme::MUTED(), Instant::now()));
                     }
-                    self.persist_queries();
+                    self.report(result);
+                    self.reload_queries();
+                }
+            }
+            Action::RevealSaved(i) => {
+                if let Some(path) = self.saved.get(i).map(|q| q.path.clone()) {
+                    let result = config::reveal_in_finder(&path);
+                    self.report(result);
+                }
+            }
+            Action::OpenQueriesFolder => {
+                if let Some(dir) = config::queries_dir() {
+                    let _ = std::fs::create_dir_all(&dir);
+                    self.egui_ctx.open_url(egui::OpenUrl::same_tab(format!("file://{}", dir.display())));
                 }
             }
         }
@@ -699,9 +855,11 @@ impl App {
                     Some(q) => {
                         q.sql = c.sql.clone();
                         q.connection = Some(tab.conn.clone());
-                        let name = q.name.clone();
-                        self.persist_queries();
-                        self.toast = Some((format!("Saved “{name}”"), theme::OK, Instant::now()));
+                        let (name, result) = (q.name.clone(), config::update_query(q));
+                        if result.is_ok() {
+                            self.toast = Some((format!("Saved “{name}”"), theme::OK(), Instant::now()));
+                        }
+                        self.report(result);
                     }
                     None => {
                         let name = default_query_name(&c.sql, self.saved.len() + 1);
@@ -720,7 +878,7 @@ impl App {
                         format!("{}.{}", t.schema, t.table),
                     ),
                 };
-                self.toast = Some((format!("Exporting to {}…", path.display()), theme::MUTED, Instant::now()));
+                self.toast = Some((format!("Exporting to {}…", path.display()), theme::MUTED(), Instant::now()));
                 self.worker.send(Cmd::ExportAll { conn: tab.conn.clone(), sql, format, table, path });
             }
             (TabAction::Cancel, TabKind::Console(c)) => {
@@ -775,7 +933,7 @@ impl App {
                     c.cursor = chars..chars;
                     c.focus = true;
                     let id = Id::new(("editor", tab.id));
-                    let ctx = self.ctx.clone();
+                    let ctx = self.egui_ctx.clone();
                     let mut state = TextEdit::load_state(&ctx, id).unwrap_or_default();
                     state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(chars))));
                     state.store(&ctx, id);
@@ -826,6 +984,13 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        theme::sync(ctx);
+        // Pick up query files edited in another app when we come back.
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.was_focused {
+            self.reload_queries();
+        }
+        self.was_focused = focused;
         #[cfg(debug_assertions)]
         self.demo_hook();
         self.handle_events();
@@ -841,18 +1006,18 @@ impl eframe::App for App {
 
         egui::TopBottomPanel::bottom("status")
             .exact_height(26.0)
-            .frame(Frame::new().fill(theme::BG).inner_margin(Margin::symmetric(12, 4)))
-            .show(ctx, |ui| self.status_bar(ui));
+            .frame(Frame::new().fill(theme::BG()).inner_margin(Margin::symmetric(12, 4)))
+            .show(ctx, |ui| self.status_bar(ui, &mut actions));
 
         egui::SidePanel::left("explorer")
             .resizable(true)
             .default_width(270.0)
             .width_range(180.0..=560.0)
-            .frame(Frame::new().fill(theme::BG).inner_margin(Margin { left: 8, right: 8, top: 4, bottom: 8 }))
+            .frame(Frame::new().fill(theme::BG()).inner_margin(Margin { left: 8, right: 8, top: 4, bottom: 8 }))
             .show(ctx, |ui| self.explorer(ui, &mut actions));
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(theme::SURFACE))
+            .frame(Frame::new().fill(theme::SURFACE()))
             .show(ctx, |ui| {
                 if self.tabs.is_empty() {
                     empty_state(ui, &mut actions, self.conns.is_empty());
@@ -871,6 +1036,9 @@ impl eframe::App for App {
         for a in actions {
             self.apply(a);
         }
+        if self.ctx_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 }
 
@@ -880,8 +1048,9 @@ impl App {
     fn explorer(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.label(RichText::new("Explorer").size(12.0).color(theme::MUTED));
+            ui.label(RichText::new("Explorer").size(12.0).color(theme::MUTED()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                self.settings_menu(ui, actions);
                 if icon_button(ui, "+").on_hover_text("New connection").clicked() {
                     actions.push(Action::NewConnection);
                 }
@@ -897,7 +1066,7 @@ impl App {
         ui.add_space(8.0);
 
         if self.conns.is_empty() {
-            widgets::tree_note(ui, 0, "No connections yet.", theme::MUTED);
+            widgets::tree_note(ui, 0, "No connections yet.", theme::MUTED());
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
                 if ui.link("Add a connection").clicked() {
@@ -918,6 +1087,47 @@ impl App {
         });
     }
 
+    fn settings_menu(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        let button = icon_button(ui, "⚙").on_hover_text("Settings");
+        egui::Popup::menu(&button).show(|ui| {
+            ui.set_min_width(210.0);
+            ui.label(RichText::new("Appearance").size(11.5).color(theme::FAINT()));
+            ui.horizontal(|ui| {
+                for (choice, label) in [(ThemeChoice::System, "System"), (ThemeChoice::Light, "Light"), (ThemeChoice::Dark, "Dark")] {
+                    if ui.selectable_label(self.settings.theme == choice, label).clicked() {
+                        actions.push(Action::SetTheme(choice));
+                    }
+                }
+            });
+            for (dark, label, themes, current) in [
+                (true, "Dark theme", theme::DARK_THEMES, &self.settings.dark_theme),
+                (false, "Light theme", theme::LIGHT_THEMES, &self.settings.light_theme),
+            ] {
+                ui.menu_button(format!("{label}: {current}"), |ui| {
+                    ui.set_min_width(200.0);
+                    for t in themes {
+                        if theme_row(ui, t, t.name == current.as_str()).clicked() {
+                            actions.push(Action::SetPalette(dark, t.name));
+                        }
+                    }
+                });
+            }
+            ui.separator();
+            ui.label(RichText::new("Updates").size(11.5).color(theme::FAINT()));
+            let busy = matches!(self.update, UpdateState::Checking { .. } | UpdateState::Installing(_));
+            if ui.add_enabled(!busy, Button::new("Check for updates…")).clicked() {
+                actions.push(Action::CheckUpdate);
+                ui.close();
+            }
+            let mut auto = self.settings.check_updates;
+            if ui.checkbox(&mut auto, "Check automatically").changed() {
+                actions.push(Action::SetAutoUpdate(auto));
+            }
+            ui.separator();
+            ui.label(RichText::new(format!("rgrip {}", update::CURRENT)).size(11.5).color(theme::FAINT()));
+        });
+    }
+
     fn saved_section(&self, ui: &mut Ui, filter: &str, actions: &mut Vec<Action>) {
         if self.saved.is_empty() {
             return;
@@ -925,8 +1135,13 @@ impl App {
         ui.add_space(14.0);
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.label(RichText::new("Saved queries").size(12.0).color(theme::MUTED));
-            ui.label(RichText::new(self.saved.len().to_string()).size(11.0).color(theme::FAINT));
+            ui.label(RichText::new("Saved queries").size(12.0).color(theme::MUTED()));
+            ui.label(RichText::new(self.saved.len().to_string()).size(11.0).color(theme::FAINT()));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if icon_button(ui, "↗").on_hover_text("Open queries folder in Finder").clicked() {
+                    actions.push(Action::OpenQueriesFolder);
+                }
+            });
         });
         ui.add_space(4.0);
         let active_saved = self.tabs.get(self.active).and_then(|t| match &t.kind {
@@ -945,7 +1160,7 @@ impl App {
                     open: None,
                     icon: Icon::Query,
                     label: &q.name,
-                    label_color: theme::TEXT,
+                    label_color: theme::TEXT(),
                     detail: conn.as_deref(),
                     selected: active_saved.as_ref() == Some(&q.id),
                 },
@@ -963,8 +1178,12 @@ impl App {
                     actions.push(Action::RenameSaved(i));
                     ui.close();
                 }
+                if ui.button("Reveal in Finder").clicked() {
+                    actions.push(Action::RevealSaved(i));
+                    ui.close();
+                }
                 ui.separator();
-                if ui.button(RichText::new("Delete").color(theme::ERROR)).clicked() {
+                if ui.button(RichText::new("Move to Trash").color(theme::ERROR())).clicked() {
                     actions.push(Action::DeleteSaved(i));
                     ui.close();
                 }
@@ -972,7 +1191,7 @@ impl App {
         }
     }
 
-    fn status_bar(&self, ui: &mut Ui) {
+    fn status_bar(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let toast = self.toast.as_ref().filter(|(_, _, at)| at.elapsed() < Duration::from_secs(8));
@@ -980,20 +1199,44 @@ impl App {
                 ui.label(RichText::new(text).size(11.5).color(*color));
                 ui.ctx().request_repaint_after(Duration::from_secs(1));
             } else if let Some(n) = &self.notice {
-                ui.label(RichText::new(n).size(11.5).color(theme::ERROR));
+                ui.label(RichText::new(n).size(11.5).color(theme::ERROR()));
             } else if let Some(c) = self.tabs.get(self.active).and_then(|t| self.conn_index(&t.conn)).map(|ci| &self.conns[ci]) {
                 let (color, text) = status_style(&c.status);
                 widgets::status_dot(ui, color);
                 ui.label(
                     RichText::new(format!("{}   {}:{}/{}   {text}", c.cfg.display_name(), c.cfg.host, c.cfg.port, c.cfg.database))
                         .size(11.5)
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                 );
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                match &self.update {
+                    UpdateState::Available(r) => {
+                        let label = if update::current_bundle().is_some() { "Install & restart" } else { "Download" };
+                        if ui
+                            .add(Button::new(RichText::new(label).size(11.5).color(theme::BG())).fill(theme::ACCENT()).small())
+                            .on_hover_text(format!("rgrip {} → {}", update::CURRENT, r.version))
+                            .clicked()
+                        {
+                            actions.push(Action::InstallUpdate);
+                        }
+                        ui.label(RichText::new(format!("Update {} available", r.version)).size(11.5).color(theme::ACCENT()));
+                        ui.add_space(12.0);
+                    }
+                    UpdateState::Installing(r) => {
+                        ui.label(RichText::new(format!("Installing {}…", r.version)).size(11.5).color(theme::MUTED()));
+                        ui.add(egui::Spinner::new().size(11.0));
+                        ui.add_space(12.0);
+                    }
+                    UpdateState::Checking { manual: true } => {
+                        ui.label(RichText::new("Checking for updates…").size(11.5).color(theme::MUTED()));
+                        ui.add_space(12.0);
+                    }
+                    _ => {}
+                }
                 for (keys, what) in [("⌘W", "close tab"), ("⇧⌘↩", "run all"), ("⌘↩", "run")] {
-                    ui.label(RichText::new(what).size(11.5).color(theme::FAINT));
-                    ui.label(RichText::new(keys).size(11.5).color(theme::MUTED));
+                    ui.label(RichText::new(what).size(11.5).color(theme::FAINT()));
+                    ui.label(RichText::new(keys).size(11.5).color(theme::MUTED()));
                     ui.add_space(8.0);
                 }
             });
@@ -1001,12 +1244,28 @@ impl App {
     }
 }
 
+/// A theme entry: swatch of its background, accent and text, plus its name.
+fn theme_row(ui: &mut Ui, t: &theme::Palette, selected: bool) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 14.0), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, 4.0, t.bg);
+        p.rect_stroke(rect, 4.0, Stroke::new(1.0, theme::BORDER()), egui::StrokeKind::Inside);
+        p.circle_filled(rect.center() - egui::vec2(4.5, 0.0), 3.5, t.accent);
+        p.circle_filled(rect.center() + egui::vec2(4.5, 0.0), 3.5, t.text);
+        let label = egui::Button::selectable(selected, t.name).min_size(egui::vec2(ui.available_width(), 0.0));
+        ui.add(label)
+    })
+    .inner
+}
+
 fn status_style(s: &Status) -> (Color32, String) {
     match s {
-        Status::Disconnected => (theme::FAINT, "disconnected".into()),
-        Status::Connecting => (theme::WARN, "connecting…".into()),
-        Status::Connected(v) => (theme::OK, v.clone()),
-        Status::Failed(_) => (theme::ERROR, "connection failed".into()),
+        Status::Disconnected => (theme::FAINT(), "disconnected".into()),
+        Status::Connecting => (theme::WARN(), "connecting…".into()),
+        Status::Connected(v) => (theme::OK(), v.clone()),
+        Status::Failed(_) => (theme::ERROR(), "connection failed".into()),
     }
 }
 
@@ -1027,7 +1286,7 @@ impl Tree<'_> {
                 open: expandable.then_some(open),
                 icon,
                 label,
-                label_color: theme::TEXT,
+                label_color: theme::TEXT(),
                 detail,
                 selected: self.selected == Some(key),
             },
@@ -1060,11 +1319,11 @@ impl Tree<'_> {
         }
         match &conn.status {
             Status::Disconnected | Status::Connecting => {}
-            Status::Failed(e) => widgets::tree_note(ui, 1, e, theme::ERROR),
+            Status::Failed(e) => widgets::tree_note(ui, 1, e, theme::ERROR()),
             Status::Connected(_) => match &conn.schemas {
                 None => actions.push(Action::LoadSchemas(ci)),
-                Some(Load::Loading) => widgets::tree_note(ui, 1, "loading…", theme::FAINT),
-                Some(Load::Failed(e)) => widgets::tree_note(ui, 1, e, theme::ERROR),
+                Some(Load::Loading) => widgets::tree_note(ui, 1, "loading…", theme::FAINT()),
+                Some(Load::Failed(e)) => widgets::tree_note(ui, 1, e, theme::ERROR()),
                 Some(Load::Ready(list)) => {
                     for schema in list {
                         self.schema(ui, ci, conn, schema, actions);
@@ -1086,8 +1345,8 @@ impl Tree<'_> {
         }
         match conn.tables.get(schema) {
             None => actions.push(Action::LoadTables(ci, schema.to_string())),
-            Some(Load::Loading) => widgets::tree_note(ui, 2, "loading…", theme::FAINT),
-            Some(Load::Failed(e)) => widgets::tree_note(ui, 2, e, theme::ERROR),
+            Some(Load::Loading) => widgets::tree_note(ui, 2, "loading…", theme::FAINT()),
+            Some(Load::Failed(e)) => widgets::tree_note(ui, 2, e, theme::ERROR()),
             Some(Load::Ready(tables)) => {
                 let mut shown = 0;
                 for t in tables.iter().filter(|t| self.filter.is_empty() || t.name.to_lowercase().contains(self.filter)) {
@@ -1096,7 +1355,7 @@ impl Tree<'_> {
                 }
                 if shown == 0 {
                     let msg = if tables.is_empty() { "no tables" } else { "no matches" };
-                    widgets::tree_note(ui, 2, msg, theme::FAINT);
+                    widgets::tree_note(ui, 2, msg, theme::FAINT());
                 }
             }
         }
@@ -1124,8 +1383,8 @@ impl Tree<'_> {
         }
         match conn.columns.get(&(schema.to_string(), t.name.clone())) {
             None => actions.push(Action::LoadColumns(ci, schema.to_string(), t.name.clone())),
-            Some(Load::Loading) => widgets::tree_note(ui, 3, "loading…", theme::FAINT),
-            Some(Load::Failed(e)) => widgets::tree_note(ui, 3, e, theme::ERROR),
+            Some(Load::Loading) => widgets::tree_note(ui, 3, "loading…", theme::FAINT()),
+            Some(Load::Failed(e)) => widgets::tree_note(ui, 3, e, theme::ERROR()),
             Some(Load::Ready(cols)) => {
                 for c in cols {
                     let key = format!("{key}/{}", c.name);
@@ -1167,7 +1426,7 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
         actions.push(Action::Edit(ci));
         ui.close();
     }
-    if ui.button(RichText::new("Delete").color(theme::ERROR)).clicked() {
+    if ui.button(RichText::new("Delete").color(theme::ERROR())).clicked() {
         actions.push(Action::Delete(ci));
         ui.close();
     }
@@ -1178,7 +1437,7 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
 impl App {
     fn tab_bar(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
         Frame::new()
-            .fill(theme::BG)
+            .fill(theme::BG())
             .inner_margin(Margin { left: 10, right: 10, top: 6, bottom: 0 })
             .show(ui, |ui| {
                 egui::ScrollArea::horizontal()
@@ -1200,7 +1459,7 @@ impl App {
                     });
             });
         let rect = ui.available_rect_before_wrap();
-        ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, theme::BORDER));
+        ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, theme::BORDER()));
     }
 
     fn tab_content(&mut self, ui: &mut Ui) -> Option<TabAction> {
@@ -1233,7 +1492,7 @@ fn tab_button(
     const CLOSE: f32 = 18.0;
     const PAD_R: f32 = 6.0;
 
-    let color = if active { theme::TEXT } else { theme::MUTED };
+    let color = if active { theme::TEXT() } else { theme::MUTED() };
     // A dot marks unsaved changes to a saved query.
     let title = if dirty { format!("{} •", tab.title) } else { tab.title.clone() };
     let galley = ui.painter().layout_no_wrap(title, TextStyle::Body.resolve(ui.style()), color);
@@ -1250,11 +1509,11 @@ fn tab_button(
 
     let painter = ui.painter();
     let fill = if active {
-        theme::SURFACE
+        theme::SURFACE()
     } else if tab_resp.hovered() {
-        theme::HOVER
+        theme::HOVER()
     } else {
-        theme::BG
+        theme::BG()
     };
     painter.rect_filled(rect, egui::CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, fill);
     let cy = rect.center().y;
@@ -1265,9 +1524,9 @@ fn tab_button(
     widgets::paint_icon(painter, egui::pos2(rect.left() + PAD_L + ICON / 2.0, cy), icon);
     painter.galley(egui::pos2(rect.left() + PAD_L + ICON + GAP, cy - galley.size().y / 2.0), galley, color);
     if close_resp.hovered() {
-        painter.rect_filled(close_rect, 4.0, theme::BORDER);
+        painter.rect_filled(close_rect, 4.0, theme::BORDER());
     }
-    let x_color = if close_resp.hovered() { theme::TEXT } else if active || tab_resp.hovered() { theme::MUTED } else { theme::FAINT };
+    let x_color = if close_resp.hovered() { theme::TEXT() } else if active || tab_resp.hovered() { theme::MUTED() } else { theme::FAINT() };
     painter.text(close_rect.center(), egui::Align2::CENTER_CENTER, "×", FontId::proportional(14.0), x_color);
 
     if close_resp.clicked() || tab_resp.middle_clicked() {
@@ -1313,12 +1572,12 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
 
     toolbar(ui, |ui| {
         if c.running.is_some() {
-            if ui.add(Button::new(RichText::new("■  Stop").color(theme::ERROR))).clicked() {
+            if ui.add(Button::new(RichText::new("■  Stop").color(theme::ERROR()))).clicked() {
                 action = Some(TabAction::Cancel);
             }
         } else {
             if ui
-                .add(Button::new(RichText::new("▶  Run").color(theme::BG)).fill(theme::ACCENT))
+                .add(Button::new(RichText::new("▶  Run").color(theme::BG())).fill(theme::ACCENT()))
                 .on_hover_text("Run statement at cursor  ⌘↩")
                 .clicked()
             {
@@ -1341,7 +1600,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
         .resizable(true)
         .default_height(240.0)
         .height_range(80.0..=max_h)
-        .frame(Frame::new().fill(theme::SURFACE).inner_margin(Margin { left: 0, right: 14, top: 10, bottom: 8 }))
+        .frame(Frame::new().fill(theme::SURFACE()).inner_margin(Margin { left: 0, right: 14, top: 10, bottom: 8 }))
         .show_inside(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("editor-scroll", tab_id))
@@ -1395,7 +1654,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
                 ui.add(egui::Spinner::new().size(13.0));
                 ui.label(
                     RichText::new(format!("Running…  {:.1}s", started.elapsed().as_secs_f32()))
-                        .color(theme::MUTED),
+                        .color(theme::MUTED()),
                 );
             });
         });
@@ -1408,7 +1667,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
         Some(Err(e)) => {
             Frame::new().inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.label(RichText::new(e.as_str()).monospace().color(theme::ERROR));
+                    ui.label(RichText::new(e.as_str()).monospace().color(theme::ERROR()));
                 });
             });
         }
@@ -1461,7 +1720,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
                         }
                         None => format!("{}  ·  {ms:.0} ms", plural(out.statements.len(), "statement")),
                     };
-                    ui.label(RichText::new(summary).small().color(theme::MUTED));
+                    ui.label(RichText::new(summary).small().color(theme::MUTED()));
                 });
             });
             match *view {
@@ -1517,7 +1776,7 @@ fn export_menu(ui: &mut Ui, rs: &ResultSet, table: &str, can_export_all: bool) -
             .save_file()
     };
     let mut action = None;
-    ui.menu_button(RichText::new("Export").color(theme::MUTED), |ui| {
+    ui.menu_button(RichText::new("Export").color(theme::MUTED()), |ui| {
         ui.set_min_width(190.0);
         ui.menu_button("Copy as", |ui| {
             for f in &formats {
@@ -1563,7 +1822,7 @@ fn paint_line_numbers(ui: &Ui, out: &egui::text_edit::TextEditOutput) {
     for row in &out.galley.rows {
         if new_line {
             let y = out.galley_pos.y + row.rect().center().y;
-            let color = if cursor_line == Some(line) { theme::MUTED } else { theme::FAINT };
+            let color = if cursor_line == Some(line) { theme::MUTED() } else { theme::FAINT() };
             ui.painter().text(
                 egui::pos2(out.galley_pos.x - 16.0, y),
                 egui::Align2::RIGHT_CENTER,
@@ -1587,14 +1846,14 @@ fn output_log(ui: &mut Ui, out: &QueryOutput) {
                     None => "completed".to_string(),
                 };
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("#{}", i + 1)).monospace().color(theme::FAINT));
-                    ui.label(RichText::new(msg).monospace().color(theme::OK));
+                    ui.label(RichText::new(format!("#{}", i + 1)).monospace().color(theme::FAINT()));
+                    ui.label(RichText::new(msg).monospace().color(theme::OK()));
                 });
             }
             ui.label(
                 RichText::new(format!("finished in {:.0} ms", out.elapsed.as_secs_f64() * 1000.0))
                     .monospace()
-                    .color(theme::MUTED),
+                    .color(theme::MUTED()),
             );
         });
     });
@@ -1664,7 +1923,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 Some(total) => format!("{range} of {total}"),
                 None => range,
             };
-            ui.label(RichText::new(text).small().color(theme::MUTED));
+            ui.label(RichText::new(text).small().color(theme::MUTED()));
         });
     });
 
@@ -1672,7 +1931,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
         None => centered(ui, |ui| muted(ui, "loading…")),
         Some(Err(e)) => {
             Frame::new().inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
-                ui.label(RichText::new(e.as_str()).monospace().color(theme::ERROR));
+                ui.label(RichText::new(e.as_str()).monospace().color(theme::ERROR()));
             });
         }
         Some(Ok(rs)) if t.show_map && !rs.geometry_columns().is_empty() => {
@@ -1725,14 +1984,14 @@ impl App {
         let modal = egui::Modal::new(Id::new("name-prompt"))
             .frame(
                 Frame::new()
-                    .fill(theme::SURFACE)
-                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .fill(theme::SURFACE())
+                    .stroke(Stroke::new(1.0, theme::BORDER()))
                     .corner_radius(12)
                     .inner_margin(Margin::same(20)),
             )
             .show(ctx, |ui| {
                 ui.set_width(340.0);
-                ui.label(RichText::new(title).heading().color(theme::TEXT));
+                ui.label(RichText::new(title).heading().color(theme::TEXT()));
                 ui.add_space(12.0);
                 let edit = ui.add(
                     TextEdit::singleline(&mut prompt.name)
@@ -1749,7 +2008,7 @@ impl App {
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(Button::new(RichText::new("Save").color(theme::BG)).fill(theme::ACCENT)).clicked() {
+                        if ui.add(Button::new(RichText::new("Save").color(theme::BG())).fill(theme::ACCENT())).clicked() {
                             done = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -1762,30 +2021,34 @@ impl App {
         let name = prompt.name.trim().to_string();
         if done && !name.is_empty() {
             let Some(prompt) = self.name_prompt.take() else { return };
-            match prompt.target {
+            let result = match prompt.target {
                 NameTarget::NewFrom(tab_id) => {
-                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-                        if let TabKind::Console(c) = &mut tab.kind {
-                            let q = SavedQuery::new(name.clone(), c.sql.clone(), Some(tab.conn.clone()));
+                    let tab = self.tabs.iter_mut().find(|t| t.id == tab_id);
+                    match tab.and_then(|t| match &mut t.kind {
+                        TabKind::Console(c) => Some((&mut t.title, c, t.conn.clone())),
+                        TabKind::Table(_) => None,
+                    }) {
+                        Some((title, c, conn)) => config::create_query(&name, &c.sql, Some(conn)).map(|q| {
                             c.saved_id = Some(q.id.clone());
-                            tab.title = name.clone();
-                            self.saved.push(q);
-                        }
+                            *title = q.name.clone();
+                            q.name
+                        }),
+                        None => Err("The console was closed".into()),
                     }
                 }
-                NameTarget::Rename(id) => {
-                    if let Some(q) = self.saved.iter_mut().find(|q| q.id == id) {
-                        q.name = name.clone();
-                    }
-                    for tab in &mut self.tabs {
-                        if matches!(&tab.kind, TabKind::Console(c) if c.saved_id.as_ref() == Some(&id)) {
-                            tab.title = name.clone();
-                        }
-                    }
-                }
+                NameTarget::Rename(id) => match self.saved.iter().find(|q| q.id == id).cloned() {
+                    Some(q) => config::rename_query(&q, &name).map(|r| {
+                        self.relink(&id, Some((&r.id, &r.name)));
+                        r.name
+                    }),
+                    None => Err("The query no longer exists".into()),
+                },
+            };
+            match result {
+                Ok(saved_as) => self.toast = Some((format!("Saved “{saved_as}”"), theme::OK(), Instant::now())),
+                Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
             }
-            self.persist_queries();
-            self.toast = Some((format!("Saved “{name}”"), theme::OK, Instant::now()));
+            self.reload_queries();
         } else if cancel || modal.should_close() {
             self.name_prompt = None;
         }
@@ -1804,8 +2067,8 @@ impl App {
         let modal = egui::Modal::new(Id::new("conn-dialog"))
             .frame(
                 Frame::new()
-                    .fill(theme::SURFACE)
-                    .stroke(Stroke::new(1.0, theme::BORDER))
+                    .fill(theme::SURFACE())
+                    .stroke(Stroke::new(1.0, theme::BORDER()))
                     .corner_radius(12)
                     .inner_margin(Margin::same(22)),
             )
@@ -1815,9 +2078,9 @@ impl App {
                 ui.label(
                     RichText::new(if d.is_new { "New connection" } else { "Edit connection" })
                         .heading()
-                        .color(theme::TEXT),
+                        .color(theme::TEXT()),
                 );
-                ui.label(RichText::new("PostgreSQL").small().color(theme::MUTED));
+                ui.label(RichText::new("PostgreSQL").small().color(theme::MUTED()));
                 ui.add_space(14.0);
 
                 ui.horizontal(|ui| {
@@ -1855,7 +2118,7 @@ impl App {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .add(Button::new(RichText::new("Save").color(theme::BG)).fill(theme::ACCENT))
+                            .add(Button::new(RichText::new("Save").color(theme::BG())).fill(theme::ACCENT()))
                             .clicked()
                         {
                             save = true;
@@ -1917,11 +2180,11 @@ fn status_line(ui: &mut Ui, d: &Dialog) {
             });
         }
         Some(Ok(v)) => {
-            ui.label(RichText::new(format!("✓  Connected · {v}")).color(theme::OK));
+            ui.label(RichText::new(format!("✓  Connected · {v}")).color(theme::OK()));
         }
         Some(Err(e)) => {
             egui::ScrollArea::vertical().max_height(44.0).show(ui, |ui| {
-                ui.add(egui::Label::new(RichText::new(e).small().color(theme::ERROR)).wrap());
+                ui.add(egui::Label::new(RichText::new(e).small().color(theme::ERROR())).wrap());
             });
         }
         None => {}
@@ -1943,7 +2206,7 @@ fn form_grid(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
 }
 
 fn field(ui: &mut Ui, label: &str, edit: TextEdit<'_>) {
-    ui.label(RichText::new(label).color(theme::MUTED));
+    ui.label(RichText::new(label).color(theme::MUTED()));
     let inner = FIELD_WIDTH - 2.0 * FIELD_PAD as f32;
     ui.add(edit.desired_width(inner).margin(Margin::symmetric(FIELD_PAD, 5)));
     ui.end_row();
@@ -1951,7 +2214,7 @@ fn field(ui: &mut Ui, label: &str, edit: TextEdit<'_>) {
 
 /// Path field with a "…" button that opens a native file picker.
 fn file_field(ui: &mut Ui, label: &str, path: &mut String, placeholder: &str) {
-    ui.label(RichText::new(label).color(theme::MUTED));
+    ui.label(RichText::new(label).color(theme::MUTED()));
     ui.horizontal(|ui| {
         let button_w = 28.0;
         let w = FIELD_WIDTH - button_w - ui.spacing().item_spacing.x - 2.0 * FIELD_PAD as f32;
@@ -1975,7 +2238,7 @@ fn file_field(ui: &mut Ui, label: &str, path: &mut String, placeholder: &str) {
 }
 
 fn note(ui: &mut Ui, text: &str) {
-    ui.add(egui::Label::new(RichText::new(text).size(11.5).color(theme::FAINT)).wrap());
+    ui.add(egui::Label::new(RichText::new(text).size(11.5).color(theme::FAINT())).wrap());
 }
 
 fn general_form(ui: &mut Ui, d: &mut Dialog) {
@@ -1996,7 +2259,7 @@ fn general_form(ui: &mut Ui, d: &mut Dialog) {
 
 fn ssl_form(ui: &mut Ui, d: &mut Dialog) {
     form_grid(ui, "conn-ssl", |ui| {
-        ui.label(RichText::new("Mode").color(theme::MUTED));
+        ui.label(RichText::new("Mode").color(theme::MUTED()));
         egui::ComboBox::from_id_salt("ssl-mode")
             .selected_text(d.cfg.ssl.label())
             .width(160.0)
@@ -2032,7 +2295,7 @@ fn ssh_form(ui: &mut Ui, d: &mut Dialog) {
             field(ui, "SSH host", TextEdit::singleline(&mut ssh.host).hint_text(hint("bastion.example.com")));
             field(ui, "Port", TextEdit::singleline(&mut d.ssh_port));
             field(ui, "User", TextEdit::singleline(&mut ssh.user));
-            ui.label(RichText::new("Auth").color(theme::MUTED));
+            ui.label(RichText::new("Auth").color(theme::MUTED()));
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut ssh.auth, SshAuth::Key, "Key file");
                 ui.selectable_value(&mut ssh.auth, SshAuth::Password, "Password");
@@ -2061,13 +2324,13 @@ fn ssh_form(ui: &mut Ui, d: &mut Dialog) {
 
 fn empty_state(ui: &mut Ui, actions: &mut Vec<Action>, no_connections: bool) {
     centered(ui, |ui| {
-        ui.label(RichText::new("rgrip").size(28.0).color(theme::FAINT));
+        ui.label(RichText::new("rgrip").size(28.0).color(theme::FAINT()));
         ui.add_space(6.0);
         if no_connections {
             muted(ui, "Add a PostgreSQL connection to get started.");
             ui.add_space(10.0);
             if ui
-                .add(Button::new(RichText::new("New connection").color(theme::BG)).fill(theme::ACCENT))
+                .add(Button::new(RichText::new("New connection").color(theme::BG())).fill(theme::ACCENT()))
                 .clicked()
             {
                 actions.push(Action::NewConnection);
@@ -2089,14 +2352,14 @@ fn toolbar(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
             });
         });
     let rect = ui.available_rect_before_wrap();
-    ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, theme::BORDER));
+    ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, theme::BORDER()));
 }
 
 fn segment(ui: &mut Ui, selected: bool, text: &str) -> bool {
-    let color = if selected { theme::TEXT } else { theme::MUTED };
+    let color = if selected { theme::TEXT() } else { theme::MUTED() };
     let r = ui.add(
         Button::new(RichText::new(text).color(color))
-            .fill(if selected { Color32::from_rgb(40, 40, 46) } else { Color32::TRANSPARENT })
+            .fill(if selected { theme::SELECTED() } else { Color32::TRANSPARENT })
             .frame_when_inactive(selected),
     );
     r.clicked()
@@ -2106,7 +2369,7 @@ fn segment(ui: &mut Ui, selected: bool, text: &str) -> bool {
 fn title_bar(ctx: &egui::Context) {
     egui::TopBottomPanel::top("titlebar")
         .exact_height(30.0)
-        .frame(Frame::new().fill(theme::BG))
+        .frame(Frame::new().fill(theme::BG()))
         .show(ctx, |ui| {
             let resp = ui.interact(ui.max_rect(), Id::new("titlebar-drag"), Sense::click_and_drag());
             if resp.drag_started() {
@@ -2123,7 +2386,7 @@ fn title_bar(ctx: &egui::Context) {
                 egui::Align2::CENTER_CENTER,
                 "rgrip",
                 FontId::proportional(12.0),
-                theme::FAINT,
+                theme::FAINT(),
             );
         });
 }
@@ -2131,19 +2394,19 @@ fn title_bar(ctx: &egui::Context) {
 /// Small borderless button that brightens on hover.
 fn icon_button(ui: &mut Ui, text: &str) -> egui::Response {
     let resp = ui.add(
-        Button::new(RichText::new(text).size(14.0).color(theme::MUTED))
+        Button::new(RichText::new(text).size(14.0).color(theme::MUTED()))
             .frame(false)
             .min_size(egui::vec2(18.0, 18.0)),
     );
     if resp.hovered() {
-        ui.painter().rect_filled(resp.rect, 4.0, theme::HOVER);
-        ui.painter().text(resp.rect.center(), egui::Align2::CENTER_CENTER, text, FontId::proportional(14.0), theme::TEXT);
+        ui.painter().rect_filled(resp.rect, 4.0, theme::HOVER());
+        ui.painter().text(resp.rect.center(), egui::Align2::CENTER_CENTER, text, FontId::proportional(14.0), theme::TEXT());
     }
     resp
 }
 
 fn ghost_button(ui: &mut Ui, text: &str) -> egui::Response {
-    ui.add(Button::new(RichText::new(text).color(theme::MUTED)).frame(false))
+    ui.add(Button::new(RichText::new(text).color(theme::MUTED())).frame(false))
 }
 
 fn centered(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
@@ -2156,7 +2419,7 @@ fn centered(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 fn hint(text: &str) -> RichText {
-    RichText::new(text).color(theme::FAINT)
+    RichText::new(text).color(theme::FAINT())
 }
 
 pub(crate) fn plural(n: usize, word: &str) -> String {
@@ -2164,7 +2427,7 @@ pub(crate) fn plural(n: usize, word: &str) -> String {
 }
 
 fn muted(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).color(theme::MUTED));
+    ui.label(RichText::new(text).color(theme::MUTED()));
 }
 
 

@@ -30,26 +30,26 @@ pub fn sql(text: &str, font: FontId) -> LayoutJob {
         let start = i;
         let (end, format) = match b[i] {
             b'-' if b.get(i + 1) == Some(&b'-') => {
-                (find(b, i, b"\n").unwrap_or(b.len()), fmt(theme::FAINT, true))
+                (find(b, i, b"\n").unwrap_or(b.len()), fmt(theme::FAINT(), true))
             }
             b'/' if b.get(i + 1) == Some(&b'*') => (
                 find(b, i + 2, b"*/").map_or(b.len(), |e| e + 2),
-                fmt(theme::FAINT, true),
+                fmt(theme::FAINT(), true),
             ),
             b'\'' => (
                 find(b, i + 1, b"'").map_or(b.len(), |e| e + 1),
-                fmt(theme::STRING, false),
+                fmt(theme::STRING(), false),
             ),
             b'"' => (
                 find(b, i + 1, b"\"").map_or(b.len(), |e| e + 1),
-                fmt(theme::TEXT, false),
+                fmt(theme::TEXT(), false),
             ),
             c if c.is_ascii_digit() => {
                 let mut e = i;
                 while e < b.len() && (b[e].is_ascii_digit() || b[e] == b'.') {
                     e += 1;
                 }
-                (e, fmt(theme::WARN, false))
+                (e, fmt(theme::WARN(), false))
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 let mut e = i;
@@ -58,9 +58,9 @@ pub fn sql(text: &str, font: FontId) -> LayoutJob {
                 }
                 let word = text[i..e].to_ascii_lowercase();
                 let color = if KEYWORDS.binary_search(&word.as_str()).is_ok() {
-                    theme::ACCENT
+                    theme::ACCENT()
                 } else {
-                    theme::TEXT
+                    theme::TEXT()
                 };
                 (e, fmt(color, false))
             }
@@ -77,7 +77,7 @@ pub fn sql(text: &str, font: FontId) -> LayoutJob {
                 while !text.is_char_boundary(e) {
                     e += 1;
                 }
-                (e, fmt(theme::TEXT, false))
+                (e, fmt(theme::TEXT(), false))
             }
         };
         job.append(&text[start..end], 0.0, format);
