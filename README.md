@@ -5,7 +5,7 @@
 <p align="center"><b>A minimal DataGrip-style PostgreSQL client in Rust (egui), with a PostGIS map and Khmer support.</b></p>
 
 <p align="center">
-  <a href="https://github.com/yoouTaro/rgrip/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/yoouTaro/rgrip?include_prereleases&label=release"></a>
+  <a href="https://github.com/yoouTaro/rgrip/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/yoouTaro/rgrip?include_prereleases&label=release"></a>
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
   <img alt="Rust 1.88+" src="https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust">
   <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple">
@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="https://yoouTaro.github.io/rgrip/">Website</a> ·
-  <a href="https://github.com/yoouTaro/rgrip/releases/latest">Download</a> ·
+  <a href="https://github.com/yoouTaro/rgrip/releases">Download</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -83,7 +83,7 @@
 
 ## Install
 
-Download the macOS app (Apple silicon) from [Releases](https://github.com/yoouTaro/rgrip/releases/latest) and unzip it.
+Download the macOS app (Apple silicon) from [Releases](https://github.com/yoouTaro/rgrip/releases) and unzip it.
 
 The app is ad-hoc signed but not notarized, so macOS blocks the first launch. Right-click **rgrip.app → Open**, or run:
 
