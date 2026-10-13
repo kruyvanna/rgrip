@@ -199,7 +199,8 @@ impl Geometry {
             Geometry::Point(p) if p[0].is_nan() => return "POINT EMPTY".into(),
             Geometry::Point(p) => format!("({})", c(p)),
             Geometry::LineString(l) => line(l),
-            Geometry::MultiPoint(l) => line(l),
+            // PostGIS style: MULTIPOINT((x y),(x y)).
+            Geometry::MultiPoint(l) => format!("({})", l.iter().map(|p| format!("({})", c(p))).collect::<Vec<_>>().join(", ")),
             Geometry::Polygon(p) | Geometry::MultiLineString(p) => rings(p),
             Geometry::MultiPolygon(mp) => format!("({})", mp.iter().map(|p| rings(p)).collect::<Vec<_>>().join(", ")),
             Geometry::Collection(g) => format!("({})", g.iter().map(Geometry::to_wkt).collect::<Vec<_>>().join(", ")),

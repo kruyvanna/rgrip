@@ -271,6 +271,84 @@ fn sql_insert(rs: &ResultSet, kinds: &[Kind], table: &str) -> String {
     out
 }
 
+/// Just the given rows (in order).
+pub fn subset(rs: &ResultSet, rows: &[usize]) -> ResultSet {
+    ResultSet {
+        columns: rs.columns.clone(),
+        rows: rows.iter().filter_map(|&i| rs.rows.get(i).cloned()).collect(),
+        ..Default::default()
+    }
+}
+
+/// The column that identifies rows: `id`, `objectid`, `gid`, `fid`, else the first.
+fn key_column(rs: &ResultSet) -> usize {
+    ["id", "objectid", "gid", "fid", "ogc_fid"]
+        .iter()
+        .find_map(|k| rs.columns.iter().position(|c| c.eq_ignore_ascii_case(k)))
+        .unwrap_or(0)
+}
+
+/// `select * from <table> where <key> in (…);` for re-fetching these rows.
+pub fn where_in(rs: &ResultSet, table: &str) -> String {
+    let kinds = infer_kinds(rs);
+    let key = key_column(rs);
+    let target = table.split('.').map(quote_ident).collect::<Vec<_>>().join(".");
+    let values: Vec<String> = rs.rows.iter().map(|r| sql_literal(r[key].as_deref(), kinds[key])).collect();
+    format!("select *\nfrom {target}\nwhere {} in ({});\n", quote_ident(&rs.columns[key]), values.join(", "))
+}
+
+/// Markdown for pasting into an AI agent: the query, column types and rows
+/// (long values shortened, geometries as WKT).
+pub fn for_agent(rs: &ResultSet, table: &str, sql: Option<&str>) -> String {
+    const MAX_CELL: usize = 300;
+    let kinds = infer_kinds(rs);
+    let mut out = format!("Data from `{table}` ({} rows)\n\n", rs.rows.len());
+    if let Some(sql) = sql.map(str::trim).filter(|s| !s.is_empty()) {
+        out += &format!("Query:\n```sql\n{sql}\n```\n\n");
+    }
+    let types: Vec<String> = rs
+        .columns
+        .iter()
+        .zip(&kinds)
+        .map(|(c, k)| {
+            let k = match k {
+                Kind::Number => "number",
+                Kind::Bool => "boolean",
+                Kind::Json => "json",
+                Kind::Geometry => "geometry (WKT)",
+                Kind::Text => "text",
+            };
+            format!("`{c}` {k}")
+        })
+        .collect();
+    out += &format!("Columns: {}\n\n", types.join(", "));
+    let short = ResultSet {
+        columns: rs.columns.clone(),
+        rows: rs
+            .rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .zip(&kinds)
+                    .map(|(v, k)| {
+                        v.as_deref().map(|v| {
+                            let v = display(v, *k);
+                            match v.char_indices().nth(MAX_CELL) {
+                                Some((i, _)) => format!("{}…", &v[..i]),
+                                None => v,
+                            }
+                        })
+                    })
+                    .collect()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    // Already converted; markdown() must not re-parse geometries.
+    out += &markdown(&short, &vec![Kind::Text; kinds.len()]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +423,20 @@ mod tests {
         assert!(sql.contains("(2, 'ផ្សារធំថ្មី', NULL, false, NULL, NULL);"));
         let md = export(&rs(), Format::Markdown, "t");
         assert!(md.starts_with("| id | name | zip | ok | meta | geom |\n| ---: | --- |"));
+        assert!(md.contains("| 2 | ផ្សារធំថ្មី | NULL |"));
+    }
+
+    #[test]
+    fn subsets_where_in_and_agent() {
+        let r = subset(&rs(), &[1]);
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][1].as_deref(), Some("ផ្សារធំថ្មី"));
+        assert_eq!(where_in(&subset(&rs(), &[0, 1]), "public.places"), "select *\nfrom \"public\".\"places\"\nwhere \"id\" in (1, 2);\n");
+
+        let md = for_agent(&rs(), "places", Some("select * from places"));
+        assert!(md.starts_with("Data from `places` (2 rows)\n\nQuery:\n```sql\nselect * from places\n```"));
+        assert!(md.contains("`id` number, `name` text, `zip` text, `ok` boolean, `meta` json, `geom` geometry (WKT)"));
+        assert!(md.contains("POINT (104.9311 11.5637)"));
         assert!(md.contains("| 2 | ផ្សារធំថ្មី | NULL |"));
     }
 

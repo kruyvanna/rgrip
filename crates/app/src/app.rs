@@ -96,6 +96,8 @@ struct Console {
     map: crate::map::MapView,
     /// The saved query this console was opened from / saved as.
     saved_id: Option<String>,
+    /// SQL of the last run (for "Copy for AI agent").
+    last_sql: String,
 }
 
 impl Console {
@@ -115,6 +117,7 @@ impl Console {
             offset: 0,
             map: Default::default(),
             saved_id: None,
+            last_sql: String::new(),
         }
     }
 }
@@ -162,6 +165,9 @@ struct Tab {
 
 struct Dialog {
     cfg: ConnectionConfig,
+    /// Pasted connection string, and the result of applying it.
+    url: String,
+    url_status: Option<Result<(), String>>,
     port: String,
     ssh_port: String,
     is_new: bool,
@@ -181,6 +187,8 @@ impl Dialog {
     fn new(cfg: ConnectionConfig, is_new: bool) -> Self {
         Self {
             port: cfg.port.to_string(),
+            url: String::new(),
+            url_status: None,
             ssh_port: cfg.ssh.port.to_string(),
             cfg,
             is_new,
@@ -276,6 +284,8 @@ enum NameTarget {
 }
 
 enum TabAction {
+    /// Show a message in the status bar.
+    Notify(String),
     /// Wrap the console's query to add `ST_Transform(col, 4326)` and re-run.
     Reproject(String),
     /// Save the console's SQL (asks for a name the first time).
@@ -835,6 +845,7 @@ impl App {
                     .iter()
                     .any(|k| lower.split(|ch: char| !ch.is_alphanumeric()).any(|w| w == *k));
                 c.offset = 0;
+                c.last_sql = text.clone();
                 c.paged = sql::paged_query(&text, 1, 0).map(|_| text.clone());
                 let page = c.paged.is_some().then_some(0);
                 if connected {
@@ -892,6 +903,7 @@ impl App {
                 c.cursor = 0..0;
                 return self.tab_action(ti, TabAction::Run { all: true });
             }
+            (TabAction::Notify(text), _) => self.toast = Some((text, theme::WARN(), Instant::now())),
             (TabAction::Cancel, TabKind::Console(c)) => {
                 if c.pending.take().is_some() {
                     c.running = None;
@@ -1009,6 +1021,11 @@ impl eframe::App for App {
         let mut actions = Vec::new();
         let mut tab_action = None;
 
+        // ⌘N: new console on the current tab's connection (or the first one).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::N)) && !self.conns.is_empty() {
+            let ci = self.tabs.get(self.active).and_then(|t| self.conn_index(&t.conn)).unwrap_or(0);
+            actions.push(Action::NewConsole(ci));
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::W)) && !self.tabs.is_empty() {
             actions.push(Action::Close(CloseWhich::One(self.active)));
         }
@@ -1465,6 +1482,16 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
         actions.push(Action::NewConsole(ci));
         ui.close();
     }
+    ui.menu_button("Copy connection URL", |ui| {
+        if ui.button("Without password").clicked() {
+            ui.ctx().copy_text(rgrip_core::conn_string::to_url(&conn.cfg, false));
+            ui.close();
+        }
+        if ui.button("With password").clicked() {
+            ui.ctx().copy_text(rgrip_core::conn_string::to_url(&conn.cfg, true));
+            ui.close();
+        }
+    });
     if matches!(conn.status, Status::Connected(_)) {
         if ui.button("Refresh").clicked() {
             actions.push(Action::Refresh(ci));
@@ -1619,6 +1646,31 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
             c.cursor = completion::accept(ui.ctx(), editor_id, &mut c.sql, &p.completion, i);
         }
     }
+    // Slash commands: Tab expands the command on the cursor's line; ⌘↩
+    // expands and runs it.
+    let tab = c.popup.is_none() && ui.input(|i| i.key_pressed(Key::Tab) && i.modifiers.is_none());
+    let run = ui.input(|i| i.key_pressed(Key::Enter) && i.modifiers.command && !i.modifiers.shift);
+    if tab || run {
+        let byte = sql::char_to_byte(&c.sql, c.cursor.start);
+        if let Some((range, line)) = rgrip_core::commands::command_line_at(&c.sql, byte) {
+            if tab {
+                ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab));
+            }
+            match rgrip_core::commands::expand(line, catalog) {
+                Ok(expanded) => {
+                    let indent: String = line.chars().take_while(|ch| ch.is_whitespace()).collect();
+                    let text = format!("{indent}{expanded}");
+                    c.cursor = completion::replace_text(ui.ctx(), editor_id, &mut c.sql, range, &text);
+                    c.popup = None;
+                }
+                Err(e) => {
+                    if tab {
+                        return Some(TabAction::Notify(e));
+                    }
+                }
+            }
+        }
+    }
     if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter)) {
         action = Some(TabAction::Run { all: true });
     } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
@@ -1704,7 +1756,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
                 });
         });
 
-    let Console { running, output, view, grid, paged, offset, map, .. } = c;
+    let Console { running, output, view, grid, paged, offset, map, last_sql, .. } = c;
     if let Some(started) = running {
         centered(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1783,7 +1835,8 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
             match *view {
                 View::Result(n) if n < sets.len() => {
                     let row_offset = if paged.is_some() { *offset } else { 0 };
-                    grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, None, row_offset);
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()) };
+                    grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, None, row_offset, &source);
                 }
                 View::Map(n) if n < sets.len() => {
                     let cols = sets[n].geometry_columns().to_vec();
@@ -1810,7 +1863,7 @@ fn update_popup(c: &mut Console, catalog: &Catalog, changed: bool, force: bool, 
     }
     let byte = sql::char_to_byte(&c.sql, c.cursor.start);
     let before = c.sql[..byte].chars().next_back();
-    let in_word = before.is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '"'));
+    let in_word = before.is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '"' | '/'));
     if force || (changed && in_word) {
         c.popup = complete::complete(&c.sql, byte, catalog, force).map(Popup::new);
     } else if changed || previous != c.cursor {
@@ -1998,10 +2051,19 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
             t.map.show(ui, rs, &cols, false);
         }
         Some(Ok(rs)) => {
+            let (table_name, table_sql) = (format!("{}.{}", t.schema, t.table), rgrip_core::postgres::table_select_sql(&t.query()));
             let sort = t.order.as_ref().map(|(c, asc)| Sort { column: c, ascending: *asc });
             let offset = (t.page * PAGE_SIZE) as usize;
             if let Some(GridEvent::HeaderClicked(i)) =
-                grid::show(ui, Id::new(("table-grid", tab_id)), rs, &mut t.grid, sort, offset)
+                grid::show(
+                    ui,
+                    Id::new(("table-grid", tab_id)),
+                    rs,
+                    &mut t.grid,
+                    sort,
+                    offset,
+                    &grid::Source { table: &table_name, sql: Some(&table_sql) },
+                )
             {
                 let col = rs.columns[i].clone();
                 // Cycle: ascending → descending → unsorted.
@@ -2308,6 +2370,30 @@ fn note(ui: &mut Ui, text: &str) {
 }
 
 fn general_form(ui: &mut Ui, d: &mut Dialog) {
+    form_grid(ui, "conn-url", |ui| {
+        let edit = TextEdit::singleline(&mut d.url).hint_text(hint("postgres://user:pass@host:5432/db"));
+        ui.label(RichText::new("URL").color(theme::MUTED()));
+        let inner = FIELD_WIDTH - 2.0 * FIELD_PAD as f32;
+        let resp = ui.add(edit.desired_width(inner).margin(Margin::symmetric(FIELD_PAD, 5)));
+        ui.end_row();
+        if resp.changed() {
+            d.url_status = (!d.url.trim().is_empty()).then(|| {
+                let mut cfg = d.cfg.clone();
+                rgrip_core::conn_string::apply(&mut cfg, &d.url).map(|()| {
+                    d.port = cfg.port.to_string();
+                    d.cfg = cfg;
+                })
+            });
+        }
+    });
+    match &d.url_status {
+        Some(Ok(())) => note(ui, "Filled in from the connection string."),
+        Some(Err(e)) => {
+            ui.label(RichText::new(e).size(11.5).color(theme::ERROR()));
+        }
+        None => note(ui, "Paste a postgres:// URL, key=value string or jdbc:postgresql:// URL."),
+    }
+    ui.add_space(6.0);
     form_grid(ui, "conn-general", |ui| {
         let placeholder = format!("{}@{}", d.cfg.database, d.cfg.host);
         field(ui, "Name", TextEdit::singleline(&mut d.cfg.name).hint_text(hint(&placeholder)));
@@ -2671,6 +2757,24 @@ mod tests {
 
         h.type_text(" = 'x'");
         assert_eq!(h.console.sql, "select * from users u where u.email = 'x'");
+    }
+
+    #[test]
+    fn slash_command_tab_expands() {
+        let mut h = Harness::new();
+        h.type_text("/con_4326 geom");
+        h.key(Key::Tab, Modifiers::NONE);
+        assert_eq!(h.console.sql, "ST_Transform(geom, 4326)");
+        h.console.sql.clear();
+        h.frame(vec![]);
+        h.type_text("/con_4326_2 users");
+        h.key(Key::Tab, Modifiers::NONE);
+        assert_eq!(h.console.sql, "select t.*, ST_SetSRID(st_astext(t.shape)::text, 4326) as shape_4326\nfrom users t;");
+        // Typing just "/" lists the commands.
+        h.console.sql.clear();
+        h.frame(vec![]);
+        h.type_text("/");
+        assert!(h.labels().iter().any(|l| l.starts_with("/con_4326")));
     }
 
     #[test]

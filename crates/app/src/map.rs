@@ -6,7 +6,7 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Frame, Margin, Mesh, Pos2, Rect, RichText, Shape, Stroke, Ui, Vec2,
     vec2,
 };
-use rgrip_core::ResultSet;
+use rgrip_core::{ResultSet, export};
 use rgrip_core::geo::{self, Coord, Geometry};
 use std::collections::HashMap;
 use walkers::sources::{Attribution, OpenStreetMap, TileSource};
@@ -107,7 +107,11 @@ struct Feature {
 
 pub struct MapData {
     features: Vec<Feature>,
+    /// Extent of the non-outlier features (what "Fit" zooms to).
     bounds: Option<(Coord, Coord)>,
+    /// Features with a vertex far from the rest of the data (often swapped
+    /// lat/lon or a stray coordinate), drawn as long spikes.
+    outlier: Vec<bool>,
     /// Rows whose SRID we can't convert, with the SRIDs seen.
     skipped: usize,
     srids: Vec<i32>,
@@ -115,7 +119,7 @@ pub struct MapData {
 
 impl MapData {
     pub fn build(rs: &ResultSet, col: usize) -> Self {
-        let mut data = MapData { features: Vec::new(), bounds: None, skipped: 0, srids: Vec::new() };
+        let mut data = MapData { features: Vec::new(), bounds: None, outlier: Vec::new(), skipped: 0, srids: Vec::new() };
         for (row, values) in rs.rows.iter().enumerate() {
             let Some(g) = values[col].as_deref().and_then(geo::parse_hex) else { continue };
             let Some(wgs) = g.to_wgs84() else {
@@ -137,8 +141,63 @@ impl MapData {
             });
             data.features.push(f);
         }
+        data.outlier = find_outliers(&data.features);
+        data.bounds = None;
+        for (f, out) in data.features.iter().zip(&data.outlier) {
+            if *out {
+                continue;
+            }
+            for c in vertices(f) {
+                data.bounds = Some(match data.bounds {
+                    None => (c, c),
+                    Some((lo, hi)) => ([lo[0].min(c[0]), lo[1].min(c[1])], [hi[0].max(c[0]), hi[1].max(c[1])]),
+                });
+            }
+        }
         data
     }
+
+    fn outlier_count(&self) -> usize {
+        self.outlier.iter().filter(|o| **o).count()
+    }
+}
+
+fn vertices(f: &Feature) -> impl Iterator<Item = Coord> + '_ {
+    f.points
+        .iter()
+        .chain(f.lines.iter().flatten())
+        .chain(f.rings.iter().flatten())
+        .copied()
+        .filter(|c| c[0].is_finite() && c[1].is_finite())
+}
+
+/// Flag features with a vertex much farther from the data's centre than
+/// most features are (10× the 90th-percentile distance, at least ~1 km).
+fn find_outliers(features: &[Feature]) -> Vec<bool> {
+    let centroids: Vec<Coord> = features
+        .iter()
+        .map(|f| {
+            let (n, sum) = vertices(f).fold((0.0, [0.0, 0.0]), |(n, s), c| (n + 1.0, [s[0] + c[0], s[1] + c[1]]));
+            if n > 0.0 { [sum[0] / n, sum[1] / n] } else { [f64::NAN, f64::NAN] }
+        })
+        .collect();
+    let mut lons: Vec<f64> = centroids.iter().map(|c| c[0]).filter(|v| v.is_finite()).collect();
+    let mut lats: Vec<f64> = centroids.iter().map(|c| c[1]).filter(|v| v.is_finite()).collect();
+    if lons.len() < 5 {
+        return vec![false; features.len()];
+    }
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let center = [median(&mut lons), median(&mut lats)];
+    let k = center[1].to_radians().cos().max(0.1);
+    let dist = |c: Coord| ((c[0] - center[0]) * k).hypot(c[1] - center[1]);
+    let mut d: Vec<f64> = centroids.iter().copied().map(dist).filter(|v| v.is_finite()).collect();
+    d.sort_by(f64::total_cmp);
+    let p90 = d[(d.len() * 9 / 10).min(d.len() - 1)];
+    let limit = (p90 * 10.0).max(0.01);
+    features.iter().map(|f| vertices(f).any(|c| dist(c) > limit)).collect()
 }
 
 fn add_geometry(f: &mut Feature, g: &Geometry) {
@@ -181,6 +240,7 @@ pub struct MapView {
     fitted: Option<usize>,
     pub selected: Option<usize>,
     column: usize,
+    hide_outliers: bool,
     /// Column to show when it appears (e.g. after reprojecting).
     pub prefer: Option<String>,
     cache: Option<(usize, MapData)>,
@@ -203,6 +263,7 @@ impl Default for MapView {
             fitted: None,
             selected: None,
             column: 0,
+            hide_outliers: false,
             prefer: None,
             cache: None,
         }
@@ -257,6 +318,13 @@ impl MapView {
         // Re-decode only when the result or column changes.
         let key = rs as *const ResultSet as usize ^ rs.rows.len().rotate_left(17) ^ self.column.rotate_left(41);
         if self.cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            // New data: prefer a reprojected `*_4326` column (from /con_4326 etc.).
+            if let Some(&i) = geom_cols.iter().find(|&&i| rs.columns[i].ends_with("_4326")) {
+                if i != self.column {
+                    self.column = i;
+                    return self.show(ui, rs, geom_cols, can_reproject);
+                }
+            }
             self.cache = Some((key, MapData::build(rs, self.column)));
             self.selected = None;
         }
@@ -272,6 +340,7 @@ impl MapView {
         let mut clicked = None;
         let ctx = ui.ctx().clone();
         let selected = self.selected;
+        let hide_outliers = self.hide_outliers;
         let mut memory = std::mem::take(&mut self.memory);
         {
             let tiles = self.tiles(&ctx);
@@ -279,7 +348,13 @@ impl MapView {
                 .double_click_to_zoom(true)
                 // Wheel/trackpad scroll zooms (drag pans) instead of scrolling the map.
                 .zoom_with_ctrl(false)
-                .with_plugin(Features { data: &data, selected, hovered: &mut hovered, clicked: &mut clicked });
+                .with_plugin(Features {
+                    data: &data,
+                    selected,
+                    hide_outliers,
+                    hovered: &mut hovered,
+                    clicked: &mut clicked,
+                });
             ui.put(rect, map);
         }
         self.memory = memory;
@@ -346,6 +421,17 @@ impl MapView {
                 fit = true;
             }
             ui.label(RichText::new(crate::app::plural(data.features.len(), "feature")).size(11.5).color(theme::MUTED()));
+            let outliers = data.outlier_count();
+            if outliers > 0 {
+                let label = if self.hide_outliers { "Show" } else { "Hide" };
+                ui.label(RichText::new(format!("⚠ {outliers} far off")).size(11.5).color(theme::WARN())).on_hover_text(
+                    "Features with a vertex far from the rest of the data, drawn as long spikes.\n\
+                     Often swapped lat/lon or a stray coordinate. Click a spike to see its row.",
+                );
+                if ui.small_button(label).clicked() {
+                    self.hide_outliers = !self.hide_outliers;
+                }
+            }
             if data.skipped > 0 {
                 let srids = data.srids.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ");
                 ui.label(RichText::new(format!("{} not shown (SRID {srids})", data.skipped)).size(11.5).color(theme::WARN()))
@@ -386,27 +472,74 @@ impl MapView {
                     .corner_radius(10)
                     .inner_margin(Margin::same(12))
                     .show(ui, |ui| {
-                        ui.set_width(300.0);
+                        ui.set_width(320.0);
                         ui.horizontal(|ui| {
                             feature_title(ui, rs, row, self.column);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.add(egui::Button::new("×").frame(false)).clicked() {
                                     close = true;
                                 }
+                                ui.menu_button(RichText::new("Copy").size(12.0), |ui| {
+                                    let one = ResultSet {
+                                        columns: rs.columns.clone(),
+                                        rows: vec![rs.rows[row].clone()],
+                                        ..Default::default()
+                                    };
+                                    for f in [export::Format::Json, export::Format::GeoJson, export::Format::Tsv, export::Format::SqlInsert] {
+                                        if ui.button(f.label()).clicked() {
+                                            ui.ctx().copy_text(export::export(&one, f, "feature").trim_start_matches('\u{FEFF}').to_string());
+                                            ui.close();
+                                        }
+                                    }
+                                });
                             });
                         });
                         ui.add_space(6.0);
                         egui::ScrollArea::vertical().max_height(rect.height() - 120.0).show(ui, |ui| {
-                            egui::Grid::new("map-attrs").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                            egui::Grid::new("map-attrs").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
                                 for (i, name) in rs.columns.iter().enumerate() {
                                     ui.label(RichText::new(name).size(12.0).color(theme::MUTED()));
-                                    match rs.rows[row][i].as_deref() {
-                                        None => ui.label(RichText::new("NULL").italics().color(theme::FAINT())),
-                                        Some(v) => match geo::parse_hex(v) {
-                                            Some(g) => ui.label(RichText::new(g.summary()).size(12.0).color(theme::GEO())),
-                                            None => shaping::label(ui, v, 12.5, theme::TEXT()),
-                                        },
+                                    let value = rs.rows[row][i].as_deref();
+                                    // What the copy button copies: geometries as WKT.
+                                    let copy_text = match value {
+                                        None => None,
+                                        Some(v) => Some(geo::parse_hex(v).map_or_else(|| v.to_string(), |g| g.geometry.to_wkt())),
                                     };
+                                    ui.scope(|ui| {
+                                        ui.set_max_width(220.0);
+                                        match value {
+                                            None => {
+                                                ui.label(RichText::new("NULL").italics().color(theme::FAINT()));
+                                            }
+                                            Some(v) => match geo::parse_hex(v) {
+                                                Some(g) => {
+                                                    ui.add(egui::Label::new(RichText::new(g.summary()).size(12.0).color(theme::GEO())).wrap());
+                                                }
+                                                // Khmer is drawn shaped (not selectable); use the copy button.
+                                                None if shaping::is_complex(v) => {
+                                                    shaping::label(ui, v, 12.5, theme::TEXT());
+                                                }
+                                                None => {
+                                                    let shown: String = v.chars().take(400).collect();
+                                                    let more = if shown.len() < v.len() { "…" } else { "" };
+                                                    ui.add(egui::Label::new(RichText::new(format!("{shown}{more}")).size(12.5)).wrap().selectable(true));
+                                                }
+                                            },
+                                        }
+                                    });
+                                    match copy_text {
+                                        Some(text) => {
+                                            if ui.add(egui::Button::new(RichText::new("⧉").size(12.0).color(theme::FAINT())).frame(false))
+                                                .on_hover_text("Copy")
+                                                .clicked()
+                                            {
+                                                ui.ctx().copy_text(text);
+                                            }
+                                        }
+                                        None => {
+                                            ui.label("");
+                                        }
+                                    }
                                     ui.end_row();
                                 }
                             });
@@ -439,6 +572,7 @@ fn feature_title(ui: &mut Ui, rs: &ResultSet, row: usize, geom_col: usize) {
 struct Features<'a> {
     data: &'a MapData,
     selected: Option<usize>,
+    hide_outliers: bool,
     hovered: &'a mut Option<usize>,
     clicked: &'a mut Option<Option<usize>>,
 }
@@ -448,23 +582,26 @@ impl Plugin for Features<'_> {
         let painter = ui.painter_at(response.rect);
         let screen = |c: &Coord| -> Pos2 { projector.project(lon_lat(c[0], c[1])).to_pos2() };
         let pointer = response.hover_pos();
+        let hide = self.hide_outliers;
+        let data = self.data;
+        let visible = move || data.features.iter().enumerate().filter(move |(i, _)| !(hide && data.outlier[*i]));
 
         // Hit test, topmost first: points, then lines, then polygons.
         let mut hit = None;
         if let Some(p) = pointer {
-            for (i, f) in self.data.features.iter().enumerate().rev() {
+            for (i, f) in visible().rev() {
                 if f.points.iter().any(|c| screen(c).distance(p) < 8.0) {
                     hit = Some(i);
                     break;
                 }
             }
             if hit.is_none() {
-                hit = self.data.features.iter().enumerate().rev().find_map(|(i, f)| {
+                hit = visible().rev().find_map(|(i, f)| {
                     f.lines.iter().any(|l| near_line(&l.iter().map(screen).collect::<Vec<_>>(), p, 6.0)).then_some(i)
                 });
             }
             if hit.is_none() {
-                hit = self.data.features.iter().enumerate().rev().find_map(|(i, f)| {
+                hit = visible().rev().find_map(|(i, f)| {
                     f.fills.iter().any(|(v, t)| {
                         let pts: Vec<Pos2> = v.iter().map(screen).collect();
                         t.chunks(3).any(|tri| in_triangle(p, pts[tri[0]], pts[tri[1]], pts[tri[2]]))
@@ -492,7 +629,7 @@ impl Plugin for Features<'_> {
         };
         let mut shapes = Vec::new();
         for pass in 0..3 {
-            for (i, f) in self.data.features.iter().enumerate() {
+            for (i, f) in visible() {
                 let color = style(i);
                 match pass {
                     0 => {

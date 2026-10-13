@@ -62,6 +62,17 @@ pub fn handle_keys(ui: &Ui, popup: &mut Option<Popup>) -> Keys {
     keys
 }
 
+/// Replace `range` of `sql` with `text` and put the editor cursor after it.
+pub fn replace_text(ctx: &egui::Context, editor: Id, sql: &mut String, range: Range<usize>, text: &str) -> Range<usize> {
+    sql.replace_range(range.clone(), text);
+    let at = sql[..range.start + text.len()].chars().count();
+    if let Some(mut state) = TextEdit::load_state(ctx, editor) {
+        state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(at))));
+        state.store(ctx, editor);
+    }
+    at..at
+}
+
 /// Replace the completed word and move the editor cursor after it.
 /// Returns the new (empty) char selection.
 pub fn accept(ctx: &egui::Context, editor: Id, sql: &mut String, c: &Completion, index: usize) -> Range<usize> {
@@ -104,7 +115,9 @@ pub fn show(ui: &Ui, id: Id, p: &mut Popup, out: &TextEditOutput, sql: &str, edi
                 .inner_margin(Margin::same(4))
                 .shadow(Shadow { offset: [0, 8], blur: 24, spread: 0, color: egui::Color32::from_black_alpha(if theme::is_dark() { 140 } else { 40 }) })
                 .show(ui, |ui| {
-                    ui.set_width(WIDTH);
+                    // Commands carry argument hints and longer descriptions.
+                    let commands = p.completion.items.iter().any(|i| i.kind == ItemKind::Command);
+                    ui.set_width(if commands { 560.0 } else { WIDTH });
                     ui.spacing_mut().item_spacing.y = 0.0;
                     egui::ScrollArea::vertical()
                         .max_height(ROW * 10.0)
@@ -155,6 +168,7 @@ fn paint_row(ui: &Ui, rect: egui::Rect, item: &rgrip_core::complete::Suggestion,
         ItemKind::Function => Icon::Function,
         ItemKind::Keyword => Icon::Keyword,
         ItemKind::Snippet => Icon::Globe,
+        ItemKind::Command => Icon::Console,
     };
     widgets::paint_icon(&p, egui::pos2(rect.left() + 14.0, cy), icon);
 

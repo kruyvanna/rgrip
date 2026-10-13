@@ -31,6 +31,8 @@ pub enum ItemKind {
     Keyword,
     /// Generated SQL, e.g. `ST_Transform(geom, 4326)` for a geometry column.
     Snippet,
+    /// Slash command such as `/con_4326` (expanded with Tab).
+    Command,
 }
 
 #[derive(Clone, Debug)]
@@ -352,10 +354,12 @@ impl Catalog {
         }
     }
 
-    /// PostGIS is installed (its catalog table or geometry columns exist).
+    /// Spatial SQL is available: PostGIS (its catalog table or geometry
+    /// columns) or ArcGIS `st_geometry` columns.
     pub fn has_postgis(&self) -> bool {
         self.tables.iter().any(|t| {
-            t.name == "spatial_ref_sys" || t.columns.iter().any(|(_, ty)| crate::geo::column_srid(ty).is_some())
+            t.name == "spatial_ref_sys"
+                || t.columns.iter().any(|(_, ty)| crate::geo::column_srid(ty).is_some() || is_arcgis_geometry(ty))
         })
     }
 
@@ -366,6 +370,25 @@ impl Catalog {
         s.dedup();
         s
     }
+}
+
+/// ArcGIS (sde) geometry type, e.g. `sde.st_geometry`.
+pub fn is_arcgis_geometry(ty: &str) -> bool {
+    ty.trim().to_ascii_lowercase().trim_matches('"').ends_with("st_geometry")
+}
+
+/// `/word` being typed at the cursor: (range from the slash, word after it).
+fn slash_command_at(sql: &str, cursor: usize) -> Option<(Range<usize>, &str)> {
+    let head = &sql[..cursor];
+    let word_start = head.len() - head.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').map(char::len_utf8).sum::<usize>();
+    let slash = word_start.checked_sub(1).filter(|&i| head.as_bytes()[i] == b'/')?;
+    // Only at the start of a line or after whitespace (not `a/b` division).
+    let before = head[..slash].chars().next_back();
+    if before.is_some_and(|c| !c.is_whitespace()) {
+        return None;
+    }
+    let word_end = cursor + sql[cursor..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').map(char::len_utf8).sum::<usize>();
+    Some((slash..word_end, &sql[word_start..cursor]))
 }
 
 pub fn needs_quotes(ident: &str) -> bool {
@@ -395,6 +418,24 @@ enum Context {
 pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Option<Completion> {
     let cursor = cursor.min(sql.len());
     if !sql.is_char_boundary(cursor) || ends_in_literal(&sql[..cursor]) {
+        return None;
+    }
+    if let Some((replace, prefix)) = slash_command_at(sql, cursor) {
+        let items: Vec<Suggestion> = crate::commands::COMMANDS
+            .iter()
+            .filter(|c| c.name.starts_with(&prefix.to_ascii_lowercase()))
+            .map(|c| Suggestion {
+                label: format!("/{} {}", c.name, c.args),
+                insert: format!("/{} ", c.name),
+                kind: ItemKind::Command,
+                detail: c.help.to_string(),
+                replace: None,
+            })
+            .collect();
+        return (!items.is_empty()).then(|| Completion { replace, prefix: format!("/{prefix}"), items });
+    }
+    // Arguments of a slash command aren't SQL: no suggestions, so Tab expands.
+    if crate::commands::command_line_at(sql, cursor).is_some() {
         return None;
     }
     let tokens = tokenize(sql);
@@ -620,9 +661,24 @@ fn push_geometry_snippets(
         None => (String::new(), None),
     };
     for (col, ty) in &t.columns {
-        let Some(srid) = crate::geo::column_srid(ty) else { continue };
         let c = format!("{q}{}", ident(col));
         let alias = if in_select { format!(" AS {}", ident(col)) } else { String::new() };
+        if is_arcgis_geometry(ty) {
+            // ArcGIS st_geometry: convert through WKT text into PostGIS.
+            for (label, insert, detail) in [
+                (format!("ST_SetSRID(st_astext({col})::text, 4326)"), format!("ST_SetSRID(st_astext({c})::text, 4326){alias}"), "ArcGIS → 4326 (text)"),
+                (
+                    format!("ST_Transform(ST_SetSRID(st_astext({col})::text::geometry, 3857), 4326)"),
+                    format!("ST_Transform(ST_SetSRID(st_astext({c})::text::geometry, 3857), 4326){alias}"),
+                    "ArcGIS Web Mercator → 4326",
+                ),
+                (format!("st_astext({col})"), format!("st_astext({c})"), "WKT"),
+            ] {
+                items.push(Suggestion { label, insert, kind: ItemKind::Snippet, detail: detail.into(), replace: range.clone() });
+            }
+            continue;
+        }
+        let Some(srid) = crate::geo::column_srid(ty) else { continue };
         let mut add = |label: String, insert: String, detail: String| {
             items.push(Suggestion { label, insert, kind: ItemKind::Snippet, detail, replace: range.clone() });
         };
@@ -719,7 +775,7 @@ fn rank(items: Vec<Suggestion>, prefix: &str) -> Vec<Suggestion> {
 fn kind_rank(k: ItemKind) -> u8 {
     match k {
         ItemKind::Column => 0,
-        ItemKind::Snippet => 1,
+        ItemKind::Snippet | ItemKind::Command => 1,
         ItemKind::Table | ItemKind::View => 1,
         ItemKind::Schema => 2,
         ItemKind::Keyword => 3,
@@ -913,6 +969,36 @@ mod tests {
         assert_eq!(t.replace, Some(7..9)); // replaces "p."
         // Plain columns still complete after the dot.
         assert!(c.items.iter().any(|s| s.label == "geom" && s.replace.is_none()));
+    }
+
+    #[test]
+    fn slash_commands() {
+        let input = "select 1;\n/con|";
+        let cursor = input.find('|').unwrap();
+        let sql = input.replace('|', "");
+        let c = complete(&sql, cursor, &catalog(), false).unwrap();
+        assert_eq!(c.replace, 10..14);
+        assert_eq!(c.items.iter().map(|s| s.insert.as_str()).collect::<Vec<_>>(), ["/con_4326 ", "/con_4326_2 ", "/con_merc "]);
+        // Just the slash lists everything; division doesn't.
+        assert_eq!(complete("/", 1, &catalog(), false).unwrap().items.len(), crate::commands::COMMANDS.len());
+        assert!(complete("select a/b", 9, &catalog(), false).is_none_or(|c| c.items.iter().all(|s| s.kind != ItemKind::Command)));
+        // No SQL suggestions while typing a command's arguments.
+        assert!(complete("/con_4326 us", 12, &catalog(), false).is_none());
+    }
+
+    #[test]
+    fn arcgis_snippets() {
+        let mut cat = catalog();
+        cat.tables.push(CatalogTable {
+            schema: "public".into(),
+            name: "lands".into(),
+            kind: TableKind::Table,
+            columns: vec![("objectid".into(), "integer".into()), ("shape".into(), "sde.st_geometry".into())],
+        });
+        let items = complete_with("select objectid, sh| from lands", &cat);
+        assert_eq!(items[0].label, "shape");
+        assert_eq!(items[1].insert, "ST_SetSRID(st_astext(shape)::text, 4326) AS shape");
+        assert!(items.iter().any(|s| s.detail == "ArcGIS Web Mercator → 4326"));
     }
 
     #[test]
