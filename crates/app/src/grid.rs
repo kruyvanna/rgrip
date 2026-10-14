@@ -419,8 +419,13 @@ fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, g
                 let cols: Vec<&str> = r.columns.iter().map(|(here, there)| if r.outgoing { here.as_str() } else { there.as_str() }).collect();
                 let other = if r.other_schema == "public" { r.other_table.clone() } else { format!("{}.{}", r.other_schema, r.other_table) };
                 let (arrow, hover) = if r.outgoing { ("→", "Rows these rows reference") } else { ("←", "Rows that reference these rows") };
-                let label = format!("{arrow} {other}  ({})", cols.join(", "));
-                if ui.button(label).on_hover_text(format!("{hover}\n{}", r.name)).clicked() {
+                let mut label = format!("{arrow} {other}  ({})", cols.join(", "));
+                let mut hover = format!("{hover}\n{}", r.name);
+                if r.inferred {
+                    label.push_str("  ~ inferred");
+                    hover.push_str("\nGuessed from column names (no foreign key constraint)");
+                }
+                if ui.button(label).on_hover_text(hover).clicked() {
                     event = Some(GridEvent::Follow { relation: i, rows: rows.to_vec() });
                     ui.close();
                 }

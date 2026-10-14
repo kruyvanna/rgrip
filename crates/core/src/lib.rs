@@ -9,6 +9,7 @@ pub mod format;
 pub mod geo;
 pub mod model;
 pub mod postgres;
+pub mod relations;
 pub mod sql;
 pub mod ssh;
 pub mod update;

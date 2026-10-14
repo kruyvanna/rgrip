@@ -209,6 +209,8 @@ pub struct Relation {
     pub other_table: String,
     /// Column pairs (this table's column, other table's column).
     pub columns: Vec<(String, String)>,
+    /// Guessed from column names; no foreign key constraint backs it.
+    pub inferred: bool,
 }
 
 /// Rows are kept as text (Postgres text protocol), `None` is SQL NULL.
