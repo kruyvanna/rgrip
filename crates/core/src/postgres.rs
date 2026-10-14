@@ -371,14 +371,18 @@ impl PgConn {
                         coalesce(array_agg(a.attname::text order by a.attnum)
                                  filter (where a.attnum is not null), '{}'),
                         coalesce(array_agg(format_type(a.atttypid, a.atttypmod) order by a.attnum)
-                                 filter (where a.attnum is not null), '{}')
+                                 filter (where a.attnum is not null), '{}'),
+                        array(select k.attname::text from pg_index i
+                              join pg_attribute k on k.attrelid = i.indrelid and k.attnum = i.indkey[0]
+                              where i.indrelid = c.oid and i.indisunique and i.indnatts = 1
+                                and i.indexprs is null and i.indpred is null)
                  from pg_class c
                  join pg_namespace n on n.oid = c.relnamespace
                  left join pg_attribute a
                    on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
                  where c.relkind in ('r','p','v','m','f') and not c.relispartition
                    and n.nspname not like 'pg\\_toast%' and n.nspname not like 'pg\\_temp%'
-                 group by 1, 2, 3
+                 group by c.oid, 1, 2, 3
                  order by 1, 2",
                 &[],
             )
@@ -395,6 +399,7 @@ impl PgConn {
                         name: r.get(1),
                         kind: TableKind::from_relkind(r.get::<_, &str>(2)),
                         columns: names.into_iter().zip(types).collect(),
+                        keys: r.get(5),
                     }
                 })
                 .collect(),
@@ -425,20 +430,36 @@ impl PgConn {
     /// Point `search_path` at `schema` (then `public`); `None` restores the
     /// session default. Postgres accepts a missing schema in `search_path`,
     /// so existence is checked in the same round trip.
+    /// `schema`: one schema, or several separated by newlines (searched in
+    /// that order, then `public`). Checks they all still exist.
     async fn set_schema(&self, schema: Option<&str>) -> Result<(), String> {
         let Some(schema) = schema else {
             return self.client.batch_execute("reset search_path").await.map_err(|e| format_error(&e, None));
         };
-        let path = if schema == "public" { "public".to_string() } else { format!("{}, public", crate::sql::quote_ident(schema)) };
+        let list: Vec<&str> = schema.split('\n').filter(|s| !s.is_empty()).collect();
+        let mut path: Vec<String> = list.iter().map(|s| if *s == "public" { "public".to_string() } else { crate::sql::quote_ident(s) }).collect();
+        if !list.contains(&"public") {
+            path.push("public".into());
+        }
+        let literals: Vec<String> = list.iter().map(|s| format!("'{}'", s.replace('\'', "''"))).collect();
         let sql = format!(
-            "set search_path to {path}; select 1 from pg_namespace where nspname = '{}'",
-            schema.replace('\'', "''")
+            "set search_path to {}; select nspname::text from pg_namespace where nspname in ({})",
+            path.join(", "),
+            literals.join(", ")
         );
         let messages = self.client.simple_query(&sql).await.map_err(|e| format_error(&e, None))?;
-        if messages.iter().any(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_))) {
-            Ok(())
-        } else {
-            Err(format!("Schema '{schema}' no longer exists. Pick another schema in the toolbar."))
+        let found: Vec<String> = messages
+            .iter()
+            .filter_map(|m| match m {
+                tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
+                _ => None,
+            })
+            .collect();
+        let missing: Vec<&str> = list.iter().copied().filter(|s| !found.iter().any(|f| f == s)).collect();
+        match missing.as_slice() {
+            [] => Ok(()),
+            [one] => Err(format!("Schema '{one}' no longer exists. Pick another schema in the toolbar.")),
+            many => Err(format!("Schemas {} no longer exist. Pick others in the toolbar.", many.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", "))),
         }
     }
 

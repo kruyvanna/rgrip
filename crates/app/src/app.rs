@@ -138,6 +138,8 @@ struct Console {
     schema: Option<String>,
     /// Schema the last run used (paging, export and queued runs reuse it).
     run_schema: Option<String>,
+    /// More schemas searched after `schema`, in the order they were ticked.
+    more_schemas: Vec<String>,
     /// Database picked in the toolbar; `None` = the connection's own.
     database: Option<String>,
     /// Database the last run used (like `run_schema`).
@@ -170,7 +172,14 @@ impl Console {
     /// The schema to send with a run. Not picked and not known yet: `None`,
     /// i.e. the server's own search_path.
     fn schema_for_run(&self, schemas: &[String]) -> Option<String> {
-        (self.schema.is_some() || !schemas.is_empty()).then(|| self.schema_or_default(schemas).to_string())
+        (self.schema.is_some() || !schemas.is_empty()).then(|| self.search_list(schemas).join("\n"))
+    }
+
+    /// Every schema this console searches, main one first.
+    fn search_list(&self, schemas: &[String]) -> Vec<String> {
+        let mut list = vec![self.schema_or_default(schemas).to_string()];
+        list.extend(self.more_schemas.iter().filter(|s| !list.contains(s)).cloned().collect::<Vec<_>>());
+        list
     }
 }
 
@@ -195,6 +204,7 @@ impl Console {
             last_sql: String::new(),
             schema: None,
             run_schema: None,
+            more_schemas: Vec::new(),
             database: None,
             run_database: None,
         }
@@ -1366,11 +1376,18 @@ impl App {
             self.active = 0;
         }
         if let Some(schema) = env("RGRIP_DEMO_SCHEMA") {
+            let mut list: Vec<String> = schema.split(',').map(String::from).collect();
+            let first = list.remove(0);
             for tab in &mut self.tabs {
                 if let TabKind::Console(c) = &mut tab.kind {
-                    c.schema = Some(schema.clone());
+                    c.schema = Some(first.clone());
+                    c.more_schemas = list.clone();
                 }
             }
+        }
+        // `RGRIP_DEMO_FILTER=order`: explorer search.
+        if let Some(f) = env("RGRIP_DEMO_FILTER") {
+            self.filter = f;
         }
         if let Some(db) = env("RGRIP_DEMO_DATABASE") {
             for tab in &mut self.tabs {
@@ -1547,7 +1564,10 @@ impl App {
             self.open_console(0);
             if let Some(TabKind::Console(c)) = self.tabs.last_mut().map(|t| &mut t.kind) {
                 c.sql = sql.replace("\\n", "\n");
-                c.schema = std::env::var("RGRIP_DEMO_SCHEMA").ok();
+                // `RGRIP_DEMO_SCHEMA=demo,legacy`: several schemas.
+                let mut list: Vec<String> = std::env::var("RGRIP_DEMO_SCHEMA").ok().map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
+                c.schema = (!list.is_empty()).then(|| list.remove(0));
+                c.more_schemas = list;
                 c.database = std::env::var("RGRIP_DEMO_DATABASE").ok();
             }
             self.tab_action(self.active, TabAction::Run { all: true });
@@ -1883,6 +1903,7 @@ impl App {
             }
             let preview: String = q.sql.lines().take(12).collect::<Vec<_>>().join("\n");
             resp.on_hover_text(RichText::new(preview).monospace().size(11.5)).context_menu(|ui| {
+                menu_layout(ui);
                 if ui.button("Open").clicked() {
                     actions.push(Action::OpenSaved(i));
                     ui.close();
@@ -2038,7 +2059,9 @@ struct Tree<'a> {
 
 impl Tree<'_> {
     fn row(&self, ui: &mut Ui, key: &str, depth: usize, expandable: bool, icon: Icon, label: &str, detail: Option<&str>, actions: &mut Vec<Action>) -> (egui::Response, bool) {
-        let open = self.expanded.contains(key);
+        // While searching, connections and schemas show their matches open.
+        let searching = !self.filter.is_empty() && (key.starts_with("c/") || key.starts_with("s/"));
+        let open = searching || self.expanded.contains(key);
         let resp = widgets::tree_row(
             ui,
             TreeRow {
@@ -2084,6 +2107,31 @@ impl Tree<'_> {
                 None => actions.push(Action::LoadSchemas(ci)),
                 Some(Load::Loading) => widgets::tree_note(ui, 1, "loading…", theme::FAINT()),
                 Some(Load::Failed(e)) => widgets::tree_note(ui, 1, e, theme::ERROR()),
+                Some(Load::Ready(list)) if !self.filter.is_empty() && !conn.catalog.tables.is_empty() => {
+                    // Search every schema (not just expanded ones) via the catalog.
+                    let mut any = false;
+                    for schema in list {
+                        let hits: Vec<TableInfo> = conn
+                            .catalog
+                            .tables
+                            .iter()
+                            .filter(|t| &t.schema == schema && t.name.to_lowercase().contains(self.filter))
+                            .map(|t| TableInfo { name: t.name.clone(), kind: t.kind })
+                            .collect();
+                        if hits.is_empty() {
+                            continue;
+                        }
+                        any = true;
+                        let key = format!("s/{}/{schema}", conn.cfg.id);
+                        self.row(ui, &key, 1, true, Icon::Schema, schema, Some(&hits.len().to_string()), actions);
+                        for t in &hits {
+                            self.table(ui, ci, conn, schema, t, actions);
+                        }
+                    }
+                    if !any {
+                        widgets::tree_note(ui, 1, "no matching tables", theme::FAINT());
+                    }
+                }
                 Some(Load::Ready(list)) => {
                     for schema in list {
                         self.schema(ui, ci, conn, schema, actions);
@@ -2129,6 +2177,7 @@ impl Tree<'_> {
             actions.push(Action::OpenTable(ci, schema.to_string(), t.name.clone()));
         }
         resp.context_menu(|ui| {
+            menu_layout(ui);
             if ui.button("Open data").clicked() {
                 actions.push(Action::OpenTable(ci, schema.to_string(), t.name.clone()));
                 ui.close();
@@ -2163,7 +2212,15 @@ impl Tree<'_> {
     }
 }
 
+/// Context menus: wide enough for their longest item, never wrapping
+/// ("Copy connection URL" used to break over four lines).
+pub(crate) fn menu_layout(ui: &mut Ui) {
+    ui.set_min_width(190.0);
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+}
+
 fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
+    menu_layout(ui);
     if ui.button("New console").clicked() {
         actions.push(Action::NewConsole(ci));
         ui.close();
@@ -2394,6 +2451,7 @@ fn tab_button(
     }
     let tab_resp = if style.tip.is_empty() { tab_resp } else { tab_resp.on_hover_text(&style.tip) };
     tab_resp.context_menu(|ui| {
+        menu_layout(ui);
         let mut item = |ui: &mut Ui, label: &str, enabled: bool, which: CloseWhich| {
             if ui.add_enabled(enabled, Button::new(label)).clicked() {
                 actions.push(Action::Close(which));
@@ -2708,39 +2766,71 @@ fn database_picker(ui: &mut Ui, tab_id: TabId, c: &mut Console, databases: &[Str
     if let Some(d) = picked.filter(|d| *d != current) {
         c.database = (d != default_db).then_some(d);
         c.schema = None;
+        c.more_schemas.clear();
         c.popup = None;
     }
 }
 
 /// Toolbar combo for the console's schema. With many schemas the list gets a
 /// filter field.
+/// Schemas for unqualified names. Tick several to search them all, in the
+/// order ticked; the first is the main one (autocomplete, slash commands).
 fn schema_picker(ui: &mut Ui, tab_id: TabId, c: &mut Console, schemas: &[String]) {
     const FILTER_FROM: usize = 12;
-    let current = c.schema_or_default(schemas).to_string();
+    let list = c.search_list(schemas);
+    let title = match list.len() {
+        1 => list[0].clone(),
+        n => format!("{} +{}", list[0], n - 1),
+    };
     let filter_id = Id::new(("schema-filter", tab_id));
+    let mut toggled = None;
     egui::ComboBox::from_id_salt(("schema", tab_id))
-        .selected_text(current.clone())
+        .selected_text(title)
         .width(110.0)
         .show_ui(ui, |ui| {
+            menu_layout(ui);
             let mut filter = String::new();
             if schemas.len() > FILTER_FROM {
                 filter = ui.data_mut(|d| d.get_temp::<String>(filter_id)).unwrap_or_default();
-                let r = ui.add(TextEdit::singleline(&mut filter).hint_text("Filter…").desired_width(140.0));
+                let r = ui.add(TextEdit::singleline(&mut filter).hint_text("Filter…").desired_width(160.0));
                 if r.changed() {
                     ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
                 }
             }
+            ui.label(RichText::new("Searched in this order, then public").size(11.5).color(theme::FAINT()));
             let needle = filter.to_lowercase();
             egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
                 for s in schemas.iter().filter(|s| s.to_lowercase().contains(&needle)) {
-                    if ui.selectable_label(*s == current, s).clicked() {
-                        c.schema = Some(s.clone());
+                    let pos = list.iter().position(|x| x == s);
+                    let mut on = pos.is_some();
+                    let label = match pos {
+                        Some(i) if list.len() > 1 => format!("{s}  ·{}", i + 1),
+                        _ => s.clone(),
+                    };
+                    // Keep at least one schema ticked.
+                    let lone = on && list.len() == 1;
+                    if ui.add_enabled(!lone, egui::Checkbox::new(&mut on, label)).clicked() {
+                        toggled = Some(s.clone());
                     }
                 }
             });
         })
         .response
-        .on_hover_text("Schema for unqualified names");
+        .on_hover_text(list.join(", "));
+    if let Some(s) = toggled {
+        let mut list = list;
+        match list.iter().position(|x| *x == s) {
+            Some(i) => {
+                list.remove(i);
+            }
+            None => list.push(s),
+        }
+        if !list.is_empty() {
+            c.schema = Some(list.remove(0));
+            c.more_schemas = list;
+            c.popup = None;
+        }
+    }
 }
 
 /// Open, refresh or close the completion popup after the editor ran.
@@ -3951,6 +4041,7 @@ mod tests {
                 name: name.into(),
                 kind: TableKind::Table,
                 columns: cols.iter().map(|c| (c.to_string(), "text".into())).collect(),
+                keys: Vec::new(),
             };
             let mut h = Self {
                 ctx: egui::Context::default(),

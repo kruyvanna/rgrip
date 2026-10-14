@@ -297,6 +297,7 @@ mod tests {
             name: name.into(),
             kind: TableKind::Table,
             columns: cols.iter().map(|(c, ty)| (c.to_string(), ty.to_string())).collect(),
+            keys: Vec::new(),
         };
         Catalog {
             tables: vec![
@@ -315,7 +316,7 @@ mod tests {
     #[test]
     fn console_schema_is_preferred() {
         let mut c = catalog();
-        c.tables.push(CatalogTable { schema: "gis".into(), name: "roads".into(), kind: TableKind::Table, columns: vec![("gid".into(), "integer".into())] });
+        c.tables.push(CatalogTable { schema: "gis".into(), name: "roads".into(), kind: TableKind::Table, columns: vec![("gid".into(), "integer".into())], keys: Vec::new() });
         // Unqualified `roads` is public's by default, gis's in a gis console.
         assert_eq!(expand("/top roads", &c, "public").unwrap(), "select *\nfrom roads\nlimit 100;");
         assert_eq!(expand("/top roads", &c, "gis").unwrap(), "select *\nfrom roads\nlimit 100;");

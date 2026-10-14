@@ -127,6 +127,12 @@ async fn end_to_end() {
         let err = conn.execute_in(Some("rgrip_no_such_schema"), "select 1").await.unwrap_err();
         assert!(err.contains("no longer exists"), "{err}");
         conn.execute_in(None, "select 1").await.unwrap();
+        // Several schemas: searched in order, all checked to exist.
+        let both = format!("rgrip_no_such_schema_b\n{schema}");
+        assert!(conn.execute_in(Some(&both), "select 1").await.unwrap_err().contains("rgrip_no_such_schema_b"));
+        let both = format!("public\n{schema}");
+        let out = conn.execute_in(Some(&both), "select * from items order by id").await.unwrap();
+        assert_eq!(name(out).as_deref(), Some("a"));
 
         // Foreign keys, both directions, including a self-reference.
         conn.execute(&format!(

@@ -294,6 +294,7 @@ pub fn show(
                         }
                         let is_frozen = frozen.contains(&i);
                         r.context_menu(|ui| {
+                        crate::app::menu_layout(ui);
                             ui.label(RichText::new(name).small().color(theme::MUTED()));
                             if is_frozen {
                                 if ui.button("Unfreeze column").clicked() {
@@ -382,6 +383,7 @@ pub fn show(
                         menu_row = Some(i);
                     }
                     response.context_menu(|ui| {
+                        crate::app::menu_layout(ui);
                         // Cell actions for the right-clicked cell.
                         if let (Some(e), Some(col)) = (edit.as_mut(), menu_col.filter(|c| !cache.geom_cols.contains(c))) {
                             let pending = e.changes.get(&(i, col));

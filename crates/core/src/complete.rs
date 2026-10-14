@@ -19,6 +19,9 @@ pub struct CatalogTable {
     pub kind: TableKind,
     /// Column name and formatted type.
     pub columns: Vec<(String, String)>,
+    /// Single-column unique keys (primary key or unique index), for
+    /// inferring relations in databases without foreign keys.
+    pub keys: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -801,6 +804,7 @@ mod tests {
             name: name.into(),
             kind,
             columns: cols.iter().map(|c| (c.to_string(), "text".to_string())).collect(),
+            keys: Vec::new(),
         };
         Catalog {
             tables: vec![
@@ -817,7 +821,7 @@ mod tests {
     #[test]
     fn console_schema_is_preferred() {
         let mut c = catalog();
-        c.tables.push(CatalogTable { schema: "billing".into(), name: "users".into(), kind: TableKind::Table, columns: vec![("account".into(), "text".into())] });
+        c.tables.push(CatalogTable { schema: "billing".into(), name: "users".into(), kind: TableKind::Table, columns: vec![("account".into(), "text".into())], keys: Vec::new() });
         let cols = |schema: &str| -> Vec<String> {
             let sql = "select u. from users u";
             complete(sql, 9, &c, schema, false).unwrap().items.into_iter().map(|s| s.label).collect()
@@ -939,12 +943,14 @@ mod tests {
             name: "parcels".into(),
             kind: TableKind::Table,
             columns: vec![("id".into(), "integer".into()), ("geom".into(), "geometry(Polygon,32648)".into())],
+            keys: Vec::new(),
         });
         c.tables.push(CatalogTable {
             schema: "public".into(),
             name: "spatial_ref_sys".into(),
             kind: TableKind::Table,
             columns: vec![("srid".into(), "integer".into())],
+            keys: Vec::new(),
         });
         c
     }
@@ -1015,6 +1021,7 @@ mod tests {
             name: "lands".into(),
             kind: TableKind::Table,
             columns: vec![("objectid".into(), "integer".into()), ("shape".into(), "sde.st_geometry".into())],
+            keys: Vec::new(),
         });
         let items = complete_with("select objectid, sh| from lands", &cat);
         assert_eq!(items[0].label, "shape");
