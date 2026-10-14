@@ -18,3 +18,8 @@ fetch("https://api.github.com/repos/yoouTaro/rgrip/releases?per_page=5")
     });
   })
   .catch(() => {});
+
+// Reduced motion: keep the clips on their poster frame.
+if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  document.querySelectorAll("video[autoplay]").forEach((v) => { v.removeAttribute("autoplay"); v.pause(); });
+}

@@ -483,6 +483,19 @@ enum UpdateState {
     Installing(Release),
 }
 
+/// A scripted demo (debug builds) for recording clips: `RGRIP_DEMO_STEPS`
+/// is a `;`-separated list played after the scene settles. See
+/// `App::demo_step` for the steps.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+struct DemoPlay {
+    steps: Vec<String>,
+    index: usize,
+    /// When the current step started.
+    since: Instant,
+    /// Characters of the current `type:` / `keys:` step already sent.
+    typed: usize,
+}
+
 struct CommandsEditor {
     list: Vec<rgrip_core::commands::SlashCommand>,
     selected: usize,
@@ -556,6 +569,9 @@ pub struct App {
     selected: Option<String>,
     /// Slash command editor (Settings), while open.
     commands_editor: Option<CommandsEditor>,
+    /// Debug demo recordings: the scripted steps being played.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    demo_play: Option<DemoPlay>,
     /// Debug screenshot scenes: when the scene first looked settled.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     demo_settled: Option<Instant>,
@@ -611,6 +627,7 @@ impl App {
             expanded: HashSet::new(),
             selected: None,
             demo_settled: None,
+            demo_play: None,
             commands_editor: None,
         }
     }
@@ -1491,7 +1508,7 @@ impl App {
                 if let (Some(cols), true) = (env("RGRIP_DEMO_FREEZE"), c.grid.frozen.is_empty()) {
                     c.grid.frozen = cols.split(',').map(String::from).collect();
                 }
-                (c.running.is_none() && c.output.is_some()) || c.popup.is_some()
+                (c.running.is_none() && (c.output.is_some() || c.sql.trim().is_empty())) || c.popup.is_some()
             }
             Some(TabKind::Table(t)) => match &t.data {
                 Some(Ok(rs)) if !t.loading => {
@@ -1580,9 +1597,217 @@ impl App {
                 self.demo_settled = None;
             } else if self.demo_settled.get_or_insert_with(Instant::now).elapsed() > Duration::from_millis(2500) {
                 let _ = std::fs::write(&path, "ready");
+                // Recordings: play the script once the scene is ready.
+                if self.demo_play.is_none()
+                    && let Some(steps) = env("RGRIP_DEMO_STEPS")
+                {
+                    let steps = steps.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    self.demo_play = Some(DemoPlay { steps, index: 0, since: Instant::now(), typed: 0 });
+                }
             }
             self.egui_ctx.request_repaint_after(Duration::from_millis(100));
         }
+        while self.demo_step() {}
+    }
+
+    /// Advance the demo script by one step if it's ready to move on.
+    /// Returns true to run the next step in the same frame.
+    ///
+    /// Steps: `wait:<ms>`, `type:<text>` (into the console, `\n` = newline),
+    /// `keys:<text>` (keystrokes to the focused field), `key:Enter|Escape`,
+    /// `run` (and wait for results), `view:map|grid`, `open:<schema.table>`
+    /// (and wait for data), `select:<rows>`, `menu:<row>`,
+    /// `related:<table>` (and wait), `editor:<row>:<col>`,
+    /// `edit:<row>:<col>=<value>`, `freeze:<cols>`, `scrollx:<px>`,
+    /// `sort:<col>:asc|desc` (and wait), `goto` (open the column search),
+    /// `commands:<args>` (slash command editor preview), `done` (touch
+    /// `RGRIP_DEMO_DONE`).
+    #[cfg(debug_assertions)]
+    fn demo_step(&mut self) -> bool {
+        let Some(play) = &mut self.demo_play else { return false };
+        let Some(step) = play.steps.get(play.index).cloned() else { return false };
+        self.egui_ctx.request_repaint_after(Duration::from_millis(16));
+        let elapsed = play.since.elapsed();
+        let (verb, arg) = step.split_once(':').unwrap_or((step.as_str(), ""));
+        let advance = |app: &mut App| {
+            if let Some(p) = &mut app.demo_play {
+                p.index += 1;
+                p.since = Instant::now();
+                p.typed = 0;
+            }
+            true
+        };
+        let active = self.active;
+        match verb {
+            "wait" => {
+                if elapsed.as_millis() >= arg.parse::<u128>().unwrap_or(500) {
+                    return advance(self);
+                }
+            }
+            "type" | "keys" => {
+                // About 22 characters a second, like a quick typist.
+                let text = arg.replace("\\n", "\n");
+                let total = text.chars().count();
+                let want = ((elapsed.as_millis() / 45) as usize + 1).min(total);
+                let typed = play.typed;
+                if want > typed {
+                    let chunk: String = text.chars().skip(typed).take(want - typed).collect();
+                    play.typed = want;
+                    if verb == "keys" {
+                        self.egui_ctx.input_mut(|i| i.events.push(egui::Event::Text(chunk)));
+                    } else if let Some(TabKind::Console(c)) = self.tabs.get_mut(active).map(|t| &mut t.kind) {
+                        c.sql.push_str(&chunk);
+                        let n = c.sql.chars().count();
+                        c.cursor = n..n;
+                        let id = Id::new(("editor", self.tabs[active].id));
+                        let mut state = TextEdit::load_state(&self.egui_ctx, id).unwrap_or_default();
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(n))));
+                        state.store(&self.egui_ctx, id);
+                    }
+                }
+                if want == total && elapsed.as_millis() > 45 * total as u128 + 150 {
+                    return advance(self);
+                }
+            }
+            "key" => {
+                let key = match arg {
+                    "Enter" => Key::Enter,
+                    "Escape" => Key::Escape,
+                    "Down" => Key::ArrowDown,
+                    _ => Key::Tab,
+                };
+                self.egui_ctx.input_mut(|i| i.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }));
+                return advance(self);
+            }
+            "run" => {
+                let state = match self.tabs.get(active).map(|t| &t.kind) {
+                    Some(TabKind::Console(c)) => (c.running.is_some(), c.output.is_some()),
+                    _ => (false, true),
+                };
+                if play.typed == 0 {
+                    play.typed = 1;
+                    if let Some(TabKind::Console(c)) = self.tabs.get_mut(active).map(|t| &mut t.kind) {
+                        c.output = None;
+                    }
+                    self.tab_action(active, TabAction::Run { all: true });
+                } else if !state.0 && state.1 {
+                    return advance(self);
+                }
+            }
+            "view" => {
+                match self.tabs.get_mut(active).map(|t| &mut t.kind) {
+                    Some(TabKind::Console(c)) => c.view = if arg == "map" { View::Map(0) } else { View::Result(0) },
+                    Some(TabKind::Table(t)) => t.show_map = arg == "map",
+                    None => {}
+                }
+                return advance(self);
+            }
+            "open" | "related" | "sort" => {
+                if play.typed == 0 {
+                    play.typed = 1;
+                    match verb {
+                        "open" => {
+                            if let Some((schema, table)) = arg.split_once('.') {
+                                self.open_table(0, schema.into(), table.into());
+                            }
+                        }
+                        "sort" => {
+                            if let Some(TabKind::Table(t)) = self.tabs.get_mut(active).map(|t| &mut t.kind) {
+                                let (col, dir) = arg.split_once(':').unwrap_or((arg, "asc"));
+                                t.order = Some((col.to_string(), dir != "desc"));
+                            }
+                            self.tab_action(active, TabAction::Reload);
+                        }
+                        _ => {
+                            let a = match self.tabs.get(active).map(|t| &t.kind) {
+                                Some(TabKind::Table(t)) => match (&t.data, t.relations.iter().find(|r| r.other_table == arg)) {
+                                    (Some(Ok(rs)), Some(r)) => {
+                                        let rows: Vec<usize> = if t.grid.selection.is_empty() { vec![0] } else { t.grid.selection.iter().copied().collect() };
+                                        Some(follow(r, rs, &rows, &[]))
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            if let Some(a) = a {
+                                self.tab_action(active, a);
+                            }
+                        }
+                    }
+                    return false;
+                }
+                let loaded = match self.tabs.get(self.active).map(|t| &t.kind) {
+                    Some(TabKind::Table(t)) if verb == "related" => t.related.as_ref().is_some_and(|r| r.data.is_some()),
+                    Some(TabKind::Table(t)) => t.data.is_some() && !t.loading,
+                    _ => false,
+                };
+                if loaded {
+                    return advance(self);
+                }
+            }
+            _ => {
+                if let Some(TabKind::Table(t)) = self.tabs.get_mut(active).map(|t| &mut t.kind)
+                    && let Some(Ok(rs)) = &t.data
+                {
+                    let col = |name: &str| rs.columns.iter().position(|c| c == name);
+                    let cell = |spec: &str| -> Option<(usize, usize)> {
+                        let (r, c) = spec.split_once(':')?;
+                        Some((r.parse().ok()?, col(c)?))
+                    };
+                    match verb {
+                        "select" => t.grid.selection = arg.split(',').filter_map(|v| v.parse().ok()).collect(),
+                        "menu" => {
+                            if let Ok(row) = arg.parse() {
+                                t.grid.demo_menu = Some(row);
+                            }
+                        }
+                        "editor" => {
+                            if let Some((r, c)) = cell(arg) {
+                                t.editor = Some(grid::CellEditor::open(r, c, rs.rows[r][c].as_deref()));
+                            }
+                        }
+                        "edit" => {
+                            if let Some((at, v)) = arg.split_once('=').and_then(|(spec, v)| Some((cell(spec)?, v))) {
+                                t.changes.insert(at, Some(v.to_string()));
+                                t.editor = None;
+                            }
+                        }
+                        "freeze" => t.grid.frozen = arg.split(',').map(String::from).collect(),
+                        "scrollx" => t.grid.scroll_x = arg.parse().ok(),
+                        "goto" => t.grid.open_goto(arg),
+                        _ => {}
+                    }
+                }
+                match verb {
+                    "commands" => {
+                        if self.commands_editor.is_none() {
+                            self.apply(Action::EditCommands);
+                        }
+                        if let Some(ed) = &mut self.commands_editor {
+                            ed.selected = 2;
+                            let want = ((elapsed.as_millis() / 60) as usize + 1).min(arg.chars().count());
+                            ed.preview_args = arg.chars().take(want).collect();
+                            if want < arg.chars().count() {
+                                return false;
+                            }
+                        }
+                    }
+                    "done" => {
+                        if let Ok(path) = std::env::var("RGRIP_DEMO_DONE") {
+                            let _ = std::fs::write(path, "done");
+                        }
+                    }
+                    _ => {}
+                }
+                return advance(self);
+            }
+        }
+        false
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn demo_step(&mut self) -> bool {
+        false
     }
 
     #[cfg(debug_assertions)]

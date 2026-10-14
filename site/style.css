@@ -55,7 +55,7 @@ h1{font-size:clamp(36px,6.2vw,68px);line-height:1.05;letter-spacing:-.03em;margi
 
 .shot{margin:0;background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;
   aspect-ratio:16/10;box-shadow:var(--shadow);position:relative}
-.shot img{width:100%;height:100%;object-fit:cover}
+.shot img,.shot video{width:100%;height:100%;object-fit:cover;display:block;position:relative;z-index:1}
 /* Wide table image: show it whole on a light card, like it pastes. */
 .shot.shot-wide{aspect-ratio:auto;background:#fff;padding:14px}
 .shot-wide img{height:auto;object-fit:contain}

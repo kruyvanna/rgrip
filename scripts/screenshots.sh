@@ -18,12 +18,12 @@ scene() { # name, then env assignments
   name=$1; shift
   [ "$only" = "  " ] || case "$only" in *" $name "*) ;; *) return 0 ;; esac
   ready=$(mktemp -u)
-  env RGRIP_DEMO_CONN="rgrip dev (PostGIS)" RGRIP_DEMO_ONLY=1 RGRIP_DEMO_THEME=dark RGRIP_DEMO_SIZE=1440x900 \
+  env RGRIP_DEMO_CONN="rgrip dev (PostGIS)" RGRIP_DEMO_ONLY=1 RGRIP_DEMO_THEME=dark RGRIP_DEMO_PALETTE="rgrip Dark" RGRIP_DEMO_SIZE=1440x900 \
       RGRIP_DEMO_READY="$ready" "$@" target/debug/rgrip >/dev/null 2>&1 &
   pid=$!
   i=0
   while [ ! -f "$ready" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
-  if [ -f "$ready" ] && wid=$(target/winid $pid); then
+  if [ -f "$ready" ] && wid=$(target/winid $pid | cut -d" " -f1); then
     screencapture -x -o -l "$wid" "$out/$name.png"
     echo "$out/$name.png"
   else

@@ -90,7 +90,7 @@
             <h3>See your data on a map</h3>
             <p>Geometry columns become readable cells and one click puts them on a map. Pick a dark, light, streets or satellite basemap. rgrip reprojects WGS84, Web Mercator and UTM on the client and flags features that landed in the wrong hemisphere (hello, swapped lat/lon).</p>
           </div>
-          <figure class="shot"><img src="img/map.png" alt="PostGIS map view with feature popup" width="1600" height="1000" loading="lazy"></figure>
+          <figure class="shot"><video src="clips/map.mp4" poster="img/map.png" autoplay loop muted playsinline preload="metadata" aria-label="PostGIS map view with feature popup"></video></figure>
         </div>
 
         <div class="row rev">
@@ -99,7 +99,7 @@
             <h3>Edit cells in place</h3>
             <p>Double-click, pick a date from the calendar, set NULL. Pending changes stay highlighted until you save, and then everything goes out in a single transaction keyed on the primary key. If one row fails, nothing changes.</p>
           </div>
-          <figure class="shot"><img src="img/edit.png" alt="Inline cell editing with a date picker" width="1600" height="1000" loading="lazy"></figure>
+          <figure class="shot"><video src="clips/edit.mp4" poster="img/edit.png" autoplay loop muted playsinline preload="metadata" aria-label="Inline cell editing with a date picker"></video></figure>
         </div>
 
         <div class="row">
@@ -108,7 +108,7 @@
             <h3>Follow relations, even without foreign keys</h3>
             <p>Right-click a row and jump to the rows it points to, or the rows pointing at it. No constraints? rgrip infers relations from column names and types (<code>customer_id</code> → <code>customers.id</code>) and marks them as inferred. Keep chaining, step Back, or open any hop as a tab.</p>
           </div>
-          <figure class="shot"><img src="img/inferred.png" alt="Related rows found through an inferred relation" width="1600" height="1000" loading="lazy"></figure>
+          <figure class="shot"><video src="clips/relations.mp4" poster="img/inferred.png" autoplay loop muted playsinline preload="metadata" aria-label="Related rows found through an inferred relation"></video></figure>
         </div>
 
         <div class="row rev">
@@ -117,7 +117,7 @@
             <h3>Wide tables, tamed</h3>
             <p>Freeze key columns so they stay put while you scroll, and jump to any column with <kbd class="k"><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg>J</kbd>. The grid is virtualized and pages 1,000 rows at a time from the server.</p>
           </div>
-          <figure class="shot"><img src="img/goto.png" alt="Go to column search over a sorted table" width="1600" height="1000" loading="lazy"></figure>
+          <figure class="shot"><video src="clips/wide.mp4" poster="img/goto.png" autoplay loop muted playsinline preload="metadata" aria-label="Go to column search over a sorted table"></video></figure>
         </div>
 
         <div class="row">
@@ -135,7 +135,7 @@
             <h3>Your own slash commands</h3>
             <p>Type <code>/count parcels</code> and press Tab. Edit the built-ins or add your own in Settings: an SQL template with <code>{table}</code>, <code>{field}</code> and <code>{n=100}</code>, with a live preview.</p>
           </div>
-          <figure class="shot"><img src="img/commands.png" alt="Slash command editor with a live preview" width="1600" height="1000" loading="lazy"></figure>
+          <figure class="shot"><video src="clips/commands.mp4" poster="img/commands.png" autoplay loop muted playsinline preload="metadata" aria-label="Slash command editor with a live preview"></video></figure>
         </div>
 
         <div class="row">

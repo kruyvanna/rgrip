@@ -68,16 +68,16 @@
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/map.png" alt="PostGIS map"><br><sub>PostGIS map: districts, parcels and landmarks</sub></td>
-    <td><img src="docs/screenshots/edit.png" alt="Inline editing"><br><sub>Inline editing with a date picker and pending changes</sub></td>
+    <td><img src="docs/clips/map.gif" alt="PostGIS map"><br><sub>PostGIS map: districts, parcels and landmarks</sub></td>
+    <td><img src="docs/clips/edit.gif" alt="Inline editing"><br><sub>Inline editing with a date picker and pending changes</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/inferred.png" alt="Inferred relation"><br><sub>Related rows through an inferred relation (no FK)</sub></td>
-    <td><img src="docs/screenshots/goto.png" alt="Go to column"><br><sub>Go to column (⌘J) and sort indicators</sub></td>
+    <td><img src="docs/clips/relations.gif" alt="Inferred relation"><br><sub>Related rows through an inferred relation (no FK)</sub></td>
+    <td><img src="docs/clips/wide.gif" alt="Go to column"><br><sub>Sort, freeze a column, and jump with Go to column (⌘J)</sub></td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/tabs.png" alt="Connection colors"><br><sub>Color-coded connection tabs and the console schema picker</sub></td>
-    <td><img src="docs/screenshots/commands.png" alt="Slash commands"><br><sub>Your own slash commands, with a live preview</sub></td>
+    <td><img src="docs/clips/commands.gif" alt="Slash commands"><br><sub>Your own slash commands, with a live preview</sub></td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/freeze.png" alt="Frozen columns"><br><sub>Freeze columns while scrolling</sub></td>
