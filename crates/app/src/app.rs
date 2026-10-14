@@ -723,6 +723,9 @@ impl App {
                         for tab in self.tabs.iter_mut().filter(|t| t.conn == conn) {
                             if let TabKind::Table(t) = &mut tab.kind {
                                 t.relations = with_inferred(&t.schema, &t.table, &t.columns, &t.fk_relations, &catalog);
+                                if t.key.is_empty() && !t.columns.is_empty() {
+                                    t.key = edit_key(&t.schema, &t.table, &t.columns, &catalog);
+                                }
                                 if let Some(rel) = &mut t.related {
                                     rel.relations = with_inferred(&rel.target.schema, &rel.target.table, &rel.columns, &rel.fk_relations, &catalog);
                                 }
@@ -770,7 +773,7 @@ impl App {
                         t.loading = false;
                         t.grid = GridState::fresh(&t.grid);
                         t.data = Some(result);
-                        t.key = columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect();
+                        t.key = edit_key(&t.schema, &t.table, &columns, &catalog);
                         t.temporal = columns
                             .iter()
                             .filter_map(|c| Some((c.name.clone(), rgrip_core::datetime::kind_of(&c.data_type)?)))
@@ -902,7 +905,7 @@ impl App {
             .filter(|t| t.conn == conn && matches!(t.kind, TabKind::Console(_)))
             .count();
         let cfg = &self.conns[ci].cfg;
-        let name = format!("{}@{}", cfg.display_name(), cfg.database);
+        let name = conn_db_title(cfg, &cfg.database);
         let title = if n == 0 { name } else { format!("{name} ({})", n + 1) };
         self.push_tab(
             conn,
@@ -2518,8 +2521,14 @@ impl App {
 /// ` (n)` suffix) once it targets `database` instead; `None` for other titles
 /// (saved query names).
 fn console_title(title: &str, cfg: &ConnectionConfig, database: &str) -> Option<String> {
-    let rest = title.strip_prefix(&format!("{}@{}", cfg.display_name(), cfg.database))?;
-    (rest.is_empty() || rest.starts_with(" (")).then(|| format!("{}@{database}{rest}", cfg.display_name()))
+    let rest = title.strip_prefix(&conn_db_title(cfg, &cfg.database))?;
+    (rest.is_empty() || rest.starts_with(" (")).then(|| format!("{}{rest}", conn_db_title(cfg, database)))
+}
+
+/// `name@database`, or `database@host` for an unnamed connection (whose
+/// display name is already `database@host`).
+fn conn_db_title(cfg: &ConnectionConfig, database: &str) -> String {
+    if cfg.name.trim().is_empty() { format!("{database}@{}", cfg.host) } else { format!("{}@{database}", cfg.name) }
 }
 
 /// How a tab looks beyond its own title: its connection's color, tooltip
@@ -3116,6 +3125,20 @@ fn output_log(ui: &mut Ui, out: &QueryOutput) {
     });
 }
 
+/// Columns that identify a row for inline edits: the primary key, else a
+/// single-column unique key (ArcGIS tables have no primary key but unique
+/// `objectid` / `id` / `globalid`). Empty: read-only. Saves stay safe either
+/// way: each UPDATE must change exactly one row.
+fn edit_key(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalog) -> Vec<String> {
+    let pk: Vec<String> = columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect();
+    if !pk.is_empty() {
+        return pk;
+    }
+    let Some(t) = catalog.tables.iter().find(|t| t.schema == schema && t.name == table) else { return Vec::new() };
+    let preferred = ["objectid", "id", "globalid", "gid", "fid"].iter().find_map(|p| t.keys.iter().find(|k| k.eq_ignore_ascii_case(p)));
+    preferred.or(t.keys.first()).map(|k| vec![k.clone()]).unwrap_or_default()
+}
+
 /// Real foreign keys plus relations guessed from column names.
 fn with_inferred(schema: &str, table: &str, columns: &[ColumnInfo], fks: &[Relation], catalog: &Catalog) -> Vec<Relation> {
     let mut all = fks.to_vec();
@@ -3285,7 +3308,11 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
         } else if matches!(&t.data, Some(Ok(_))) && t.key.is_empty() && !t.loading {
             ui.add_space(8.0);
             ui.label(RichText::new("read-only").small().color(theme::FAINT()))
-                .on_hover_text("No primary key: rows can't be identified for editing");
+                .on_hover_text("No primary key or unique column: rows can't be identified for editing");
+        } else if !t.key.is_empty() && !t.columns.iter().any(|c| c.primary_key) && !locked {
+            ui.add_space(8.0);
+            ui.label(RichText::new(format!("keyed on {}", t.key.join(", "))).small().color(theme::FAINT()))
+                .on_hover_text("No primary key: edits find each row by this unique column");
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -4215,6 +4242,28 @@ mod tests {
         let esc = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
         frame(&mut t, vec![esc]);
         assert!(t.related.is_none());
+    }
+
+    #[test]
+    fn edit_key_falls_back_to_unique_columns() {
+        let col = |name: &str, pk: bool| ColumnInfo { name: name.into(), data_type: "integer".into(), nullable: !pk, default: None, primary_key: pk };
+        let catalog = Catalog {
+            tables: vec![CatalogTable {
+                schema: "mlmupc".into(),
+                name: "parcel".into(),
+                kind: TableKind::Table,
+                columns: Vec::new(),
+                keys: vec!["globalid".into(), "objectid".into(), "id".into()],
+            }],
+        };
+        assert_eq!(edit_key("mlmupc", "parcel", &[col("objectid", false)], &catalog), ["objectid"]);
+        assert_eq!(edit_key("mlmupc", "parcel", &[col("code", true)], &catalog), ["code"], "a primary key wins");
+        assert!(edit_key("mlmupc", "other", &[col("x", false)], &catalog).is_empty());
+        let named = ConnectionConfig { name: "CIS Prod".into(), database: "cis".into(), host: "db".into(), ..Default::default() };
+        let unnamed = ConnectionConfig { database: "cis_next".into(), host: "cis-db2".into(), ..Default::default() };
+        assert_eq!(conn_db_title(&named, "cis"), "CIS Prod@cis");
+        assert_eq!(conn_db_title(&unnamed, "cis_next"), "cis_next@cis-db2");
+        assert_eq!(console_title("cis_next@cis-db2 (2)", &unnamed, "other").as_deref(), Some("other@cis-db2 (2)"));
     }
 
     #[test]
