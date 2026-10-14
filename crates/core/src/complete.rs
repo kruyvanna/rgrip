@@ -424,14 +424,14 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, schema: &str, force
         return None;
     }
     if let Some((replace, prefix)) = slash_command_at(sql, cursor) {
-        let items: Vec<Suggestion> = crate::commands::COMMANDS
+        let items: Vec<Suggestion> = crate::commands::active()
             .iter()
             .filter(|c| c.name.starts_with(&prefix.to_ascii_lowercase()))
             .map(|c| Suggestion {
-                label: format!("/{} {}", c.name, c.args),
+                label: format!("/{} {}", c.name, c.args()).trim_end().to_string(),
                 insert: format!("/{} ", c.name),
                 kind: ItemKind::Command,
-                detail: c.help.to_string(),
+                detail: c.help.clone(),
                 replace: None,
             })
             .collect();
@@ -1001,7 +1001,7 @@ mod tests {
         assert_eq!(c.replace, 10..14);
         assert_eq!(c.items.iter().map(|s| s.insert.as_str()).collect::<Vec<_>>(), ["/con_4326 ", "/con_4326_2 ", "/con_merc "]);
         // Just the slash lists everything; division doesn't.
-        assert_eq!(complete("/", 1, &catalog(), "public", false).unwrap().items.len(), crate::commands::COMMANDS.len());
+        assert_eq!(complete("/", 1, &catalog(), "public", false).unwrap().items.len(), crate::commands::defaults().len());
         assert!(complete("select a/b", 9, &catalog(), "public", false).is_none_or(|c| c.items.iter().all(|s| s.kind != ItemKind::Command)));
         // No SQL suggestions while typing a command's arguments.
         assert!(complete("/con_4326 us", 12, &catalog(), "public", false).is_none());

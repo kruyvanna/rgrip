@@ -40,6 +40,7 @@ scene edit RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.owners RGRIP_DEMO_EDITS=
 scene related RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.owners RGRIP_DEMO_SELECT=1 RGRIP_DEMO_RELATED=parcels
 scene freeze RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_FREEZE=parcel_code,land_use RGRIP_DEMO_SELECT=2 RGRIP_DEMO_SCROLL_X=420
 scene complete RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_COMPLETE="select p.| from demo.parcels p"
+scene commands RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_COMMANDS="parcels 3857"
 [ "$only" = "  " ] || case "$only" in *" copy-image "*) only="  " ;; *) exit 0 ;; esac
 rm -f "$out/copy-image.png"
 scene copy-image-window RGRIP_DEMO_TABLE=demo.owners RGRIP_DEMO_SELECT=0,1,2,3,4,5 RGRIP_DEMO_COPY_IMAGE="$PWD/$out/copy-image.png"

@@ -6,33 +6,96 @@
 use crate::complete::{Catalog, CatalogTable, needs_quotes};
 use crate::sql::quote_ident;
 
-pub struct Command {
-    pub name: &'static str,
-    pub args: &'static str,
-    pub help: &'static str,
+/// A slash command: `/name args…` expands `template`. Placeholders:
+/// `{table}`, `{field}` (geometry column, quoted as needed), `{field+_4326}`
+/// (the field name plus a suffix, quoted), `{n}` / `{n=100}` (a number
+/// argument, with a default). Users can edit these in Settings.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SlashCommand {
+    pub name: String,
+    #[serde(default)]
+    pub help: String,
+    pub template: String,
 }
 
-pub const COMMANDS: &[Command] = &[
-    Command { name: "con_4326", args: "[table] [field]", help: "→ 4326 with ST_Transform" },
-    Command {
-        name: "con_4326_2",
-        args: "[table] [field]",
-        help: "→ 4326 via text (ArcGIS): ST_SetSRID(st_astext(…))",
-    },
-    Command {
-        name: "con_merc",
-        args: "[table] [field] [srid]",
-        help: "Projected (default 32648, UTM 48N) via text → 4326",
-    },
-    Command { name: "srid", args: "<table> [field]", help: "SRIDs used by a table's geometries" },
-    Command { name: "top", args: "<table> [n]", help: "First rows: select * … limit n (100)" },
-    Command { name: "count", args: "<table>", help: "Row count" },
-];
+impl SlashCommand {
+    fn new(name: &str, help: &str, template: &str) -> Self {
+        Self { name: name.into(), help: help.into(), template: template.into() }
+    }
+
+    fn uses(&self, placeholder: &str) -> bool {
+        self.template.contains(&format!("{{{placeholder}"))
+    }
+
+    /// Argument hint derived from the placeholders, e.g. `[table] [field] [n]`.
+    pub fn args(&self) -> String {
+        let mut args = Vec::new();
+        if self.uses("table") {
+            // Without a field the table is required (no placeholder table).
+            args.push(if self.uses("field") { "[table]" } else { "<table>" });
+        }
+        if self.uses("field") {
+            args.push("[field]");
+        }
+        if self.uses("n") {
+            args.push("[n]");
+        }
+        args.join(" ")
+    }
+
+    /// Why this command can't be saved, if anything.
+    pub fn problem(&self) -> Option<String> {
+        if self.name.is_empty() || !self.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+            return Some(format!("“{}”: names use a–z, 0–9 and _", self.name));
+        }
+        if !self.name.starts_with(|c: char| c.is_ascii_lowercase()) {
+            return Some(format!("/{}: names start with a letter", self.name));
+        }
+        if self.template.trim().is_empty() {
+            return Some(format!("/{}: the SQL template is empty", self.name));
+        }
+        None
+    }
+}
+
+/// The built-in commands (also what "Reset to defaults" restores).
+pub fn defaults() -> Vec<SlashCommand> {
+    vec![
+        SlashCommand::new("con_4326", "→ 4326 with ST_Transform", "select t.*, ST_Transform(t.{field}, 4326) as {field+_4326}\nfrom {table} t;"),
+        SlashCommand::new(
+            "con_4326_2",
+            "→ 4326 via text (ArcGIS): ST_SetSRID(st_astext(…))",
+            "select t.*, ST_SetSRID(st_astext(t.{field})::text, 4326) as {field+_4326}\nfrom {table} t;",
+        ),
+        SlashCommand::new(
+            "con_merc",
+            "Projected (default 32648, UTM 48N) via text → 4326",
+            "select t.*, ST_Transform(ST_SetSRID(st_astext(t.{field})::text::geometry, {n=32648}), 4326) as {field+_4326}\nfrom {table} t;",
+        ),
+        SlashCommand::new("srid", "SRIDs used by a table's geometries", "select ST_SRID({field}) as srid, count(*)\nfrom {table}\ngroup by 1\norder by 2 desc;"),
+        SlashCommand::new("top", "First rows: select * … limit n (100)", "select *\nfrom {table}\nlimit {n=100};"),
+        SlashCommand::new("count", "Row count", "select count(*)\nfrom {table};"),
+    ]
+}
+
+/// The active commands. Process-wide so completion and expansion (pure
+/// functions called from many places) don't all need another parameter;
+/// the app sets it at startup and when Settings are saved.
+static ACTIVE: std::sync::RwLock<Option<std::sync::Arc<Vec<SlashCommand>>>> = std::sync::RwLock::new(None);
+
+pub fn active() -> std::sync::Arc<Vec<SlashCommand>> {
+    if let Some(list) = ACTIVE.read().unwrap().as_ref() {
+        return list.clone();
+    }
+    std::sync::Arc::new(defaults())
+}
+
+pub fn set_active(commands: Vec<SlashCommand>) {
+    *ACTIVE.write().unwrap() = Some(std::sync::Arc::new(commands));
+}
 
 const DEFAULT_FIELD: &str = "shape";
-/// Source SRID for `/con_merc` when none is given.
-const DEFAULT_MERC_SRID: u64 = 32648;
-/// Placeholder when a reprojection command has no table yet.
+/// Placeholder when a command with a field has no table yet.
 const TABLE_PLACEHOLDER: &str = "table_name";
 
 fn ident(s: &str) -> String {
@@ -82,12 +145,19 @@ fn table_sql(t: &CatalogTable, typed: &str, schema: &str) -> String {
 
 /// Expand a command line such as `/con_4326 parcels geom`.
 pub fn expand(line: &str, catalog: &Catalog, schema: &str) -> Result<String, String> {
+    expand_with(&active(), line, catalog, schema)
+}
+
+/// [`expand`] against a given command list (the Settings preview, tests).
+pub fn expand_with(commands: &[SlashCommand], line: &str, catalog: &Catalog, schema: &str) -> Result<String, String> {
     let line = line.trim();
     let body = line.strip_prefix('/').ok_or("Commands start with /")?;
     let words = split_args(body);
     let mut words = words.iter().map(String::as_str);
     let name = words.next().unwrap_or_default().to_ascii_lowercase();
-    let command = COMMANDS.iter().find(|c| c.name == name).ok_or_else(|| format!("Unknown command /{name}"))?;
+    let command = commands.iter().find(|c| c.name == name).ok_or_else(|| format!("Unknown command /{name}"))?;
+    let usage = || format!("Usage: /{} {}", command.name, command.args());
+    let (wants_table, wants_field) = (command.uses("table"), command.uses("field"));
 
     let mut table: Option<(&CatalogTable, &str)> = None;
     let mut other: Vec<&str> = Vec::new();
@@ -95,56 +165,70 @@ pub fn expand(line: &str, catalog: &Catalog, schema: &str) -> Result<String, Str
     for w in words {
         if let Ok(n) = w.parse::<u64>() {
             number = Some(n);
-        } else if table.is_none() && let Some(t) = find_table(catalog, w, schema) {
+        } else if wants_table && table.is_none() && let Some(t) = find_table(catalog, w, schema) {
             table = Some((t, w));
         } else {
             other.push(w);
         }
     }
-    let usage = || format!("Usage: /{} {}", command.name, command.args);
     // `/cmd <table> <field>` with a table the catalog doesn't know (not
     // loaded yet, or a typo Postgres will report): use it as typed.
     let (from, field) = match (table, other.as_slice()) {
-        (Some((t, typed)), [] | [_]) => (Some(table_sql(t, typed, schema)), other.first().copied()),
-        // A lone unknown word is the table for table-only commands, the
-        // field otherwise.
-        (None, [t]) if matches!(command.name, "top" | "count" | "srid") => (Some(t.to_string()), None),
-        (None, [f]) => (None, Some(*f)),
+        (Some((t, typed)), []) => (Some(table_sql(t, typed, schema)), None),
+        (Some((t, typed)), [f]) if wants_field => (Some(table_sql(t, typed, schema)), Some(*f)),
+        // A lone unknown word is the field if the command has one, else the table.
+        (None, [f]) if wants_field => (None, Some(*f)),
+        (None, [t]) if wants_table => (Some(t.to_string()), None),
         (None, []) => (None, None),
-        (None, [t, f]) => (Some(t.to_string()), Some(*f)),
+        (None, [t, f]) if wants_table && wants_field => (Some(t.to_string()), Some(*f)),
         (_, [.., w]) => return Err(format!("Unexpected argument {w}. {}", usage())),
+    };
+    // Commands with a field always give a complete query (placeholder
+    // table); table-only commands need the table.
+    let from = match from {
+        Some(f) => f,
+        None if wants_table && wants_field => TABLE_PLACEHOLDER.to_string(),
+        None if wants_table => return Err(usage()),
+        None => String::new(),
     };
     let field = field.map(|f| f.trim_matches('"').to_string()).unwrap_or_else(|| {
         table.and_then(|(t, _)| geometry_field(t)).unwrap_or(DEFAULT_FIELD).to_string()
     });
+    fill(&command.template, &from, &field, number).ok_or_else(usage)
+}
 
-    let reproject = |f: &str| -> Option<String> {
-        Some(match command.name {
-            "con_4326" => format!("ST_Transform({f}, 4326)"),
-            "con_4326_2" => format!("ST_SetSRID(st_astext({f})::text, 4326)"),
-            "con_merc" => format!(
-                "ST_Transform(ST_SetSRID(st_astext({f})::text::geometry, {}), 4326)",
-                number.unwrap_or(DEFAULT_MERC_SRID)
-            ),
-            _ => return None,
-        })
-    };
-
-    // Reprojections always expand to a complete query.
-    let from = from.or_else(|| reproject("").map(|_| TABLE_PLACEHOLDER.to_string()));
-    match (command.name, from) {
-        (_, Some(from)) if reproject("").is_some() => {
-            let expr = reproject(&format!("t.{}", ident(&field))).unwrap();
-            Ok(format!("select t.*, {expr} as {}\nfrom {from} t;", ident(&format!("{field}_4326"))))
+/// Replace the placeholders in `template`; other `{…}` (e.g. JSON literals)
+/// stay as written. `None` when `{n}` has no value and no default.
+fn fill(template: &str, table: &str, field: &str, number: Option<u64>) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else { break };
+        let token = &after[..close];
+        let value = match token {
+            "table" => Some(table.to_string()),
+            "field" => Some(ident(field)),
+            "n" => Some(number?.to_string()),
+            _ => match (token.strip_prefix("field+"), token.strip_prefix("n=")) {
+                (Some(suffix), _) => Some(ident(&format!("{field}{suffix}"))),
+                (_, Some(default)) if default.parse::<u64>().is_ok() => Some(number.map_or(default.to_string(), |n| n.to_string())),
+                _ => None,
+            },
+        };
+        match value {
+            Some(v) => out.push_str(&v),
+            None => {
+                out.push('{');
+                out.push_str(token);
+                out.push('}');
+            }
         }
-        ("srid", Some(from)) => Ok(format!(
-            "select ST_SRID({f}) as srid, count(*)\nfrom {from}\ngroup by 1\norder by 2 desc;",
-            f = ident(&field)
-        )),
-        ("top", Some(from)) => Ok(format!("select *\nfrom {from}\nlimit {};", number.unwrap_or(100))),
-        ("count", Some(from)) => Ok(format!("select count(*)\nfrom {from};")),
-        _ => Err(usage()),
+        rest = &after[close + 1..];
     }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// Split on whitespace, keeping `"quoted names"` (quotes included) together.
@@ -295,6 +379,40 @@ mod tests {
         // Table-only commands take an unknown word as the table.
         assert_eq!(x("/count parcel"), "select count(*)\nfrom parcel;");
         assert_eq!(x("/top parcel 5"), "select *\nfrom parcel\nlimit 5;");
+    }
+
+    #[test]
+    fn custom_commands() {
+        let cmds = vec![
+            SlashCommand::new("recent", "Latest rows", "select * from {table} order by updated_at desc limit {n=20};"),
+            SlashCommand::new("geojson", "", "select json_build_object('type', 'Feature', 'geometry', ST_AsGeoJSON(t.{field})::json, 'props', '{}'::json) from {table} t;"),
+            SlashCommand::new("sample", "", "select * from {table} tablesample system ({n});"),
+            SlashCommand::new("now", "", "select now();"),
+        ];
+        let x = |line: &str| expand_with(&cmds, line, &catalog(), "public");
+        assert_eq!(x("/recent notes").unwrap(), "select * from notes order by updated_at desc limit 20;");
+        assert_eq!(x("/recent notes 5").unwrap(), "select * from notes order by updated_at desc limit 5;");
+        // Other braces (JSON literals) are left alone; the field defaults from the table.
+        assert!(x("/geojson roads").unwrap().contains("ST_AsGeoJSON(t.geom)::json, 'props', '{}'::json) from roads t;"));
+        // `{n}` without a default needs the number.
+        assert!(x("/sample notes").unwrap_err().contains("Usage: /sample <table> [n]"));
+        assert_eq!(x("/sample notes 10").unwrap(), "select * from notes tablesample system (10);");
+        assert_eq!(x("/now").unwrap(), "select now();");
+        assert!(x("/now extra").unwrap_err().contains("Unexpected argument extra"));
+        assert!(x("/con_4326").unwrap_err().contains("Unknown command"));
+        assert_eq!(cmds[0].args(), "<table> [n]");
+        assert_eq!(defaults()[0].args(), "[table] [field]");
+        assert_eq!(cmds[3].args(), "");
+    }
+
+    #[test]
+    fn command_validation() {
+        let c = |name: &str, t: &str| SlashCommand::new(name, "", t).problem();
+        assert_eq!(c("top_10", "select 1"), None);
+        assert!(c("Top", "select 1").unwrap().contains("a–z"));
+        assert!(c("1x", "select 1").unwrap().contains("start with a letter"));
+        assert!(c("x", "  ").unwrap().contains("empty"));
+        assert!(defaults().iter().all(|d| d.problem().is_none()));
     }
 
     #[test]

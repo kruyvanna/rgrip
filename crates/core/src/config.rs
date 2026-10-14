@@ -238,6 +238,35 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
     write_toml(&settings_path().ok_or("no config directory")?, settings)
 }
 
+fn commands_path() -> Option<PathBuf> {
+    config_path().map(|p| p.with_file_name("commands.toml"))
+}
+
+#[derive(Serialize, Deserialize)]
+struct CommandsFile {
+    #[serde(default, rename = "command")]
+    commands: Vec<crate::commands::SlashCommand>,
+}
+
+/// User slash commands; `None` until edited in Settings (so new built-ins
+/// in later versions still show up for everyone else).
+pub fn load_commands() -> Option<Vec<crate::commands::SlashCommand>> {
+    let text = std::fs::read_to_string(commands_path()?).ok()?;
+    toml::from_str::<CommandsFile>(&text).ok().map(|f| f.commands)
+}
+
+pub fn save_commands(commands: &[crate::commands::SlashCommand]) -> Result<(), String> {
+    write_toml(&commands_path().ok_or("no config directory")?, &CommandsFile { commands: commands.to_vec() })
+}
+
+/// Back to the built-ins: forget the user file.
+pub fn reset_commands() -> Result<(), String> {
+    match commands_path() {
+        Some(p) if p.exists() => std::fs::remove_file(p).map_err(|e| e.to_string()),
+        _ => Ok(()),
+    }
+}
+
 fn write_toml(path: &std::path::Path, value: &impl Serialize) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -311,5 +340,17 @@ mod tests {
         std::fs::remove_file(&b.path).unwrap();
         assert!(load_queries_in(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commands_file_round_trip() {
+        let file = CommandsFile { commands: crate::commands::defaults() };
+        let text = toml::to_string_pretty(&file).unwrap();
+        assert!(text.contains("[[command]]"));
+        let back: CommandsFile = toml::from_str(&text).unwrap();
+        assert_eq!(back.commands, crate::commands::defaults());
+        // `help` is optional.
+        let one: CommandsFile = toml::from_str("[[command]]\nname = 'x'\ntemplate = 'select 1'\n").unwrap();
+        assert_eq!(one.commands[0].help, "");
     }
 }

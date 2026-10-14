@@ -325,6 +325,8 @@ enum Action {
     /// Pick a palette by name; `true` for the dark list.
     SetPalette(bool, &'static str),
     SetAutoUpdate(bool),
+    /// Open the slash command editor (Settings).
+    EditCommands,
     CheckUpdate,
     InstallUpdate,
     RenameSaved(usize),
@@ -376,6 +378,15 @@ enum UpdateState {
     Checking { manual: bool },
     Available(Release),
     Installing(Release),
+}
+
+struct CommandsEditor {
+    list: Vec<rgrip_core::commands::SlashCommand>,
+    selected: usize,
+    /// Why Save didn't work.
+    error: Option<String>,
+    /// Arguments for the live preview.
+    preview_args: String,
 }
 
 struct NamePrompt {
@@ -438,6 +449,8 @@ pub struct App {
     /// Keys of expanded explorer nodes.
     expanded: HashSet<String>,
     selected: Option<String>,
+    /// Slash command editor (Settings), while open.
+    commands_editor: Option<CommandsEditor>,
     /// Debug screenshot scenes: when the scene first looked settled.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     demo_settled: Option<Instant>,
@@ -462,6 +475,9 @@ impl App {
             }
         }
         theme::apply(&cc.egui_ctx, theme_choice, &dark_name, &light_name);
+        if let Some(commands) = config::load_commands() {
+            rgrip_core::commands::set_active(commands);
+        }
         let worker = Worker::spawn(cc.egui_ctx.clone());
         // Launch checks only in release builds (dev runs restart a lot), or
         // when a test API is configured.
@@ -490,6 +506,7 @@ impl App {
             expanded: HashSet::new(),
             selected: None,
             demo_settled: None,
+            commands_editor: None,
         }
     }
 
@@ -942,6 +959,9 @@ impl App {
                 self.settings.check_updates = on;
                 self.save_settings();
             }
+            Action::EditCommands => {
+                self.commands_editor = Some(CommandsEditor { list: rgrip_core::commands::active().to_vec(), selected: 0, error: None, preview_args: String::new() });
+            }
             Action::CheckUpdate => {
                 if !matches!(self.update, UpdateState::Checking { .. } | UpdateState::Installing(_)) {
                     self.update = UpdateState::Checking { manual: true };
@@ -1211,6 +1231,15 @@ impl App {
             self.saved.clear();
         }
         let scroll_x = env("RGRIP_DEMO_SCROLL_X").and_then(|v| v.parse::<f32>().ok());
+        // `RGRIP_DEMO_COMMANDS=<preview args>`: the slash command editor, once.
+        static COMMANDS_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if let Some(args) = env("RGRIP_DEMO_COMMANDS") && !COMMANDS_SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            self.apply(Action::EditCommands);
+            if let Some(ed) = &mut self.commands_editor {
+                ed.selected = 2;
+                ed.preview_args = args;
+            }
+        }
         if let (Some(list), Some(c)) = (env("RGRIP_DEMO_EXPAND"), self.conns.first()) {
             let id = c.cfg.id.clone();
             self.expanded.insert(format!("c/{id}"));
@@ -1414,6 +1443,7 @@ impl eframe::App for App {
 
         self.dialog_ui(ctx);
         self.name_prompt_ui(ctx);
+        self.commands_editor_ui(ctx);
 
         if let Some(a) = tab_action {
             self.tab_action(self.active, a);
@@ -1583,6 +1613,12 @@ impl App {
                         }
                     }
                 });
+            }
+            ui.separator();
+            menu_heading(ui, "Editor");
+            if ui.button("Slash commands…").on_hover_text("Add or edit /commands and their SQL templates").clicked() {
+                actions.push(Action::EditCommands);
+                ui.close();
             }
             ui.separator();
             menu_heading(ui, "Updates");
@@ -2815,6 +2851,146 @@ fn default_query_name(sql: &str, n: usize) -> String {
 }
 
 impl App {
+    /// Settings → Slash commands: list on the left, the selected command's
+    /// name, description and SQL template on the right, with a live preview.
+    fn commands_editor_ui(&mut self, ctx: &egui::Context) {
+        use rgrip_core::commands::{self, SlashCommand};
+        let Some(ed) = &mut self.commands_editor else { return };
+        // Preview against the active tab's connection, if it has a catalog.
+        let catalog = self.tabs.get(self.active).and_then(|t| self.conns.iter().find(|c| c.cfg.id == t.conn)).map(|c| c.catalog.clone()).unwrap_or_default();
+        let (mut save, mut close, mut reset) = (false, false, false);
+        let modal = egui::Modal::new(Id::new("commands-editor"))
+            .frame(Frame::new().fill(theme::SURFACE()).stroke(Stroke::new(1.0, theme::BORDER())).corner_radius(12).inner_margin(Margin::same(20)))
+            .show(ctx, |ui| {
+                ui.set_width(760.0);
+                ui.label(RichText::new("Slash commands").heading().color(theme::TEXT()));
+                ui.label(RichText::new("Type /name in the editor, then Tab to expand (or run it directly).").size(12.5).color(theme::MUTED()));
+                ui.add_space(12.0);
+                ui.horizontal_top(|ui| {
+                    // List.
+                    ui.vertical(|ui| {
+                        ui.set_width(190.0);
+                        egui::ScrollArea::vertical().id_salt("cmd-list").max_height(330.0).auto_shrink([false, true]).show(ui, |ui| {
+                            for (i, c) in ed.list.iter().enumerate() {
+                                let label = if c.name.is_empty() { "(unnamed)".to_string() } else { format!("/{}", c.name) };
+                                if ui.add_sized([180.0, 24.0], Button::selectable(i == ed.selected, RichText::new(label).monospace())).clicked() {
+                                    ed.selected = i;
+                                }
+                            }
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Add").clicked() {
+                                ed.list.push(SlashCommand { name: format!("cmd{}", ed.list.len() + 1), help: String::new(), template: "select *\nfrom {table}\nlimit {n=50};".into() });
+                                ed.selected = ed.list.len() - 1;
+                            }
+                            if ui.add_enabled(!ed.list.is_empty(), Button::new("Delete")).clicked() {
+                                ed.list.remove(ed.selected);
+                                ed.selected = ed.selected.min(ed.list.len().saturating_sub(1));
+                            }
+                        });
+                    });
+                    // Not a separator: in a horizontal row it stretches to
+                    // the full available height and blows up the modal.
+                    ui.add_space(16.0);
+                    // Details.
+                    ui.vertical(|ui| {
+                        let Some(c) = ed.list.get_mut(ed.selected) else {
+                            muted(ui, "No commands. Add one, or reset to the defaults.");
+                            return;
+                        };
+                        let field = |ui: &mut Ui, label: &str| {
+                            ui.label(RichText::new(label).size(12.0).color(theme::MUTED()));
+                        };
+                        field(ui, "Name");
+                        ui.add(TextEdit::singleline(&mut c.name).font(TextStyle::Monospace).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
+                        ui.add_space(6.0);
+                        field(ui, "Description");
+                        ui.add(TextEdit::singleline(&mut c.help).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
+                        ui.add_space(6.0);
+                        field(ui, "SQL template");
+                        let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                            let mut job = highlight::sql(buf.as_str(), TextStyle::Monospace.resolve(ui.style()));
+                            job.wrap.max_width = wrap;
+                            ui.fonts_mut(|f| f.layout_job(job))
+                        };
+                        ui.add(TextEdit::multiline(&mut c.template).code_editor().desired_rows(5).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 6)).layouter(&mut layouter));
+                        ui.label(
+                            RichText::new("{table}  {field}  {field+_4326} (field name + suffix)  {n}  {n=100} (number, with a default)")
+                                .monospace()
+                                .size(11.5)
+                                .color(theme::FAINT()),
+                        );
+                        ui.add_space(8.0);
+                        // Preview.
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("/{} ", c.name)).monospace().color(theme::MUTED()));
+                            ui.add(TextEdit::singleline(&mut ed.preview_args).hint_text(hint(&c.args())).font(TextStyle::Monospace).desired_width(f32::INFINITY).margin(Margin::symmetric(6, 4)));
+                        });
+                        let line = format!("/{} {}", c.name, ed.preview_args);
+                        let preview = match c.problem() {
+                            Some(p) => Err(p),
+                            None => commands::expand_with(std::slice::from_ref(c), &line, &catalog, "public"),
+                        };
+                        let (text, color) = match &preview {
+                            Ok(sql) => (sql.clone(), theme::TEXT()),
+                            Err(e) => (e.clone(), theme::WARN()),
+                        };
+                        Frame::new().fill(theme::BG()).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(RichText::new(text).monospace().size(12.5).color(color));
+                        });
+                    });
+                });
+                if let Some(e) = &ed.error {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(e).color(theme::ERROR()));
+                }
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Reset to defaults").on_hover_text("Restore the built-in commands").clicked() {
+                        reset = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(Button::new(RichText::new("Save").color(theme::BG())).fill(theme::ACCENT())).clicked() {
+                            save = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if reset {
+            ed.list = commands::defaults();
+            ed.selected = 0;
+            ed.error = None;
+        }
+        if save {
+            let mut seen = HashSet::new();
+            let problem = ed.list.iter().find_map(|c| {
+                c.problem().or_else(|| (!seen.insert(c.name.clone())).then(|| format!("/{} is defined twice", c.name)))
+            });
+            ed.error = problem;
+            if ed.error.is_none() {
+                // Saving exactly the defaults forgets the file, so later
+                // versions' new built-ins still show up.
+                let result = if ed.list == commands::defaults() { config::reset_commands() } else { config::save_commands(&ed.list) };
+                match result {
+                    Ok(()) => {
+                        commands::set_active(ed.list.clone());
+                        self.toast = Some(("Slash commands saved".into(), theme::OK(), Instant::now()));
+                        close = true;
+                    }
+                    Err(e) => ed.error = Some(format!("Could not save: {e}")),
+                }
+            }
+        }
+        if close || modal.should_close() {
+            self.commands_editor = None;
+        }
+    }
+
     fn name_prompt_ui(&mut self, ctx: &egui::Context) {
         let Some(prompt) = &mut self.name_prompt else { return };
         let title = match prompt.target {
