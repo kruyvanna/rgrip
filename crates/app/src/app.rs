@@ -1758,14 +1758,48 @@ impl App {
         }
 
         let filter = self.filter.trim().to_lowercase();
-        let tree = Tree { expanded: &self.expanded, selected: self.selected.as_deref(), filter: &filter };
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let tree = Tree { expanded: &self.expanded, selected: self.selected.as_deref(), filter: &filter, headers: Default::default() };
+        let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        // Debug screenshots: `RGRIP_DEMO_EXPLORER_SCROLL=300` (kept, so the
+        // tree has loaded by the time of the capture).
+        if cfg!(debug_assertions) && let Some(y) = std::env::var("RGRIP_DEMO_EXPLORER_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
+            scroll = scroll.vertical_scroll_offset(y);
+        }
+        let out = scroll.show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             for (ci, conn) in self.conns.iter().enumerate() {
                 tree.conn(ui, ci, conn, actions);
             }
             self.saved_section(ui, &filter, actions);
         });
+        // Sticky headers: the connection and schema you're scrolling through
+        // stay pinned at the top (drawn last, so they sit on top).
+        let headers = tree.headers.into_inner();
+        let view = out.inner_rect;
+        let row = widgets::ROW_HEIGHT + 1.0;
+        let pinned = sticky_headers(&headers, view.top(), row);
+        if !pinned.is_empty() {
+            // Cover rows peeking above the band (the clip starts a bit higher).
+            let band = egui::Rect::from_x_y_ranges(view.x_range(), (view.top() - 10.0)..=view.top());
+            ui.painter().with_clip_rect(ui.clip_rect()).rect_filled(band, 0.0, theme::BG());
+        }
+        for (slot, &i) in pinned.iter().enumerate() {
+            let h = &headers[i];
+            let rect = egui::Rect::from_min_size(egui::pos2(view.left(), view.top() + slot as f32 * row), egui::vec2(view.width(), row));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.painter().rect_filled(rect, 0.0, theme::BG());
+                if slot + 1 == pinned.len() {
+                    ui.painter().hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, theme::BORDER()));
+                }
+                let resp = widgets::tree_row(
+                    ui,
+                    TreeRow { depth: h.depth, open: Some(true), icon: h.icon, label: &h.label, label_color: theme::TEXT(), detail: h.detail.as_deref(), selected: false },
+                );
+                if resp.on_hover_text("Click to collapse").clicked() {
+                    actions.push(Action::Toggle(h.key.clone()));
+                }
+            });
+        }
     }
 
     /// Consoles that belong to a saved query save themselves shortly after
@@ -2120,6 +2154,41 @@ struct Tree<'a> {
     expanded: &'a HashSet<String>,
     selected: Option<&'a str>,
     filter: &'a str,
+    /// Open connection/schema rows as drawn, for the sticky headers.
+    headers: std::cell::RefCell<Vec<StickyHeader>>,
+}
+
+/// An open connection (depth 0) or schema (depth 1) row, where it was drawn.
+struct StickyHeader {
+    depth: usize,
+    key: String,
+    icon: Icon,
+    label: String,
+    detail: Option<String>,
+    top: f32,
+}
+
+/// Which headers to pin at the top of the explorer for a viewport starting
+/// at `top`: the connection and schema whose rows scrolled out of view
+/// while their contents are still showing.
+fn sticky_headers(headers: &[StickyHeader], top: f32, row: f32) -> Vec<usize> {
+    let mut pinned = Vec::new();
+    for depth in 0..2 {
+        let slot = top + pinned.len() as f32 * row;
+        // Only look inside the pinned connection for its schemas.
+        let (from, to) = match pinned.last() {
+            Some(&p) => (p + 1, headers[p + 1..].iter().position(|h| h.depth == 0).map_or(headers.len(), |n| p + 1 + n)),
+            None => (0, headers.len()),
+        };
+        let Some(i) = (from..to).rev().find(|&i| headers[i].depth == depth && headers[i].top < slot) else { break };
+        // Its section ends at the next header of the same or a higher level.
+        let end = headers[i + 1..].iter().find(|h| h.depth <= depth).map_or(f32::INFINITY, |h| h.top);
+        if end <= slot + row {
+            break;
+        }
+        pinned.push(i);
+    }
+    pinned
 }
 
 impl Tree<'_> {
@@ -2127,6 +2196,7 @@ impl Tree<'_> {
         // While searching, connections and schemas show their matches open.
         let searching = !self.filter.is_empty() && (key.starts_with("c/") || key.starts_with("s/"));
         let open = searching || self.expanded.contains(key);
+        let header_depth = if key.starts_with("c/") { Some(0) } else if key.starts_with("s/") { Some(1) } else { None };
         let resp = widgets::tree_row(
             ui,
             TreeRow {
@@ -2139,6 +2209,16 @@ impl Tree<'_> {
                 selected: self.selected == Some(key),
             },
         );
+        if let Some(depth) = header_depth.filter(|_| open) {
+            self.headers.borrow_mut().push(StickyHeader {
+                depth,
+                key: key.to_string(),
+                icon,
+                label: label.to_string(),
+                detail: detail.map(str::to_string),
+                top: resp.rect.top(),
+            });
+        }
         if resp.clicked() {
             actions.push(Action::Select(key.to_string()));
             if expandable {
@@ -4135,6 +4215,19 @@ mod tests {
         let esc = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
         frame(&mut t, vec![esc]);
         assert!(t.related.is_none());
+    }
+
+    #[test]
+    fn sticky_explorer_headers() {
+        let h = |depth, top: f32| StickyHeader { depth, key: String::new(), icon: Icon::Schema, label: String::new(), detail: None, top };
+        // conn at 0, schema A at 25 (rows to 500), schema B at 500, conn2 at 900.
+        let headers = [h(0, 0.0), h(1, 25.0), h(1, 500.0), h(0, 900.0)];
+        let row = 25.0;
+        assert!(sticky_headers(&headers, -1.0, row).is_empty(), "nothing scrolled yet");
+        assert_eq!(sticky_headers(&headers, 200.0, row), [0, 1], "inside schema A");
+        assert_eq!(sticky_headers(&headers, 600.0, row), [0, 2], "inside schema B");
+        assert_eq!(sticky_headers(&headers, 860.0, row), [0], "schema B nearly done: only the connection");
+        assert_eq!(sticky_headers(&headers, 1000.0, row), [3], "second connection");
     }
 
     #[test]

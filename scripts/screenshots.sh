@@ -45,6 +45,7 @@ scene database RGRIP_DEMO_DATABASE=shop RGRIP_DEMO_SCHEMA=sales RGRIP_DEMO_SQL="
 scene search RGRIP_DEMO_FILTER=order RGRIP_DEMO_SCHEMA=demo,legacy RGRIP_DEMO_SQL="select o.id, c.name as customer, o.total_usd, p.parcel_code\nfrom orders o\njoin customers c on c.id = o.customer_id\njoin parcels p on p.id = o.id\norder by o.total_usd desc;"
 scene tabmenu RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_SQL="select 1;" RGRIP_DEMO_MORE=demo.owners,legacy.orders RGRIP_DEMO_TAB_MENU=1
 scene connmenu RGRIP_DEMO_SQL="select 1;" RGRIP_DEMO_CONN_MENU=0
+scene sticky RGRIP_DEMO_EXPAND=public,tiger RGRIP_DEMO_EXPLORER_SCROLL=420 RGRIP_DEMO_SQL="select 1;"
 scene goto RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_SORT=price_usd:desc RGRIP_DEMO_GOTO=sur
 scene rowmenu RGRIP_DEMO_EXPAND=legacy RGRIP_DEMO_TABLE=legacy.customers RGRIP_DEMO_ROW_MENU=1
 scene inferred RGRIP_DEMO_EXPAND=legacy RGRIP_DEMO_TABLE=legacy.customers RGRIP_DEMO_SELECT=1 RGRIP_DEMO_RELATED=orders
