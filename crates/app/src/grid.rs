@@ -371,6 +371,7 @@ pub fn show(
                     if !gutter && demo_menu == Some(i) {
                         // Context menus open at a stored pointer position.
                         let at = response.rect.left_center() + egui::vec2(180.0, 0.0);
+                        #[allow(deprecated)] // the Popup API has no "open at" for context menus
                         ctx.memory_mut(|m| m.open_popup_at(egui::Popup::default_response_id(&response), at));
                         menu_row = Some(i);
                     }

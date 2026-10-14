@@ -78,6 +78,8 @@ enum View {
 
 struct Console {
     sql: String,
+    /// Last edit, for autosaving consoles that belong to a saved query.
+    last_edit: Option<Instant>,
     /// Sorted char range of the editor cursor/selection.
     cursor: std::ops::Range<usize>,
     focus: bool,
@@ -138,6 +140,7 @@ impl Console {
     fn new() -> Self {
         Self {
             sql: String::new(),
+            last_edit: None,
             cursor: 0..0,
             focus: true,
             running: None,
@@ -1495,6 +1498,7 @@ impl eframe::App for App {
         #[cfg(debug_assertions)]
         self.demo_hook();
         self.handle_events();
+        self.autosave();
 
         let mut actions = Vec::new();
         let mut tab_action = None;
@@ -1592,6 +1596,30 @@ impl App {
             }
             self.saved_section(ui, &filter, actions);
         });
+    }
+
+    /// Consoles that belong to a saved query save themselves shortly after
+    /// the last edit (quietly; ⌘S still saves right away).
+    fn autosave(&mut self) {
+        const IDLE: Duration = Duration::from_millis(900);
+        let mut errors = Vec::new();
+        for tab in &self.tabs {
+            let TabKind::Console(c) = &tab.kind else { continue };
+            let (Some(id), Some(at)) = (&c.saved_id, c.last_edit) else { continue };
+            let Some(q) = self.saved.iter_mut().find(|q| &q.id == id).filter(|q| q.sql != c.sql) else { continue };
+            if at.elapsed() < IDLE {
+                self.egui_ctx.request_repaint_after(IDLE - at.elapsed());
+                continue;
+            }
+            q.sql = c.sql.clone();
+            q.connection = Some(tab.conn.clone());
+            if let Err(e) = config::update_query(q) {
+                errors.push(format!("Could not save “{}”: {e}", q.name));
+            }
+        }
+        if let Some(e) = errors.pop() {
+            self.toast = Some((e, theme::ERROR(), Instant::now()));
+        }
     }
 
     /// Title strip for the full-size-content macOS window: drag/zoom area,
@@ -2108,16 +2136,18 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
 
 impl App {
     fn tab_bar(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+        // DataGrip-style strip: square tabs edge to edge, hairline
+        // separators, a border under the strip.
         Frame::new()
             .fill(theme::BG())
-            .inner_margin(Margin { left: 10, right: 10, top: 6, bottom: 0 })
+            .inner_margin(Margin::ZERO)
             .show(ui, |ui| {
                 egui::ScrollArea::horizontal()
                     .id_salt("tabs")
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
+                            ui.spacing_mut().item_spacing.x = 0.0;
                             for (i, tab) in self.tabs.iter().enumerate() {
                                 let dirty = match &tab.kind {
                                     TabKind::Console(c) => c.saved_id.as_ref().is_some_and(|id| {
@@ -2150,11 +2180,15 @@ impl App {
                 None => Default::default(),
             }
         };
+        let dirty = match &self.tabs.get(self.active)?.kind {
+            TabKind::Console(c) => c.saved_id.as_ref().is_some_and(|id| self.saved.iter().any(|q| &q.id == id && q.sql != c.sql)),
+            TabKind::Table(_) => false,
+        };
         let tab = self.tabs.get_mut(self.active)?;
         let id = tab.id;
         match &mut tab.kind {
             TabKind::Console(c) => {
-                let action = console_ui(ui, id, c, &catalog, &schemas);
+                let action = console_ui(ui, id, c, &catalog, &schemas, dirty);
                 action.or(load_schemas.then_some(TabAction::LoadSchemas))
             }
             TabKind::Table(t) => table_ui(ui, id, t),
@@ -2194,10 +2228,10 @@ fn tab_button(
     const PAD_R: f32 = 6.0;
 
     let color = if active { theme::TEXT() } else { theme::MUTED() };
-    // A dot marks unsaved changes to a saved query.
-    let title = if dirty { format!("{} •", tab.title) } else { tab.title.clone() };
+    // `*` marks unsaved changes to a saved query (as in DataGrip).
+    let title = if dirty { format!("* {}", tab.title) } else { tab.title.clone() };
     let galley = ui.painter().layout_no_wrap(title, TextStyle::Body.resolve(ui.style()), color);
-    let size = egui::vec2(PAD_L + ICON + GAP + galley.size().x + GAP + CLOSE + PAD_R, 30.0);
+    let size = egui::vec2(PAD_L + ICON + GAP + galley.size().x + GAP + CLOSE + PAD_R, 36.0);
 
     // The tab background is registered first and the close button last, so
     // the close button sits on top and receives its own clicks.
@@ -2209,6 +2243,8 @@ fn tab_button(
     let close_resp = ui.interact(close_rect, Id::new(("tab-close", tab.id)), Sense::click()).on_hover_text("Close  ⌘W");
 
     let painter = ui.painter();
+    // Square, edge to edge: the active tab takes the content's surface so it
+    // reads as attached to it; a connection color tints the whole tab.
     let fill = if active {
         theme::SURFACE()
     } else if tab_resp.hovered() {
@@ -2217,13 +2253,14 @@ fn tab_button(
         theme::BG()
     };
     let fill = match style.color {
-        Some(col) => theme::tint(fill, col, if active { 0.30 } else if tab_resp.hovered() { 0.20 } else { 0.12 }),
+        Some(col) => theme::tint(fill, col, if active { 0.34 } else if tab_resp.hovered() { 0.24 } else { 0.16 }),
         None => fill,
     };
-    painter.rect_filled(rect, egui::CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, fill);
-    // The active tab gets a bar: the connection's color, else the accent.
+    painter.rect_filled(rect, 0.0, fill);
+    painter.vline(rect.right() - 0.5, rect.y_range().shrink(9.0), Stroke::new(1.0, theme::BORDER()));
+    // The active tab is underlined: the connection's color, else the accent.
     if active {
-        let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.5), rect.right_bottom());
+        let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.right_bottom());
         painter.rect_filled(bar, 0.0, style.color.unwrap_or(theme::ACCENT()));
     }
     let cy = rect.center().y;
@@ -2261,7 +2298,8 @@ fn tab_button(
     rect
 }
 
-fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog, schemas: &[String]) -> Option<TabAction> {
+/// `dirty`: the console differs from its saved query (autosave pending).
+fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog, schemas: &[String], dirty: bool) -> Option<TabAction> {
     let mut action = None;
     let editor_id = Id::new(("editor", tab_id));
     let keys = completion::handle_keys(ui, &mut c.popup);
@@ -2326,14 +2364,26 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog, sc
             if ghost_button(ui, "Format").on_hover_text("Format selection or all  ⇧⌘F").clicked() {
                 format = true;
             }
-            schema_picker(ui, tab_id, c, schemas);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if c.saved_id.is_some() { "Save" } else { "Save as…" };
-                if ghost_button(ui, label).on_hover_text("⌘S").clicked() {
-                    action = Some(TabAction::Save);
-                }
-            });
         }
+        // Right side: save state, then the schema (stays visible while running).
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            match (&c.saved_id, dirty) {
+                // Saved queries autosave; this just shows where things are.
+                (Some(_), false) => {
+                    ui.label(RichText::new("Saved").size(12.5).color(theme::FAINT())).on_hover_text("Changes save automatically");
+                }
+                (Some(_), true) => {
+                    ui.label(RichText::new("Saving…").size(12.5).color(theme::MUTED())).on_hover_text("Saves a moment after you stop typing  ⌘S now");
+                }
+                (None, _) => {
+                    if ghost_button(ui, "Save as…").on_hover_text("⌘S").clicked() {
+                        action = Some(TabAction::Save);
+                    }
+                }
+            }
+            ui.add_space(8.0);
+            ui.add_enabled_ui(c.running.is_none(), |ui| schema_picker(ui, tab_id, c, schemas));
+        });
     });
 
     if format && c.running.is_none() {
@@ -2380,6 +2430,9 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog, sc
                     let previous = c.cursor.clone();
                     if let Some(r) = out.cursor_range {
                         c.cursor = r.as_sorted_char_range();
+                    }
+                    if out.response.changed() {
+                        c.last_edit = Some(Instant::now());
                     }
                     update_popup(c, catalog, schemas, out.response.changed(), keys.force, previous);
                     if let Some(p) = &mut c.popup {
@@ -3752,7 +3805,7 @@ mod tests {
             let (console, catalog) = (&mut self.console, &self.catalog);
             let _ = self.ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    console_ui(ui, 1, console, catalog, &[]);
+                    console_ui(ui, 1, console, catalog, &[], false);
                 });
             });
         }
