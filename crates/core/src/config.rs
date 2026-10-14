@@ -264,6 +264,22 @@ mod tests {
     }
 
     #[test]
+    fn connection_color_compat_and_round_trip() {
+        use crate::model::ConnColor;
+        // Files written before colors existed still load.
+        let old = "[[connections]]\nid = \"a\"\nname = \"Local\"\nhost = \"localhost\"\nport = 5432\ndatabase = \"postgres\"\nuser = \"u\"\n";
+        let f: ConfigFile = toml::from_str(old).unwrap();
+        assert_eq!(f.connections[0].color, ConnColor::None);
+
+        let mut c = f.connections[0].clone();
+        c.color = ConnColor::Red;
+        let text = toml::to_string_pretty(&ConfigFile { connections: vec![c] }).unwrap();
+        assert!(text.contains("color = \"red\""));
+        let back: ConfigFile = toml::from_str(&text).unwrap();
+        assert_eq!(back.connections[0].color, ConnColor::Red);
+    }
+
+    #[test]
     fn saved_query_files() {
         let dir = std::env::temp_dir().join(format!("rgrip-queries-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
