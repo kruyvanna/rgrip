@@ -2,6 +2,7 @@ mod app;
 mod completion;
 mod grid;
 mod highlight;
+mod icons;
 mod map;
 mod shaping;
 mod snapshot;

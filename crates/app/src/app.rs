@@ -1326,7 +1326,7 @@ impl eframe::App for App {
             actions.push(Action::Close(CloseWhich::One(self.active)));
         }
 
-        title_bar(ctx);
+        self.title_bar(ctx, &mut actions);
 
         egui::TopBottomPanel::bottom("status")
             .exact_height(26.0)
@@ -1409,6 +1409,90 @@ impl App {
             }
             self.saved_section(ui, &filter, actions);
         });
+    }
+
+    /// Title strip for the full-size-content macOS window: drag/zoom area,
+    /// plus appearance, updates, GitHub and sponsor buttons on the right.
+    fn title_bar(&self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        const REPO: &str = "https://github.com/yoouTaro/rgrip";
+        egui::TopBottomPanel::top("titlebar")
+            .exact_height(30.0)
+            .frame(Frame::new().fill(theme::BG()).inner_margin(Margin { left: 0, right: 10, top: 0, bottom: 0 }))
+            .show(ctx, |ui| {
+                let bar = ui.max_rect();
+                ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, theme::BORDER()));
+                // Registered first so the buttons below sit on top of it.
+                let resp = ui.interact(bar, Id::new("titlebar-drag"), Sense::click_and_drag());
+                if resp.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                if resp.double_clicked() {
+                    let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+                }
+                // Painted, not a Label: a (selectable) label would take the
+                // double-click and select its text instead of zooming the window.
+                ui.painter().text(bar.center(), egui::Align2::CENTER_CENTER, "rgrip", FontId::proportional(12.0), theme::FAINT());
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if title_button(ui, "Sponsor rgrip", |ui, r, hot| {
+                        let tint = if hot { Color32::from_rgb(0xea, 0x4a, 0xaa) } else { theme::MUTED() };
+                        crate::icons::paint(ui, crate::icons::Svg::Heart, r.shrink(5.5), tint);
+                    })
+                    .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab("https://github.com/sponsors/yoouTaro"));
+                    }
+                    if title_button(ui, "rgrip on GitHub", |ui, r, hot| {
+                        let tint = if hot { theme::TEXT() } else { theme::MUTED() };
+                        crate::icons::paint(ui, crate::icons::Svg::GitHub, r.shrink(5.0), tint);
+                    })
+                    .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(REPO));
+                    }
+                    match &self.update {
+                        UpdateState::Available(r) => {
+                            let text = RichText::new(format!("Update to {}", r.version)).size(12.0).color(theme::BG());
+                            let b = Button::new(text).fill(theme::ACCENT()).corner_radius(6);
+                            if ui.add(b).on_hover_text("Download, verify and restart").clicked() {
+                                actions.push(Action::InstallUpdate);
+                            }
+                        }
+                        UpdateState::Checking { .. } | UpdateState::Installing(_) => {
+                            ui.add_space(4.0);
+                            ui.add(egui::Spinner::new().size(13.0));
+                            ui.add_space(4.0);
+                        }
+                        UpdateState::Idle => {
+                            let tip = format!("Check for updates (rgrip {})", update::CURRENT);
+                            if title_button(ui, &tip, |ui, r, hot| {
+                                let tint = if hot { theme::TEXT() } else { theme::MUTED() };
+                                crate::icons::paint(ui, crate::icons::Svg::Refresh, r.shrink(6.0), tint);
+                            })
+                            .clicked()
+                            {
+                                actions.push(Action::CheckUpdate);
+                            }
+                        }
+                    }
+                    // Appearance: System → Light → Dark.
+                    let (icon, label, next) = match self.settings.theme {
+                        ThemeChoice::System => (Icon::System, "System", ThemeChoice::Light),
+                        ThemeChoice::Light => (Icon::Sun, "Light", ThemeChoice::Dark),
+                        ThemeChoice::Dark => (Icon::Moon, "Dark", ThemeChoice::System),
+                    };
+                    if title_button(ui, &format!("Appearance: {label} (click to switch)"), |ui, r, hot| {
+                        let tint = if hot { theme::TEXT() } else { theme::MUTED() };
+                        widgets::paint_icon_tinted(ui.painter(), r.center(), icon, Some(tint));
+                    })
+                    .clicked()
+                    {
+                        actions.push(Action::SetTheme(next));
+                    }
+                });
+            });
     }
 
     fn settings_menu(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -3012,30 +3096,15 @@ fn segment(ui: &mut Ui, selected: bool, text: &str) -> bool {
     r.clicked()
 }
 
-/// Native-feeling title strip for the full-size-content macOS window.
-fn title_bar(ctx: &egui::Context) {
-    egui::TopBottomPanel::top("titlebar")
-        .exact_height(30.0)
-        .frame(Frame::new().fill(theme::BG()))
-        .show(ctx, |ui| {
-            let resp = ui.interact(ui.max_rect(), Id::new("titlebar-drag"), Sense::click_and_drag());
-            if resp.drag_started() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            }
-            if resp.double_clicked() {
-                let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
-            }
-            // Painted, not a Label: a (selectable) label would take the
-            // double-click and select its text instead of zooming the window.
-            ui.painter().text(
-                ui.max_rect().center(),
-                egui::Align2::CENTER_CENTER,
-                "rgrip",
-                FontId::proportional(12.0),
-                theme::FAINT(),
-            );
-        });
+/// A 24 pt square title-bar button; `paint` draws its icon (hot = hovered).
+fn title_button(ui: &mut Ui, hover: &str, paint: impl FnOnce(&Ui, egui::Rect, bool)) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
+    let hot = resp.hovered();
+    if hot {
+        ui.painter().rect_filled(rect, 6.0, theme::HOVER());
+    }
+    paint(ui, rect, hot);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hover)
 }
 
 /// Small borderless button that brightens on hover.
