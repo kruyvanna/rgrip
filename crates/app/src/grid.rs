@@ -34,6 +34,8 @@ pub struct GridState {
     pub scroll_x: Option<f32>,
     /// The "Go to column" popup, when open.
     goto: Option<Goto>,
+    /// Screenshot scenes: open this row's right-click menu once.
+    pub demo_menu: Option<usize>,
     /// Column briefly highlighted after a jump, with the time it started.
     flash: Option<(usize, f64)>,
     cache: Option<Cache>,
@@ -145,6 +147,11 @@ fn column_widths(rs: &ResultSet) -> Vec<f32> {
 }
 
 impl GridState {
+    /// Screenshot scenes: show the Go to column popup with `query` typed.
+    pub fn open_goto(&mut self, query: &str) {
+        self.goto = Some(Goto { query: query.to_string(), highlight: 0, focus: true });
+    }
+
     /// State for a new result: selection and scroll reset, frozen columns kept.
     pub fn fresh(old: &GridState) -> Self {
         Self { frozen: old.frozen.clone(), ..Default::default() }
@@ -190,6 +197,7 @@ pub fn show(
     let mut menu_row = None;
     let geom = !rs.geometry_columns().is_empty();
     let mut menu_col = state.menu_col;
+    let demo_menu = state.demo_menu.take();
     // Frozen columns (by name) that exist in this result, in freeze order.
     let frozen: Vec<usize> = state.frozen.iter().filter_map(|n| rs.columns.iter().position(|c| c == n)).collect();
     let rest: Vec<usize> = (0..rs.columns.len()).filter(|c| !frozen.contains(c)).collect();
@@ -216,6 +224,7 @@ pub fn show(
     // Draws one half: the frozen part (row numbers + frozen columns, no
     // horizontal scroll) or the scrolling rest. Returns its vertical offset.
     let mut draw = |ui: &mut Ui, salt: &str, cols: &[usize], gutter: bool| -> f32 {
+        let ctx = ui.ctx().clone();
         let mut table = TableBuilder::new(ui)
             .id_salt(id.with(salt))
             .striped(true)
@@ -359,6 +368,12 @@ pub fn show(
                         }
                     }
                     let response = row.response();
+                    if !gutter && demo_menu == Some(i) {
+                        // Context menus open at a stored pointer position.
+                        let at = response.rect.left_center() + egui::vec2(180.0, 0.0);
+                        ctx.memory_mut(|m| m.open_popup_at(egui::Popup::default_response_id(&response), at));
+                        menu_row = Some(i);
+                    }
                     if response.clicked() {
                         clicked_row = Some(i);
                     }

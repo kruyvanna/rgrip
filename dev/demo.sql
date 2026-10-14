@@ -97,3 +97,28 @@ insert into demo.places (name, category, opened_on, geom) values
   ('Olympic Stadium', 'sport', '1964-01-01', st_point(104.9110, 11.5590, 4326)),
   ('National Museum', 'museum', '1920-01-01', st_point(104.9295, 11.5660, 4326)),
   ('Toul Sleng', 'museum', '1980-01-01', st_point(104.9175, 11.5495, 4326));
+
+-- A legacy schema with primary keys but no foreign keys: rgrip infers the
+-- relations from column names (orders.customer_id → customers.id, …).
+drop schema if exists legacy cascade;
+create schema legacy;
+create table legacy.customers (id int primary key, name text, city text, joined_on date);
+insert into legacy.customers
+select g, (array['Sok Dara', 'Chan Sophea', 'Keo Vibol', 'Lim Srey Pich', 'Heng Bunthoeun', 'Meas Sokha'])[g],
+       (array['Phnom Penh', 'Siem Reap', 'Battambang', 'Kampot', 'Phnom Penh', 'Takeo'])[g],
+       date '2021-01-01' + (g * 97)
+from generate_series(1, 6) g;
+create table legacy.orders (id int primary key, customer_id int, total_usd numeric(10, 2), status text, ordered_at timestamptz);
+insert into legacy.orders
+select g, 1 + (g % 6), round((15 + random() * 400)::numeric, 2),
+       (array['paid', 'shipped', 'pending'])[1 + (g % 3)],
+       timestamptz '2026-09-01 09:00+07' + g * interval '7 hours'
+from generate_series(1, 40) g;
+create table legacy.order_items (id int primary key, order_id int, product text, qty int);
+insert into legacy.order_items
+select g, 1 + (g % 40), (array['Coffee beans', 'Rice 25kg', 'Palm sugar', 'Kampot pepper', 'Fish sauce'])[1 + (g % 5)], 1 + (g % 4)
+from generate_series(1, 120) g;
+create table legacy.payments (id int primary key, order_id int, amount_usd numeric(10, 2), paid_on date);
+insert into legacy.payments
+select g, g, round((15 + random() * 400)::numeric, 2), date '2026-09-02' + g
+from generate_series(1, 30) g;

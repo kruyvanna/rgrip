@@ -9,7 +9,7 @@
 set -e
 only=" $* "
 cd "$(dirname "$0")/.."
-out=docs/screenshots
+out=${RGRIP_SHOTS_OUT:-docs/screenshots}
 mkdir -p "$out" target
 cargo build -q -p rgrip
 swiftc -O scripts/winid.swift -o target/winid 2>/dev/null
@@ -40,6 +40,10 @@ scene edit RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.owners RGRIP_DEMO_EDITS=
 scene related RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.owners RGRIP_DEMO_SELECT=1 RGRIP_DEMO_RELATED=parcels
 scene freeze RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_FREEZE=parcel_code,land_use RGRIP_DEMO_SELECT=2 RGRIP_DEMO_SCROLL_X=420
 scene complete RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_COMPLETE="select p.| from demo.parcels p"
+scene tabs RGRIP_DEMO_EXPAND=demo,legacy RGRIP_DEMO_COLOR=red RGRIP_DEMO_SCHEMA=demo RGRIP_DEMO_MORE=demo.owners,legacy.orders RGRIP_DEMO_SQL="select parcel_code, land_use, area_m2, price_usd, surveyed_at\nfrom parcels\norder by price_usd desc;"
+scene goto RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_SORT=price_usd:desc RGRIP_DEMO_GOTO=sur
+scene rowmenu RGRIP_DEMO_EXPAND=legacy RGRIP_DEMO_TABLE=legacy.customers RGRIP_DEMO_ROW_MENU=1
+scene inferred RGRIP_DEMO_EXPAND=legacy RGRIP_DEMO_TABLE=legacy.customers RGRIP_DEMO_SELECT=1 RGRIP_DEMO_RELATED=orders
 scene commands RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_COMMANDS="parcels 3857"
 [ "$only" = "  " ] || case "$only" in *" copy-image "*) only="  " ;; *) exit 0 ;; esac
 rm -f "$out/copy-image.png"

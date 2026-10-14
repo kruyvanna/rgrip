@@ -176,8 +176,12 @@ struct TableView {
     key: Vec<String>,
     /// Date/time columns by name, for the edit picker.
     temporal: HashMap<String, rgrip_core::datetime::TemporalKind>,
-    /// Foreign keys from and to this table.
+    /// Foreign keys from and to this table, then inferred relations.
     relations: Vec<Relation>,
+    /// What the inferred relations are computed from (again when the
+    /// catalog arrives after the page).
+    columns: Vec<ColumnInfo>,
+    fk_relations: Vec<Relation>,
     /// Related rows shown in a popup over the tab.
     related: Option<Related>,
     /// Pending inline edits: (row, col) → new value.
@@ -204,6 +208,8 @@ struct Related {
     data: Option<Result<ResultSet, String>>,
     total: Option<i64>,
     relations: Vec<Relation>,
+    columns: Vec<ColumnInfo>,
+    fk_relations: Vec<Relation>,
     grid: GridState,
 }
 
@@ -239,6 +245,8 @@ impl TableView {
             key: Vec::new(),
             temporal: HashMap::new(),
             relations: Vec::new(),
+            columns: Vec::new(),
+            fk_relations: Vec::new(),
             related: None,
             changes: Default::default(),
             editor: None,
@@ -593,7 +601,18 @@ impl App {
                 }
                 Ev::Catalog { conn, result } => {
                     if let (Some(ci), Ok(catalog)) = (self.conn_index(&conn), result) {
-                        self.conns[ci].catalog = Arc::new(catalog);
+                        let catalog = Arc::new(catalog);
+                        self.conns[ci].catalog = catalog.clone();
+                        // Pages that arrived before the catalog only had real
+                        // foreign keys: add the inferred relations now.
+                        for tab in self.tabs.iter_mut().filter(|t| t.conn == conn) {
+                            if let TabKind::Table(t) = &mut tab.kind {
+                                t.relations = with_inferred(&t.schema, &t.table, &t.columns, &t.fk_relations, &catalog);
+                                if let Some(rel) = &mut t.related {
+                                    rel.relations = with_inferred(&rel.target.schema, &rel.target.table, &rel.columns, &rel.fk_relations, &catalog);
+                                }
+                            }
+                        }
                     }
                 }
                 Ev::QueryDone { tab, result } => {
@@ -617,32 +636,31 @@ impl App {
                         self.worker.send(Cmd::Catalog(conn));
                     }
                 }
-                Ev::TablePage { tab, modal: true, result, columns, mut relations } => {
+                Ev::TablePage { tab, modal: true, result, columns, relations } => {
                     let catalog = self.tab_catalog(tab);
                     if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab)
                         && let Some(rel) = &mut t.related
                     {
-                        let inferred = rgrip_core::relations::infer(&rel.target.schema, &rel.target.table, &columns, &catalog, &relations);
-                        relations.extend(inferred);
+                        rel.relations = with_inferred(&rel.target.schema, &rel.target.table, &columns, &relations, &catalog);
+                        (rel.columns, rel.fk_relations) = (columns, relations);
                         rel.grid = GridState::fresh(&rel.grid);
                         rel.data = Some(result);
-                        rel.relations = relations;
                     }
                 }
-                Ev::TablePage { tab, modal: false, result, columns, mut relations } => {
+                Ev::TablePage { tab, modal: false, result, columns, relations } => {
                     let catalog = self.tab_catalog(tab);
                     if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab) {
-                        let inferred = rgrip_core::relations::infer(&t.schema, &t.table, &columns, &catalog, &relations);
-                        relations.extend(inferred);
+                        t.relations = with_inferred(&t.schema, &t.table, &columns, &relations, &catalog);
+                        t.fk_relations = relations;
                         t.loading = false;
                         t.grid = GridState::fresh(&t.grid);
                         t.data = Some(result);
                         t.key = columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect();
-                        t.relations = relations;
                         t.temporal = columns
                             .iter()
                             .filter_map(|c| Some((c.name.clone(), rgrip_core::datetime::kind_of(&c.data_type)?)))
                             .collect();
+                        t.columns = columns;
                         // Edits are keyed by row index: they belong to the old page.
                         t.changes.clear();
                         t.editor = None;
@@ -1161,6 +1179,8 @@ impl App {
                             data: None,
                             total: None,
                             relations: Vec::new(),
+                            columns: Vec::new(),
+                            fk_relations: Vec::new(),
                             grid: GridState::default(),
                         })
                     }
@@ -1231,6 +1251,46 @@ impl App {
             self.saved.clear();
         }
         let scroll_x = env("RGRIP_DEMO_SCROLL_X").and_then(|v| v.parse::<f32>().ok());
+        // `RGRIP_DEMO_COLOR=red`: tint the demo connection (not saved).
+        if let (Some(color), Some(c)) = (env("RGRIP_DEMO_COLOR"), self.conns.first_mut()) {
+            use rgrip_core::ConnColor::*;
+            c.cfg.color = match color.as_str() {
+                "red" => Red,
+                "orange" => Orange,
+                "yellow" => Yellow,
+                "green" => Green,
+                "blue" => Blue,
+                "purple" => Purple,
+                "gray" => Gray,
+                _ => None,
+            };
+        }
+        // `RGRIP_DEMO_MORE=demo.owners,demo.parcels`: extra table tabs, then
+        // back to the first tab; `RGRIP_DEMO_SCHEMA=demo` for consoles.
+        static MORE_OPENED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if let Some(more) = env("RGRIP_DEMO_MORE")
+            && !self.tabs.is_empty()
+            && !MORE_OPENED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            for t in more.split(',') {
+                if let Some((schema, table)) = t.split_once('.') {
+                    self.open_table(0, schema.into(), table.into());
+                }
+            }
+            self.active = 0;
+        }
+        if let Some(schema) = env("RGRIP_DEMO_SCHEMA") {
+            for tab in &mut self.tabs {
+                if let TabKind::Console(c) = &mut tab.kind {
+                    c.schema = Some(schema.clone());
+                }
+            }
+        }
+        static ONCE: std::sync::Mutex<Vec<&str>> = std::sync::Mutex::new(Vec::new());
+        let once = |what: &'static str| {
+            let mut done = ONCE.lock().unwrap();
+            (!done.contains(&what)).then(|| done.push(what)).is_some()
+        };
         // `RGRIP_DEMO_COMMANDS=<preview args>`: the slash command editor, once.
         static COMMANDS_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if let Some(args) = env("RGRIP_DEMO_COMMANDS") && !COMMANDS_SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -1248,6 +1308,7 @@ impl App {
             }
         }
         let mut follow_action = None;
+        let mut sort_reload = false;
         let settled = match self.tabs.get_mut(self.active).map(|t| &mut t.kind) {
             None => true,
             Some(TabKind::Console(c)) => {
@@ -1269,6 +1330,27 @@ impl App {
                     }
                     if let (Some(sel), true) = (env("RGRIP_DEMO_SELECT"), t.grid.selection.is_empty()) {
                         t.grid.selection = sel.split(',').filter_map(|v| v.parse().ok()).collect();
+                    }
+                    // `RGRIP_DEMO_SORT=price_usd:desc`, `RGRIP_DEMO_GOTO=pri`,
+                    // `RGRIP_DEMO_ROW_MENU=1`.
+                    if let Some(sort) = env("RGRIP_DEMO_SORT")
+                        && once("sort")
+                    {
+                        let (col, dir) = sort.split_once(':').unwrap_or((&sort, "asc"));
+                        t.order = Some((col.to_string(), dir != "desc"));
+                        sort_reload = true;
+                    }
+                    if let Some(q) = env("RGRIP_DEMO_GOTO")
+                        && !sort_reload
+                        && once("goto")
+                    {
+                        t.grid.open_goto(&q);
+                    }
+                    if let Some(row) = env("RGRIP_DEMO_ROW_MENU").and_then(|v| v.parse().ok())
+                        && once("row-menu")
+                    {
+                        t.grid.selection = [row].into();
+                        t.grid.demo_menu = Some(row);
                     }
                     if env("RGRIP_DEMO_TABLE_VIEW").as_deref() == Some("map") {
                         t.show_map = true;
@@ -1310,6 +1392,9 @@ impl App {
         };
         if let Some(a) = follow_action {
             self.tab_action(self.active, a);
+        }
+        if sort_reload {
+            self.tab_action(self.active, TabAction::Reload);
         }
         // Touch the ready file once the scene has looked settled for a moment.
         if let Some(path) = env("RGRIP_DEMO_READY") {
@@ -1369,6 +1454,7 @@ impl App {
             self.open_console(0);
             if let Some(TabKind::Console(c)) = self.tabs.last_mut().map(|t| &mut t.kind) {
                 c.sql = sql.replace("\\n", "\n");
+                c.schema = std::env::var("RGRIP_DEMO_SCHEMA").ok();
             }
             self.tab_action(self.active, TabAction::Run { all: true });
         }
@@ -2544,6 +2630,13 @@ fn output_log(ui: &mut Ui, out: &QueryOutput) {
     });
 }
 
+/// Real foreign keys plus relations guessed from column names.
+fn with_inferred(schema: &str, table: &str, columns: &[ColumnInfo], fks: &[Relation], catalog: &Catalog) -> Vec<Relation> {
+    let mut all = fks.to_vec();
+    all.extend(rgrip_core::relations::infer(schema, table, columns, catalog, fks));
+    all
+}
+
 /// Show the rows related to `rows` through `r` in the popup.
 fn follow(r: &Relation, rs: &ResultSet, rows: &[usize]) -> TabAction {
     match related_filter(r, rs, rows) {
@@ -2558,7 +2651,7 @@ fn follow(r: &Relation, rs: &ResultSet, rows: &[usize]) -> TabAction {
                 schema: r.other_schema.clone(),
                 table: r.other_table.clone(),
                 filter,
-                label: format!("{arrow} {other} ({})", cols.join(", ")),
+                label: format!("{arrow} {other} ({}){}", cols.join(", "), if r.inferred { "  ~ inferred" } else { "" }),
             })
         }
         None => TabAction::Notify("No related rows: the key is NULL".into()),
@@ -3499,6 +3592,8 @@ mod tests {
             data: Some(Ok(rows(3))),
             total: Some(3),
             relations: Vec::new(),
+            columns: Vec::new(),
+            fk_relations: Vec::new(),
             grid: GridState::default(),
         });
         let ctx = egui::Context::default();
