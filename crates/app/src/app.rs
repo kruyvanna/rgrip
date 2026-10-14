@@ -47,6 +47,17 @@ struct Conn {
     columns: HashMap<(String, String), Load<Vec<ColumnInfo>>>,
     /// Every table and column, for autocompletion.
     catalog: Arc<Catalog>,
+    /// Databases of the server, for the console's database picker.
+    databases: Option<Load<Vec<String>>>,
+    /// Schemas and catalog of the other databases consoles were pointed at.
+    dbs: HashMap<String, DbCache>,
+}
+
+/// What a console needs to know about a database other than the connection's own.
+#[derive(Default)]
+struct DbCache {
+    schemas: Option<Load<Vec<String>>>,
+    catalog: Arc<Catalog>,
 }
 
 impl Conn {
@@ -58,10 +69,33 @@ impl Conn {
             tables: HashMap::new(),
             columns: HashMap::new(),
             catalog: Arc::default(),
+            databases: None,
+            dbs: HashMap::new(),
+        }
+    }
+
+    /// `database` as a key into `dbs`: `None` for the connection's own.
+    fn other_db<'a>(&self, database: Option<&'a str>) -> Option<&'a str> {
+        database.filter(|d| *d != self.cfg.database)
+    }
+
+    fn schemas_in(&self, database: Option<&str>) -> &Option<Load<Vec<String>>> {
+        match self.other_db(database) {
+            Some(d) => self.dbs.get(d).map(|db| &db.schemas).unwrap_or(&None),
+            None => &self.schemas,
+        }
+    }
+
+    fn catalog_in(&self, database: Option<&str>) -> Arc<Catalog> {
+        match self.other_db(database) {
+            Some(d) => self.dbs.get(d).map(|db| db.catalog.clone()).unwrap_or_default(),
+            None => self.catalog.clone(),
         }
     }
 
     fn clear_cache(&mut self) {
+        self.databases = None;
+        self.dbs.clear();
         self.schemas = None;
         self.tables.clear();
         self.columns.clear();
@@ -104,11 +138,15 @@ struct Console {
     schema: Option<String>,
     /// Schema the last run used (paging, export and queued runs reuse it).
     run_schema: Option<String>,
+    /// Database picked in the toolbar; `None` = the connection's own.
+    database: Option<String>,
+    /// Database the last run used (like `run_schema`).
+    run_database: Option<String>,
 }
 
-/// Schemas a console can pick: the connection's, without system ones.
-fn user_schemas(conn: &Conn) -> Vec<String> {
-    match &conn.schemas {
+/// Schemas a console can pick in `database`: the connection's, without system ones.
+fn user_schemas(conn: &Conn, database: Option<&str>) -> Vec<String> {
+    match conn.schemas_in(database) {
         Some(Load::Ready(list)) => list
             .iter()
             .filter(|s| !matches!(s.as_str(), "pg_catalog" | "information_schema") && !s.starts_with("pg_toast"))
@@ -157,6 +195,8 @@ impl Console {
             last_sql: String::new(),
             schema: None,
             run_schema: None,
+            database: None,
+            run_database: None,
         }
     }
 }
@@ -553,7 +593,7 @@ impl App {
                 Ev::Connected { conn, version } => {
                     let Some(ci) = self.conn_index(&conn) else { continue };
                     self.conns[ci].status = Status::Connected(version);
-                    self.worker.send(Cmd::Catalog(conn.clone()));
+                    self.worker.send(Cmd::Catalog(conn.clone(), None));
                     self.flush_pending(&conn);
                     if !self.tabs.iter().any(|t| t.conn == conn) {
                         self.open_console(ci);
@@ -584,7 +624,7 @@ impl App {
                         d.test = Some(result);
                     }
                 }
-                Ev::Schemas { conn, result } => {
+                Ev::Schemas { conn, database: None, result } => {
                     if let Ok(list) = &result {
                         if list.iter().any(|s| s == "public") {
                             self.expanded.insert(format!("s/{conn}/public"));
@@ -592,6 +632,19 @@ impl App {
                     }
                     if let Some(ci) = self.conn_index(&conn) {
                         self.conns[ci].schemas = Some(result.into());
+                    }
+                }
+                Ev::Schemas { conn, database: Some(db), result } => {
+                    if let Err(e) = &result {
+                        self.toast = Some((e.clone(), theme::ERROR(), Instant::now()));
+                    }
+                    if let Some(ci) = self.conn_index(&conn) {
+                        self.conns[ci].dbs.entry(db).or_default().schemas = Some(result.into());
+                    }
+                }
+                Ev::Databases { conn, result } => {
+                    if let Some(ci) = self.conn_index(&conn) {
+                        self.conns[ci].databases = Some(result.into());
                     }
                 }
                 Ev::Tables { conn, schema, result } => {
@@ -604,7 +657,12 @@ impl App {
                         self.conns[ci].columns.insert((schema, table), result.into());
                     }
                 }
-                Ev::Catalog { conn, result } => {
+                Ev::Catalog { conn, database: Some(db), result } => {
+                    if let (Some(ci), Ok(catalog)) = (self.conn_index(&conn), result) {
+                        self.conns[ci].dbs.entry(db).or_default().catalog = Arc::new(catalog);
+                    }
+                }
+                Ev::Catalog { conn, database: None, result } => {
                     if let (Some(ci), Ok(catalog)) = (self.conn_index(&conn), result) {
                         let catalog = Arc::new(catalog);
                         self.conns[ci].catalog = catalog.clone();
@@ -624,7 +682,7 @@ impl App {
                     let mut refresh = None;
                     if let Some(Tab { kind: TabKind::Console(c), conn, .. }) = self.tab_mut(tab) {
                         if std::mem::take(&mut c.ddl) && result.is_ok() {
-                            refresh = Some(conn.clone());
+                            refresh = Some((conn.clone(), c.run_database.clone()));
                         }
                         c.running = None;
                         c.grid = GridState::fresh(&c.grid);
@@ -637,8 +695,8 @@ impl App {
                         };
                         c.output = Some(result);
                     }
-                    if let Some(conn) = refresh {
-                        self.worker.send(Cmd::Catalog(conn));
+                    if let Some((conn, database)) = refresh {
+                        self.worker.send(Cmd::Catalog(conn, database));
                     }
                 }
                 Ev::TablePage { tab, modal: true, result, columns, relations } => {
@@ -745,7 +803,7 @@ impl App {
                 TabKind::Console(c) => {
                     if let Some(sql) = c.pending.take() {
                         let page = c.paged.is_some().then_some(c.offset);
-                        self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page, schema: c.run_schema.clone() });
+                        self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page, schema: c.run_schema.clone(), database: c.run_database.clone() });
                     }
                 }
                 TabKind::Table(t) if t.pending => {
@@ -934,14 +992,14 @@ impl App {
             }
             Action::Refresh(ci) => {
                 self.conns[ci].clear_cache();
-                self.worker.send(Cmd::Catalog(self.conns[ci].cfg.id.clone()));
+                self.worker.send(Cmd::Catalog(self.conns[ci].cfg.id.clone(), None));
             }
             Action::NewConsole(ci) => self.open_console(ci),
             Action::OpenTable(ci, s, t) => self.open_table(ci, s, t),
             Action::LoadSchemas(ci) => {
                 let c = &mut self.conns[ci];
                 c.schemas = Some(Load::Loading);
-                self.worker.send(Cmd::Schemas(c.cfg.id.clone()));
+                self.worker.send(Cmd::Schemas(c.cfg.id.clone(), None));
             }
             Action::LoadTables(ci, schema) => {
                 let c = &mut self.conns[ci];
@@ -1046,8 +1104,12 @@ impl App {
         }
         let connected = matches!(self.conns[ci].status, Status::Connected(_));
         let mut needs_connect = false;
-        let catalog = self.conns[ci].catalog.clone();
-        let schemas = user_schemas(&self.conns[ci]);
+        let database = match &self.tabs[ti].kind {
+            TabKind::Console(c) => c.database.clone(),
+            TabKind::Table(_) => None,
+        };
+        let catalog = self.conns[ci].catalog_in(database.as_deref());
+        let schemas = user_schemas(&self.conns[ci], database.as_deref());
         let tab = &mut self.tabs[ti];
         match (action, &mut tab.kind) {
             (TabAction::Run { all }, TabKind::Console(c)) => {
@@ -1086,10 +1148,11 @@ impl App {
                 c.offset = 0;
                 c.last_sql = text.clone();
                 c.run_schema = c.schema_for_run(&schemas);
+                c.run_database = c.database.clone();
                 c.paged = sql::paged_query(&text, 1, 0).map(|_| text.clone());
                 let page = c.paged.is_some().then_some(0);
                 if connected {
-                    self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql: text, page, schema: c.run_schema.clone() });
+                    self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql: text, page, schema: c.run_schema.clone(), database: c.run_database.clone() });
                 } else {
                     c.pending = Some(text);
                     needs_connect = true;
@@ -1100,7 +1163,7 @@ impl App {
                 let size = PAGE_SIZE as usize;
                 c.offset = if forward { c.offset + size } else { c.offset.saturating_sub(size) };
                 c.running = Some(Instant::now());
-                self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page: Some(c.offset), schema: c.run_schema.clone() });
+                self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page: Some(c.offset), schema: c.run_schema.clone(), database: c.run_database.clone() });
             }
             (TabAction::Save, TabKind::Console(c)) => {
                 let existing = c.saved_id.as_ref().and_then(|id| self.saved.iter_mut().find(|q| &q.id == id));
@@ -1121,19 +1184,20 @@ impl App {
                 }
             }
             (TabAction::ExportAll(format, path), kind) => {
-                let (schema, sql, table) = match kind {
+                let (database, schema, sql, table) = match kind {
                     TabKind::Console(c) => match &c.paged {
-                        Some(sql) => (c.run_schema.clone(), sql.clone(), "query_result".to_string()),
+                        Some(sql) => (c.run_database.clone(), c.run_schema.clone(), sql.clone(), "query_result".to_string()),
                         None => return,
                     },
                     TabKind::Table(t) => (
+                        None,
                         None,
                         rgrip_core::postgres::table_select_sql(&t.query()),
                         format!("{}.{}", t.schema, t.table),
                     ),
                 };
                 self.toast = Some((format!("Exporting to {}…", path.display()), theme::MUTED(), Instant::now()));
-                self.worker.send(Cmd::ExportAll { conn: tab.conn.clone(), schema, sql, format, table, path });
+                self.worker.send(Cmd::ExportAll { conn: tab.conn.clone(), database, schema, sql, format, table, path });
             }
             (TabAction::Reproject(col), TabKind::Console(c)) => {
                 let Some(query) = c.paged.clone() else { return };
@@ -1146,9 +1210,22 @@ impl App {
             }
             (TabAction::LoadSchemas, _) => {
                 let c = &mut self.conns[ci];
-                if c.schemas.is_none() {
-                    c.schemas = Some(Load::Loading);
-                    self.worker.send(Cmd::Schemas(c.cfg.id.clone()));
+                let id = c.cfg.id.clone();
+                if c.databases.is_none() {
+                    c.databases = Some(Load::Loading);
+                    self.worker.send(Cmd::Databases(id.clone()));
+                }
+                match c.other_db(database.as_deref()).map(str::to_string) {
+                    None if c.schemas.is_none() => {
+                        c.schemas = Some(Load::Loading);
+                        self.worker.send(Cmd::Schemas(id, None));
+                    }
+                    Some(db) if c.schemas_in(Some(&db)).is_none() => {
+                        c.dbs.entry(db.clone()).or_default().schemas = Some(Load::Loading);
+                        self.worker.send(Cmd::Schemas(id.clone(), Some(db.clone())));
+                        self.worker.send(Cmd::Catalog(id, Some(db)));
+                    }
+                    _ => {}
                 }
             }
             (TabAction::Notify(text), _) => self.toast = Some((text, theme::WARN(), Instant::now())),
@@ -1156,7 +1233,7 @@ impl App {
                 if c.pending.take().is_some() {
                     c.running = None;
                 } else if c.running.is_some() {
-                    self.worker.send(Cmd::Cancel(tab.conn.clone()));
+                    self.worker.send(Cmd::Cancel(tab.conn.clone(), c.run_database.clone()));
                 }
             }
             (TabAction::SaveEdits, TabKind::Table(t)) => {
@@ -1292,6 +1369,13 @@ impl App {
             for tab in &mut self.tabs {
                 if let TabKind::Console(c) = &mut tab.kind {
                     c.schema = Some(schema.clone());
+                }
+            }
+        }
+        if let Some(db) = env("RGRIP_DEMO_DATABASE") {
+            for tab in &mut self.tabs {
+                if let TabKind::Console(c) = &mut tab.kind {
+                    c.database = Some(db.clone());
                 }
             }
         }
@@ -1464,6 +1548,7 @@ impl App {
             if let Some(TabKind::Console(c)) = self.tabs.last_mut().map(|t| &mut t.kind) {
                 c.sql = sql.replace("\\n", "\n");
                 c.schema = std::env::var("RGRIP_DEMO_SCHEMA").ok();
+                c.database = std::env::var("RGRIP_DEMO_DATABASE").ok();
             }
             self.tab_action(self.active, TabAction::Run { all: true });
         }
@@ -2157,6 +2242,10 @@ impl App {
                                 };
                                 let style = match self.conn_index(&tab.conn).map(|ci| &self.conns[ci]) {
                                     Some(c) => TabStyle {
+                                        title: match &tab.kind {
+                                            TabKind::Console(k) => k.database.as_deref().and_then(|db| console_title(&tab.title, &c.cfg, db)),
+                                            TabKind::Table(_) => None,
+                                        },
                                         color: theme::conn_color(c.cfg.color),
                                         tip: format!("{} · {}:{}/{}", c.cfg.display_name(), c.cfg.host, c.cfg.port, c.cfg.database),
                                         status: status_style(&c.status).0,
@@ -2173,10 +2262,21 @@ impl App {
     }
 
     fn tab_content(&mut self, ui: &mut Ui) -> Option<TabAction> {
-        let (catalog, schemas, load_schemas) = {
-            let conn = &self.tabs.get(self.active)?.conn;
-            match self.conn_index(conn).map(|ci| &self.conns[ci]) {
-                Some(c) => (c.catalog.clone(), user_schemas(c), c.schemas.is_none() && matches!(c.status, Status::Connected(_))),
+        let (catalog, schemas, databases, default_db, load_schemas) = {
+            let tab = self.tabs.get(self.active)?;
+            let database = match &tab.kind {
+                TabKind::Console(c) => c.database.as_deref(),
+                TabKind::Table(_) => None,
+            };
+            match self.conn_index(&tab.conn).map(|ci| &self.conns[ci]) {
+                Some(c) => {
+                    let databases = match &c.databases {
+                        Some(Load::Ready(list)) => list.clone(),
+                        _ => Vec::new(),
+                    };
+                    let load = (c.schemas_in(database).is_none() || c.databases.is_none()) && matches!(c.status, Status::Connected(_));
+                    (c.catalog_in(database), user_schemas(c, database), databases, c.cfg.database.clone(), load)
+                }
                 None => Default::default(),
             }
         };
@@ -2188,7 +2288,7 @@ impl App {
         let id = tab.id;
         match &mut tab.kind {
             TabKind::Console(c) => {
-                let action = console_ui(ui, id, c, &catalog, &schemas, dirty);
+                let action = console_ui(ui, id, c, &catalog, &schemas, &databases, &default_db, dirty);
                 action.or(load_schemas.then_some(TabAction::LoadSchemas))
             }
             TabKind::Table(t) => table_ui(ui, id, t),
@@ -2196,9 +2296,19 @@ impl App {
     }
 }
 
+/// The title of a console opened as `name@database` (optionally with a
+/// ` (n)` suffix) once it targets `database` instead; `None` for other titles
+/// (saved query names).
+fn console_title(title: &str, cfg: &ConnectionConfig, database: &str) -> Option<String> {
+    let rest = title.strip_prefix(&format!("{}@{}", cfg.display_name(), cfg.database))?;
+    (rest.is_empty() || rest.starts_with(" (")).then(|| format!("{}@{database}{rest}", cfg.display_name()))
+}
+
 /// How a tab looks beyond its own title: its connection's color, tooltip
 /// and status.
 struct TabStyle {
+    /// Replaces the tab's own title (a console on another database).
+    title: Option<String>,
     color: Option<Color32>,
     tip: String,
     status: Color32,
@@ -2206,7 +2316,7 @@ struct TabStyle {
 
 impl Default for TabStyle {
     fn default() -> Self {
-        Self { color: None, tip: String::new(), status: theme::FAINT() }
+        Self { title: None, color: None, tip: String::new(), status: theme::FAINT() }
     }
 }
 
@@ -2229,7 +2339,8 @@ fn tab_button(
 
     let color = if active { theme::TEXT() } else { theme::MUTED() };
     // `*` marks unsaved changes to a saved query (as in DataGrip).
-    let title = if dirty { format!("* {}", tab.title) } else { tab.title.clone() };
+    let base = style.title.as_deref().unwrap_or(&tab.title);
+    let title = if dirty { format!("* {base}") } else { base.to_string() };
     let galley = ui.painter().layout_no_wrap(title, TextStyle::Body.resolve(ui.style()), color);
     let size = egui::vec2(PAD_L + ICON + GAP + galley.size().x + GAP + CLOSE + PAD_R, 36.0);
 
@@ -2299,7 +2410,16 @@ fn tab_button(
 }
 
 /// `dirty`: the console differs from its saved query (autosave pending).
-fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog, schemas: &[String], dirty: bool) -> Option<TabAction> {
+fn console_ui(
+    ui: &mut Ui,
+    tab_id: TabId,
+    c: &mut Console,
+    catalog: &Catalog,
+    schemas: &[String],
+    databases: &[String],
+    default_db: &str,
+    dirty: bool,
+) -> Option<TabAction> {
     let mut action = None;
     let editor_id = Id::new(("editor", tab_id));
     let keys = completion::handle_keys(ui, &mut c.popup);
@@ -2383,6 +2503,8 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog, sc
             }
             ui.add_space(8.0);
             ui.add_enabled_ui(c.running.is_none(), |ui| schema_picker(ui, tab_id, c, schemas));
+            // Right-to-left: the database ends up left of the schema.
+            ui.add_enabled_ui(c.running.is_none(), |ui| database_picker(ui, tab_id, c, databases, default_db));
         });
     });
 
@@ -2551,6 +2673,43 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog, sc
         }
     }
     action
+}
+
+/// Toolbar combo for the console's database (the connection's own until
+/// another is picked). Switching resets the schema to the new database's default.
+fn database_picker(ui: &mut Ui, tab_id: TabId, c: &mut Console, databases: &[String], default_db: &str) {
+    const FILTER_FROM: usize = 12;
+    let current = c.database.as_deref().unwrap_or(default_db).to_string();
+    let filter_id = Id::new(("database-filter", tab_id));
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(("database", tab_id))
+        .selected_text(current.clone())
+        .width(110.0)
+        .show_ui(ui, |ui| {
+            let mut filter = String::new();
+            if databases.len() > FILTER_FROM {
+                filter = ui.data_mut(|d| d.get_temp::<String>(filter_id)).unwrap_or_default();
+                let r = ui.add(TextEdit::singleline(&mut filter).hint_text("Filter…").desired_width(140.0));
+                if r.changed() {
+                    ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
+                }
+            }
+            let needle = filter.to_lowercase();
+            egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                for d in databases.iter().filter(|d| d.to_lowercase().contains(&needle)) {
+                    if ui.selectable_label(*d == current, d).clicked() {
+                        picked = Some(d.clone());
+                    }
+                }
+            });
+        })
+        .response
+        .on_hover_text("Database");
+    if let Some(d) = picked.filter(|d| *d != current) {
+        c.database = (d != default_db).then_some(d);
+        c.schema = None;
+        c.popup = None;
+    }
 }
 
 /// Toolbar combo for the console's schema. With many schemas the list gets a
@@ -3688,6 +3847,15 @@ mod tests {
     use rgrip_core::complete::CatalogTable;
 
     #[test]
+    fn console_title_follows_database() {
+        let cfg = ConnectionConfig { name: "prod".into(), database: "app".into(), ..Default::default() };
+        assert_eq!(console_title("prod@app", &cfg, "other").as_deref(), Some("prod@other"));
+        assert_eq!(console_title("prod@app (2)", &cfg, "other").as_deref(), Some("prod@other (2)"));
+        assert_eq!(console_title("my saved query", &cfg, "other"), None);
+        assert_eq!(console_title("prod@app2", &cfg, "other"), None);
+    }
+
+    #[test]
     fn related_popup() {
         let s = |v: &str| Some(v.to_string());
         let rows = |n: usize| ResultSet {
@@ -3805,7 +3973,7 @@ mod tests {
             let (console, catalog) = (&mut self.console, &self.catalog);
             let _ = self.ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    console_ui(ui, 1, console, catalog, &[], false);
+                    console_ui(ui, 1, console, catalog, &[], &[], "db", false);
                 });
             });
         }
@@ -3843,7 +4011,7 @@ mod tests {
             events,
             ..Default::default()
         };
-        let style = TabStyle { color: theme::conn_color(ConnColor::Red), tip: "Prod · h:1/db".into(), status: theme::FAINT() };
+        let style = TabStyle { title: None, color: theme::conn_color(ConnColor::Red), tip: "Prod · h:1/db".into(), status: theme::FAINT() };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.horizontal(|ui| {

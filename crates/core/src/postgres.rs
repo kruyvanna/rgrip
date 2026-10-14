@@ -247,6 +247,16 @@ impl PgConn {
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
+    /// Databases of the server a console could be pointed at.
+    pub async fn databases(&self) -> Result<Vec<String>, String> {
+        let rows = self
+            .client
+            .query("select datname::text from pg_database where not datistemplate and datallowconn order by 1", &[])
+            .await
+            .map_err(|e| format_error(&e, None))?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
     pub async fn tables(&self, schema: &str) -> Result<Vec<TableInfo>, String> {
         let rows = self
             .client

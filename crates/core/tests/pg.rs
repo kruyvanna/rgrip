@@ -24,6 +24,8 @@ async fn end_to_end() {
     };
     assert!(conn.server_info().await.unwrap().version.starts_with("PostgreSQL"));
 
+    assert!(conn.databases().await.unwrap().contains(&cfg().database));
+
     let schema = format!("rgrip_test_{}", std::process::id());
     let setup = format!(
         "create schema {schema};
