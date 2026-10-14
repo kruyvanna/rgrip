@@ -19,7 +19,7 @@ pub enum Cmd {
     Columns(ConnId, String, String),
     Catalog(ConnId),
     /// `page: Some(offset)` fetches one page of a read-only query.
-    Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize> },
+    Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize>, schema: Option<String> },
     /// `modal`: for the tab's related-rows popup rather than the tab itself.
     TableData { conn: ConnId, tab: TabId, query: TableQuery, modal: bool },
     /// Inline-edit UPDATEs, applied in one transaction.
@@ -30,7 +30,7 @@ pub enum Cmd {
     /// Download, verify and install a release over `app`.
     InstallUpdate { release: rgrip_core::update::Release, app: std::path::PathBuf },
     /// Run `sql` uncapped and write it to `path`.
-    ExportAll { conn: ConnId, sql: String, format: rgrip_core::export::Format, table: String, path: std::path::PathBuf },
+    ExportAll { conn: ConnId, schema: Option<String>, sql: String, format: rgrip_core::export::Format, table: String, path: std::path::PathBuf },
 }
 
 pub enum Ev {
@@ -173,10 +173,10 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::Catalog { conn, result });
         }
-        Cmd::Query { conn, tab, sql, page } => {
+        Cmd::Query { conn, tab, sql, page, schema } => {
             let result = match (get(&conns, &conn), page) {
-                (Ok(c), Some(offset)) => c.execute_page(&sql, offset).await,
-                (Ok(c), None) => c.execute(&sql).await,
+                (Ok(c), Some(offset)) => c.execute_page_in(schema.as_deref(), &sql, offset).await,
+                (Ok(c), None) => c.execute_in(schema.as_deref(), &sql).await,
                 (Err(e), _) => Err(e),
             };
             emit.send(Ev::QueryDone { tab, result });
@@ -203,9 +203,9 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::EditsSaved { tab, result });
         }
-        Cmd::ExportAll { conn, sql, format, table, path } => {
+        Cmd::ExportAll { conn, schema, sql, format, table, path } => {
             let result = match get(&conns, &conn) {
-                Ok(c) => c.export_to_file(&sql, format, &table, &path).await.map(|n| (path, n)),
+                Ok(c) => c.export_to_file(schema.as_deref(), &sql, format, &table, &path).await.map(|n| (path, n)),
                 Err(e) => Err(e),
             };
             emit.send(Ev::Exported(result));

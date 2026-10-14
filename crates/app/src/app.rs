@@ -98,6 +98,40 @@ struct Console {
     saved_id: Option<String>,
     /// SQL of the last run (for "Copy for AI agent").
     last_sql: String,
+    /// Schema picked in the toolbar; `None` = the default.
+    schema: Option<String>,
+    /// Schema the last run used (paging, export and queued runs reuse it).
+    run_schema: Option<String>,
+}
+
+/// Schemas a console can pick: the connection's, without system ones.
+fn user_schemas(conn: &Conn) -> Vec<String> {
+    match &conn.schemas {
+        Some(Load::Ready(list)) => list
+            .iter()
+            .filter(|s| !matches!(s.as_str(), "pg_catalog" | "information_schema") && !s.starts_with("pg_toast"))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+impl Console {
+    /// The schema unqualified names resolve in: the picked one, else `public`
+    /// (or the first schema when there is no `public`).
+    fn schema_or_default<'a>(&'a self, schemas: &'a [String]) -> &'a str {
+        match &self.schema {
+            Some(s) => s,
+            None if schemas.is_empty() || schemas.iter().any(|s| s == "public") => "public",
+            None => &schemas[0],
+        }
+    }
+
+    /// The schema to send with a run. Not picked and not known yet: `None`,
+    /// i.e. the server's own search_path.
+    fn schema_for_run(&self, schemas: &[String]) -> Option<String> {
+        (self.schema.is_some() || !schemas.is_empty()).then(|| self.schema_or_default(schemas).to_string())
+    }
 }
 
 impl Console {
@@ -118,6 +152,8 @@ impl Console {
             map: Default::default(),
             saved_id: None,
             last_sql: String::new(),
+            schema: None,
+            run_schema: None,
         }
     }
 }
@@ -355,6 +391,8 @@ enum NameTarget {
 }
 
 enum TabAction {
+    /// Load the connection's schemas (for the console's schema picker).
+    LoadSchemas,
     /// Show a message in the status bar.
     Notify(String),
     /// Wrap the console's query to add `ST_Transform(col, 4326)` and re-run.
@@ -655,7 +693,7 @@ impl App {
                 TabKind::Console(c) => {
                     if let Some(sql) = c.pending.take() {
                         let page = c.paged.is_some().then_some(c.offset);
-                        self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page });
+                        self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page, schema: c.run_schema.clone() });
                     }
                 }
                 TabKind::Table(t) if t.pending => {
@@ -949,6 +987,7 @@ impl App {
         let connected = matches!(self.conns[ci].status, Status::Connected(_));
         let mut needs_connect = false;
         let catalog = self.conns[ci].catalog.clone();
+        let schemas = user_schemas(&self.conns[ci]);
         let tab = &mut self.tabs[ti];
         match (action, &mut tab.kind) {
             (TabAction::Run { all }, TabKind::Console(c)) => {
@@ -968,7 +1007,7 @@ impl App {
                     sql::statement_at(&c.sql, at).map(|r| c.sql[r].to_string()).unwrap_or_default()
                 };
                 // Slash commands are ours, not SQL: expand before sending.
-                let text = match rgrip_core::commands::expand_all(&text, &catalog) {
+                let text = match rgrip_core::commands::expand_all(&text, &catalog, c.schema_or_default(&schemas)) {
                     Ok(t) => t,
                     Err(e) => {
                         self.toast = Some((e, theme::WARN(), Instant::now()));
@@ -986,10 +1025,11 @@ impl App {
                     .any(|k| lower.split(|ch: char| !ch.is_alphanumeric()).any(|w| w == *k));
                 c.offset = 0;
                 c.last_sql = text.clone();
+                c.run_schema = c.schema_for_run(&schemas);
                 c.paged = sql::paged_query(&text, 1, 0).map(|_| text.clone());
                 let page = c.paged.is_some().then_some(0);
                 if connected {
-                    self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql: text, page });
+                    self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql: text, page, schema: c.run_schema.clone() });
                 } else {
                     c.pending = Some(text);
                     needs_connect = true;
@@ -1000,7 +1040,7 @@ impl App {
                 let size = PAGE_SIZE as usize;
                 c.offset = if forward { c.offset + size } else { c.offset.saturating_sub(size) };
                 c.running = Some(Instant::now());
-                self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page: Some(c.offset) });
+                self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page: Some(c.offset), schema: c.run_schema.clone() });
             }
             (TabAction::Save, TabKind::Console(c)) => {
                 let existing = c.saved_id.as_ref().and_then(|id| self.saved.iter_mut().find(|q| &q.id == id));
@@ -1021,18 +1061,19 @@ impl App {
                 }
             }
             (TabAction::ExportAll(format, path), kind) => {
-                let (sql, table) = match kind {
+                let (schema, sql, table) = match kind {
                     TabKind::Console(c) => match &c.paged {
-                        Some(sql) => (sql.clone(), "query_result".to_string()),
+                        Some(sql) => (c.run_schema.clone(), sql.clone(), "query_result".to_string()),
                         None => return,
                     },
                     TabKind::Table(t) => (
+                        None,
                         rgrip_core::postgres::table_select_sql(&t.query()),
                         format!("{}.{}", t.schema, t.table),
                     ),
                 };
                 self.toast = Some((format!("Exporting to {}…", path.display()), theme::MUTED(), Instant::now()));
-                self.worker.send(Cmd::ExportAll { conn: tab.conn.clone(), sql, format, table, path });
+                self.worker.send(Cmd::ExportAll { conn: tab.conn.clone(), schema, sql, format, table, path });
             }
             (TabAction::Reproject(col), TabKind::Console(c)) => {
                 let Some(query) = c.paged.clone() else { return };
@@ -1042,6 +1083,13 @@ impl App {
                 c.view = View::Map(0);
                 c.cursor = 0..0;
                 return self.tab_action(ti, TabAction::Run { all: true });
+            }
+            (TabAction::LoadSchemas, _) => {
+                let c = &mut self.conns[ci];
+                if c.schemas.is_none() {
+                    c.schemas = Some(Load::Loading);
+                    self.worker.send(Cmd::Schemas(c.cfg.id.clone()));
+                }
             }
             (TabAction::Notify(text), _) => self.toast = Some((text, theme::WARN(), Instant::now())),
             (TabAction::Cancel, TabKind::Console(c)) => {
@@ -1256,7 +1304,7 @@ impl App {
                     let mut state = TextEdit::load_state(&ctx, id).unwrap_or_default();
                     state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(chars))));
                     state.store(&ctx, id);
-                    c.popup = complete::complete(&c.sql, at, &catalog, false).map(Popup::new);
+                    c.popup = complete::complete(&c.sql, at, &catalog, c.schema_or_default(&[]), false).map(Popup::new);
                 }
             }
         }
@@ -1843,14 +1891,20 @@ impl App {
     }
 
     fn tab_content(&mut self, ui: &mut Ui) -> Option<TabAction> {
-        let catalog = {
+        let (catalog, schemas, load_schemas) = {
             let conn = &self.tabs.get(self.active)?.conn;
-            self.conn_index(conn).map(|ci| self.conns[ci].catalog.clone()).unwrap_or_default()
+            match self.conn_index(conn).map(|ci| &self.conns[ci]) {
+                Some(c) => (c.catalog.clone(), user_schemas(c), c.schemas.is_none() && matches!(c.status, Status::Connected(_))),
+                None => Default::default(),
+            }
         };
         let tab = self.tabs.get_mut(self.active)?;
         let id = tab.id;
         match &mut tab.kind {
-            TabKind::Console(c) => console_ui(ui, id, c, &catalog),
+            TabKind::Console(c) => {
+                let action = console_ui(ui, id, c, &catalog, &schemas);
+                action.or(load_schemas.then_some(TabAction::LoadSchemas))
+            }
             TabKind::Table(t) => table_ui(ui, id, t),
         }
     }
@@ -1930,7 +1984,7 @@ fn tab_button(
     rect
 }
 
-fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) -> Option<TabAction> {
+fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog, schemas: &[String]) -> Option<TabAction> {
     let mut action = None;
     let editor_id = Id::new(("editor", tab_id));
     let keys = completion::handle_keys(ui, &mut c.popup);
@@ -1952,7 +2006,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
             if tab {
                 ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab));
             }
-            match rgrip_core::commands::expand(line, catalog) {
+            match rgrip_core::commands::expand(line, catalog, c.schema_or_default(schemas)) {
                 Ok(expanded) => {
                     let indent: String = line.chars().take_while(|ch| ch.is_whitespace()).collect();
                     let text = format!("{indent}{expanded}");
@@ -1995,6 +2049,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
             if ghost_button(ui, "Format").on_hover_text("Format selection or all  ⇧⌘F").clicked() {
                 format = true;
             }
+            schema_picker(ui, tab_id, c, schemas);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let label = if c.saved_id.is_some() { "Save" } else { "Save as…" };
                 if ghost_button(ui, label).on_hover_text("⌘S").clicked() {
@@ -2049,7 +2104,7 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
                     if let Some(r) = out.cursor_range {
                         c.cursor = r.as_sorted_char_range();
                     }
-                    update_popup(c, catalog, out.response.changed(), keys.force, previous);
+                    update_popup(c, catalog, schemas, out.response.changed(), keys.force, previous);
                     if let Some(p) = &mut c.popup {
                         let focused = out.response.has_focus();
                         match completion::show(ui, Id::new(("completion", tab_id)), p, &out, &c.sql, focused) {
@@ -2168,8 +2223,39 @@ fn console_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, catalog: &Catalog) ->
     action
 }
 
+/// Toolbar combo for the console's schema. With many schemas the list gets a
+/// filter field.
+fn schema_picker(ui: &mut Ui, tab_id: TabId, c: &mut Console, schemas: &[String]) {
+    const FILTER_FROM: usize = 12;
+    let current = c.schema_or_default(schemas).to_string();
+    let filter_id = Id::new(("schema-filter", tab_id));
+    egui::ComboBox::from_id_salt(("schema", tab_id))
+        .selected_text(current.clone())
+        .width(110.0)
+        .show_ui(ui, |ui| {
+            let mut filter = String::new();
+            if schemas.len() > FILTER_FROM {
+                filter = ui.data_mut(|d| d.get_temp::<String>(filter_id)).unwrap_or_default();
+                let r = ui.add(TextEdit::singleline(&mut filter).hint_text("Filter…").desired_width(140.0));
+                if r.changed() {
+                    ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
+                }
+            }
+            let needle = filter.to_lowercase();
+            egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                for s in schemas.iter().filter(|s| s.to_lowercase().contains(&needle)) {
+                    if ui.selectable_label(*s == current, s).clicked() {
+                        c.schema = Some(s.clone());
+                    }
+                }
+            });
+        })
+        .response
+        .on_hover_text("Schema for unqualified names");
+}
+
 /// Open, refresh or close the completion popup after the editor ran.
-fn update_popup(c: &mut Console, catalog: &Catalog, changed: bool, force: bool, previous: std::ops::Range<usize>) {
+fn update_popup(c: &mut Console, catalog: &Catalog, schemas: &[String], changed: bool, force: bool, previous: std::ops::Range<usize>) {
     if c.cursor.start != c.cursor.end {
         c.popup = None;
         return;
@@ -2178,7 +2264,7 @@ fn update_popup(c: &mut Console, catalog: &Catalog, changed: bool, force: bool, 
     let before = c.sql[..byte].chars().next_back();
     let in_word = before.is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '"' | '/'));
     if force || (changed && in_word) {
-        c.popup = complete::complete(&c.sql, byte, catalog, force).map(Popup::new);
+        c.popup = complete::complete(&c.sql, byte, catalog, c.schema_or_default(schemas), force).map(Popup::new);
     } else if changed || previous != c.cursor {
         // Typed a separator, or moved the cursor away.
         c.popup = None;
@@ -3199,7 +3285,7 @@ mod tests {
             let (console, catalog) = (&mut self.console, &self.catalog);
             let _ = self.ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    console_ui(ui, 1, console, catalog);
+                    console_ui(ui, 1, console, catalog, &[]);
                 });
             });
         }

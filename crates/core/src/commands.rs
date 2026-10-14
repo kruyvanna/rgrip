@@ -40,7 +40,7 @@ fn ident(s: &str) -> String {
 }
 
 /// `schema.table` or `table` as typed, if it names a catalog table.
-fn find_table<'a>(catalog: &'a Catalog, arg: &str) -> Option<&'a CatalogTable> {
+fn find_table<'a>(catalog: &'a Catalog, arg: &str, schema: &str) -> Option<&'a CatalogTable> {
     let arg = arg.trim_matches('"');
     match arg.split_once('.') {
         Some((schema, name)) => catalog
@@ -49,10 +49,10 @@ fn find_table<'a>(catalog: &'a Catalog, arg: &str) -> Option<&'a CatalogTable> {
             .find(|t| t.schema.eq_ignore_ascii_case(schema) && t.name.eq_ignore_ascii_case(name)),
         None => {
             let matches: Vec<_> = catalog.tables.iter().filter(|t| t.name.eq_ignore_ascii_case(arg)).collect();
-            // Prefer an exact-case match, then `public`.
+            // Prefer an exact-case match, then the console's schema, then `public`.
             let exact = matches.iter().filter(|t| t.name == arg);
-            exact.clone().find(|t| t.schema == "public").or(exact.clone().next())
-                .or(matches.iter().find(|t| t.schema == "public")).or(matches.first()).copied()
+            exact.clone().find(|t| t.schema == schema).or(exact.clone().find(|t| t.schema == "public")).or(exact.clone().next())
+                .or(matches.iter().find(|t| t.schema == schema)).or(matches.iter().find(|t| t.schema == "public")).or(matches.first()).copied()
         }
     }
 }
@@ -72,8 +72,8 @@ fn geometry_field(t: &CatalogTable) -> Option<&str> {
 }
 
 /// SQL for a table reference as typed (keeps schema qualification).
-fn table_sql(t: &CatalogTable, typed: &str) -> String {
-    if typed.contains('.') || t.schema != "public" {
+fn table_sql(t: &CatalogTable, typed: &str, schema: &str) -> String {
+    if typed.contains('.') || (t.schema != "public" && t.schema != schema) {
         format!("{}.{}", ident(&t.schema), ident(&t.name))
     } else {
         ident(&t.name)
@@ -81,7 +81,7 @@ fn table_sql(t: &CatalogTable, typed: &str) -> String {
 }
 
 /// Expand a command line such as `/con_4326 parcels geom`.
-pub fn expand(line: &str, catalog: &Catalog) -> Result<String, String> {
+pub fn expand(line: &str, catalog: &Catalog, schema: &str) -> Result<String, String> {
     let line = line.trim();
     let body = line.strip_prefix('/').ok_or("Commands start with /")?;
     let words = split_args(body);
@@ -95,7 +95,7 @@ pub fn expand(line: &str, catalog: &Catalog) -> Result<String, String> {
     for w in words {
         if let Ok(n) = w.parse::<u64>() {
             number = Some(n);
-        } else if table.is_none() && let Some(t) = find_table(catalog, w) {
+        } else if table.is_none() && let Some(t) = find_table(catalog, w, schema) {
             table = Some((t, w));
         } else {
             other.push(w);
@@ -105,7 +105,7 @@ pub fn expand(line: &str, catalog: &Catalog) -> Result<String, String> {
     // `/cmd <table> <field>` with a table the catalog doesn't know (not
     // loaded yet, or a typo Postgres will report): use it as typed.
     let (from, field) = match (table, other.as_slice()) {
-        (Some((t, typed)), [] | [_]) => (Some(table_sql(t, typed)), other.first().copied()),
+        (Some((t, typed)), [] | [_]) => (Some(table_sql(t, typed, schema)), other.first().copied()),
         // A lone unknown word is the table for table-only commands, the
         // field otherwise.
         (None, [t]) if matches!(command.name, "top" | "count" | "srid") => (Some(t.to_string()), None),
@@ -188,12 +188,12 @@ pub fn is_command_line(line: &str) -> bool {
 
 /// Expand every command line in `sql` (for Run all / selection), keeping
 /// the other lines as they are.
-pub fn expand_all(sql: &str, catalog: &Catalog) -> Result<String, String> {
+pub fn expand_all(sql: &str, catalog: &Catalog, schema: &str) -> Result<String, String> {
     let mut out = Vec::new();
     for line in sql.split('\n') {
         if is_command_line(line) {
             let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-            let expanded = expand(line, catalog)?;
+            let expanded = expand(line, catalog, schema)?;
             out.push(format!("{indent}{expanded}"));
         } else {
             out.push(line.to_string());
@@ -225,7 +225,21 @@ mod tests {
     }
 
     fn x(line: &str) -> String {
-        expand(line, &catalog()).unwrap()
+        expand(line, &catalog(), "public").unwrap()
+    }
+
+    #[test]
+    fn console_schema_is_preferred() {
+        let mut c = catalog();
+        c.tables.push(CatalogTable { schema: "gis".into(), name: "roads".into(), kind: TableKind::Table, columns: vec![("gid".into(), "integer".into())] });
+        // Unqualified `roads` is public's by default, gis's in a gis console.
+        assert_eq!(expand("/top roads", &c, "public").unwrap(), "select *\nfrom roads\nlimit 100;");
+        assert_eq!(expand("/top roads", &c, "gis").unwrap(), "select *\nfrom roads\nlimit 100;");
+        assert_eq!(find_table(&c, "roads", "gis").unwrap().schema, "gis");
+        assert_eq!(find_table(&c, "roads", "public").unwrap().schema, "public");
+        // Tables only in the console schema stay unqualified.
+        assert!(expand("/top zones", &c, "gis").unwrap().contains("from zones\n"));
+        assert!(expand("/top zones", &c, "public").unwrap().contains("from gis.zones\n"));
     }
 
     #[test]
@@ -261,9 +275,9 @@ mod tests {
         assert_eq!(x("/top roads 20"), "select *\nfrom roads\nlimit 20;");
         assert_eq!(x("/count notes"), "select count(*)\nfrom notes;");
         assert_eq!(x("/srid parcels"), "select ST_SRID(shape) as srid, count(*)\nfrom parcels\ngroup by 1\norder by 2 desc;");
-        assert!(expand("/top", &catalog()).unwrap_err().contains("Usage: /top <table>"));
-        assert!(expand("/nope", &catalog()).unwrap_err().contains("Unknown command"));
-        assert!(expand("/con_4326 a b c", &catalog()).unwrap_err().contains("Unexpected argument"));
+        assert!(expand("/top", &catalog(), "public").unwrap_err().contains("Usage: /top <table>"));
+        assert!(expand("/nope", &catalog(), "public").unwrap_err().contains("Unknown command"));
+        assert!(expand("/con_4326 a b c", &catalog(), "public").unwrap_err().contains("Unexpected argument"));
     }
 
     #[test]
@@ -287,11 +301,11 @@ mod tests {
     fn expands_every_command_line() {
         let sql = "/con_4326_2 parcels\n/* note */\nselect 1;\n  /count notes";
         assert_eq!(
-            expand_all(sql, &catalog()).unwrap(),
+            expand_all(sql, &catalog(), "public").unwrap(),
             "select t.*, ST_SetSRID(st_astext(t.shape)::text, 4326) as shape_4326\nfrom parcels t;\n/* note */\nselect 1;\n  select count(*)\nfrom notes;"
         );
-        assert_eq!(expand_all("select 4 / 2;", &catalog()).unwrap(), "select 4 / 2;");
-        assert!(expand_all("/top", &catalog()).unwrap_err().contains("Usage"));
+        assert_eq!(expand_all("select 4 / 2;", &catalog(), "public").unwrap(), "select 4 / 2;");
+        assert!(expand_all("/top", &catalog(), "public").unwrap_err().contains("Usage"));
         assert!(!is_command_line("/* comment */"));
     }
 

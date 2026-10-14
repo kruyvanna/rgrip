@@ -22,6 +22,9 @@ pub struct PgConn {
     tls: MakeRustlsConnect,
     /// Kept alive for as long as the connection.
     tunnel: Option<crate::ssh::Tunnel>,
+    /// Held from setting `search_path` to the end of the query, so consoles
+    /// sharing this connection can't change each other's schema in between.
+    schema_lock: tokio::sync::Mutex<()>,
 }
 
 fn tls_err(what: &str) -> impl Fn(rustls::Error) -> String + '_ {
@@ -205,7 +208,7 @@ impl PgConn {
             let _ = connection.await;
         });
         let cancel = client.cancel_token();
-        Ok(Self { client, cancel, tls, tunnel })
+        Ok(Self { client, cancel, tls, tunnel, schema_lock: Default::default() })
     }
 
     pub async fn server_info(&self) -> Result<ServerInfo, String> {
@@ -408,6 +411,40 @@ impl PgConn {
         })
     }
 
+    /// Point `search_path` at `schema` (then `public`); `None` restores the
+    /// session default. Postgres accepts a missing schema in `search_path`,
+    /// so existence is checked in the same round trip.
+    async fn set_schema(&self, schema: Option<&str>) -> Result<(), String> {
+        let Some(schema) = schema else {
+            return self.client.batch_execute("reset search_path").await.map_err(|e| format_error(&e, None));
+        };
+        let path = if schema == "public" { "public".to_string() } else { format!("{}, public", crate::sql::quote_ident(schema)) };
+        let sql = format!(
+            "set search_path to {path}; select 1 from pg_namespace where nspname = '{}'",
+            schema.replace('\'', "''")
+        );
+        let messages = self.client.simple_query(&sql).await.map_err(|e| format_error(&e, None))?;
+        if messages.iter().any(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_))) {
+            Ok(())
+        } else {
+            Err(format!("Schema '{schema}' no longer exists. Pick another schema in the toolbar."))
+        }
+    }
+
+    /// [`execute`](Self::execute) with unqualified names resolved in `schema`.
+    pub async fn execute_in(&self, schema: Option<&str>, sql: &str) -> Result<QueryOutput, String> {
+        let _guard = self.schema_lock.lock().await;
+        self.set_schema(schema).await?;
+        self.execute(sql).await
+    }
+
+    /// [`execute_page`](Self::execute_page) with unqualified names resolved in `schema`.
+    pub async fn execute_page_in(&self, schema: Option<&str>, stmt: &str, offset: usize) -> Result<QueryOutput, String> {
+        let _guard = self.schema_lock.lock().await;
+        self.set_schema(schema).await?;
+        self.execute_page(stmt, offset).await
+    }
+
     /// One page of a read-only query, fetched server-side with LIMIT/OFFSET.
     /// `truncated` on the result means there is a next page. Statements that
     /// can't be paged run normally (capped).
@@ -441,12 +478,17 @@ impl PgConn {
     /// Returns the number of rows written.
     pub async fn export_to_file(
         &self,
+        schema: Option<&str>,
         sql: &str,
         format: crate::export::Format,
         table: &str,
         path: &std::path::Path,
     ) -> Result<usize, String> {
-        let out = self.execute_capped(sql, usize::MAX).await?;
+        let out = {
+            let _guard = self.schema_lock.lock().await;
+            self.set_schema(schema).await?;
+            self.execute_capped(sql, usize::MAX).await?
+        };
         let rs = out.statements.into_iter().find_map(|s| s.result).ok_or("The query returned no rows to export")?;
         let text = crate::export::export(&rs, format, table);
         std::fs::write(path, text).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
