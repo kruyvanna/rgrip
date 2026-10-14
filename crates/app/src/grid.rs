@@ -5,6 +5,7 @@
 //! once per result set, so large pages with very long values stay smooth.
 
 use crate::theme;
+use crate::widgets::{self, Icon};
 use eframe::egui::{self, Align, Id, Label, Layout, RichText, Sense, Stroke, TextStyle, Ui};
 use egui_extras::{Column, TableBuilder};
 use rgrip_core::ResultSet;
@@ -31,8 +32,20 @@ pub struct GridState {
     scroll_y: f32,
     /// One-shot horizontal offset for the scrolling half (screenshot scenes).
     pub scroll_x: Option<f32>,
+    /// The "Go to column" popup, when open.
+    goto: Option<Goto>,
+    /// Column briefly highlighted after a jump, with the time it started.
+    flash: Option<(usize, f64)>,
     cache: Option<Cache>,
 }
+
+struct Goto {
+    query: String,
+    highlight: usize,
+    focus: bool,
+}
+
+const FLASH_SECS: f64 = 1.2;
 
 /// Where the rows came from, for "Copy as SQL" / "Copy for AI agent".
 pub struct Source<'a> {
@@ -182,6 +195,7 @@ pub fn show(
     let rest: Vec<usize> = (0..rs.columns.len()).filter(|c| !frozen.contains(c)).collect();
     let scroll_y = state.scroll_y;
     let scroll_x = state.scroll_x.take();
+    let flash_state = state.flash;
     let cache = state.cache(rs);
     let cache_widths = cache.widths.clone();
     let changes = edit.as_ref().map(|e| e.changes);
@@ -189,6 +203,15 @@ pub fn show(
     let mut close_editor = false;
 
     let mut freeze: Option<Freeze> = None;
+    let mut open_goto = false;
+    let mut goto_anchor: Option<egui::Rect> = None;
+    let now = ui.input(|i| i.time);
+    // Highlight strength of the jumped-to column, fading out.
+    let flash = flash_state.map(|(c, t)| (c, (1.0 - (now - t) / FLASH_SECS).clamp(0.0, 1.0) as f32)).filter(|f| f.1 > 0.0);
+    if flash.is_some() {
+        ui.ctx().request_repaint();
+    }
+    let sortable = sort.is_some();
 
     // Draws one half: the frozen part (row numbers + frozen columns, no
     // horizontal scroll) or the scrolling rest. Returns its vertical offset.
@@ -216,23 +239,47 @@ pub fn show(
         let out = table
             .header(row_h + 4.0, |mut header| {
                 if gutter {
-                    header.col(|ui| header_bg(ui));
+                    header.col(|ui| {
+                        header_bg(ui);
+                        let rect = ui.max_rect();
+                        goto_anchor = Some(rect);
+                        let r = ui.interact(rect, id.with("goto-btn"), Sense::click());
+                        let tint = if r.hovered() { theme::TEXT() } else { theme::FAINT() };
+                        widgets::paint_icon_tinted(ui.painter(), rect.center(), Icon::Columns, Some(tint));
+                        if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Go to column  ⌘J").clicked() {
+                            open_goto = true;
+                        }
+                    });
                 }
                 for &i in cols {
                     let name = &rs.columns[i];
                     header.col(|ui| {
                         header_bg(ui);
-                        ui.add_space(PAD);
-                        let mut text = name.clone();
-                        if let Some(s) = sort.as_ref().filter(|s| s.column == name) {
-                            text += if s.ascending { "  ↑" } else { "  ↓" };
+                        let rect = ui.max_rect();
+                        if let Some((c, a)) = flash && c == i {
+                            ui.painter().rect_filled(rect, 0.0, theme::ACCENT().gamma_multiply(0.4 * a));
                         }
-                        let r = ui.add(
-                            Label::new(RichText::new(text).size(12.5).color(theme::TEXT()))
-                                .truncate()
-                                .selectable(false)
-                                .sense(Sense::click()),
-                        );
+                        ui.add_space(PAD);
+                        // Keep the right edge free for the sort indicator.
+                        let label_w = if sortable { rect.width() - PAD - 22.0 } else { rect.width() - PAD };
+                        let r = ui
+                            .allocate_ui_with_layout(egui::vec2(label_w.max(8.0), rect.height()), Layout::left_to_right(Align::Center), |ui| {
+                                ui.add(
+                                    Label::new(RichText::new(name).size(12.5).color(theme::TEXT()))
+                                        .truncate()
+                                        .selectable(false)
+                                        .sense(Sense::click()),
+                                )
+                            })
+                            .inner;
+                        if let Some(s) = sort.as_ref() {
+                            let c = egui::pos2(rect.right() - 13.0, rect.center().y);
+                            if s.column == name {
+                                paint_sort(ui.painter(), c, Some(s.ascending), theme::ACCENT());
+                            } else if ui.rect_contains_pointer(rect) {
+                                paint_sort(ui.painter(), c, None, theme::FAINT());
+                            }
+                        }
                         if r.clicked() {
                             event = Some(GridEvent::HeaderClicked(i));
                         }
@@ -250,6 +297,10 @@ pub fn show(
                                 .clicked()
                             {
                                 freeze = Some(Freeze::Add(name.clone()));
+                                ui.close();
+                            }
+                            if ui.button("Go to column…").clicked() {
+                                open_goto = true;
                                 ui.close();
                             }
                             if !frozen.is_empty() && ui.button("Unfreeze all").clicked() {
@@ -280,6 +331,9 @@ pub fn show(
                         let (_, cell_resp) = row.col(|ui| {
                             if pending.is_some() {
                                 ui.painter().rect_filled(ui.max_rect(), 0.0, theme::ACCENT().gamma_multiply(0.16));
+                            }
+                            if let Some((c, a)) = flash && c == col {
+                                ui.painter().rect_filled(ui.max_rect(), 0.0, theme::ACCENT().gamma_multiply(0.16 * a));
                             }
                             ui.add_space(PAD);
                             match editing {
@@ -378,6 +432,19 @@ pub fn show(
         None => {}
     }
     state.menu_col = menu_col;
+    if flash.is_none() {
+        state.flash = None;
+    }
+    if open_goto && state.goto.is_none() {
+        state.goto = Some(Goto { query: String::new(), highlight: 0, focus: true });
+    }
+    if state.goto.is_some() {
+        let anchor = goto_anchor.unwrap_or_else(|| ui.min_rect());
+        if let Some(col) = goto_popup(ui, id, rs, state, anchor) {
+            jump(state, col, &rest, &cache_widths, now);
+            ui.ctx().request_repaint();
+        }
+    }
     if close_editor && let Some(e) = edit.as_mut() {
         *e.editor = None;
     }
@@ -404,6 +471,109 @@ pub fn show(
         state.anchor = Some(i);
     }
     event
+}
+
+/// Scroll the scrolling half so `col` is near its left edge, and flash it.
+fn jump(state: &mut GridState, col: usize, rest: &[usize], widths: &[f32], now: f64) {
+    if let Some(p) = rest.iter().position(|&c| c == col) {
+        state.scroll_x = Some(rest[..p].iter().map(|&c| widths[c]).sum());
+    }
+    state.flash = Some((col, now));
+}
+
+/// The "Go to column" popup. Returns the chosen column.
+fn goto_popup(ui: &mut Ui, id: Id, rs: &ResultSet, state: &mut GridState, anchor: egui::Rect) -> Option<usize> {
+    let ctx = ui.ctx().clone();
+    let g = state.goto.as_mut()?;
+    // Keys first, so the text field doesn't swallow them.
+    let (up, down, enter, esc) = ctx.input_mut(|i| {
+        let n = egui::Modifiers::NONE;
+        (i.consume_key(n, egui::Key::ArrowUp), i.consume_key(n, egui::Key::ArrowDown), i.consume_key(n, egui::Key::Enter), i.consume_key(n, egui::Key::Escape))
+    });
+    if esc {
+        state.goto = None;
+        return None;
+    }
+    let mut chosen = None;
+    let mut moved = false;
+    let area = egui::Area::new(id.with("goto"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(anchor.left_bottom() + egui::vec2(4.0, 2.0))
+        .show(&ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(260.0);
+                let te = ui.add(egui::TextEdit::singleline(&mut g.query).hint_text("Search column…").desired_width(f32::INFINITY));
+                if g.focus {
+                    te.request_focus();
+                    g.focus = false;
+                }
+                let q = g.query.to_lowercase();
+                let matches: Vec<usize> = (0..rs.columns.len()).filter(|&c| q.is_empty() || rs.columns[c].to_lowercase().contains(&q)).collect();
+                if te.changed() {
+                    g.highlight = 0;
+                }
+                if down && g.highlight + 1 < matches.len() {
+                    g.highlight += 1;
+                    moved = true;
+                }
+                if up && g.highlight > 0 {
+                    g.highlight -= 1;
+                    moved = true;
+                }
+                g.highlight = g.highlight.min(matches.len().saturating_sub(1));
+                if enter {
+                    chosen = matches.get(g.highlight).copied();
+                }
+                ui.add_space(4.0);
+                if matches.is_empty() {
+                    ui.label(RichText::new("No matching columns").size(12.0).color(theme::MUTED()));
+                }
+                egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                    for (k, &c) in matches.iter().enumerate() {
+                        let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::click());
+                        if k == g.highlight {
+                            ui.painter().rect_filled(rect, 4.0, theme::ACCENT().gamma_multiply(0.18));
+                            if moved {
+                                ui.scroll_to_rect(rect, None);
+                            }
+                        } else if r.hovered() {
+                            ui.painter().rect_filled(rect, 4.0, theme::HOVER());
+                        }
+                        let p = ui.painter().with_clip_rect(rect.with_max_x(rect.right() - 40.0));
+                        p.text(rect.left_center() + egui::vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, &rs.columns[c], egui::FontId::proportional(12.5), theme::TEXT());
+                        ui.painter().text(rect.right_center() - egui::vec2(8.0, 0.0), egui::Align2::RIGHT_CENTER, format!("#{}", c + 1), egui::FontId::proportional(11.0), theme::MUTED());
+                        if r.clicked() {
+                            chosen = Some(c);
+                        }
+                    }
+                });
+            });
+        });
+    // A press outside the popup dismisses it.
+    let outside = ctx.input(|i| i.pointer.any_pressed()) && ctx.pointer_interact_pos().is_some_and(|p| !area.response.rect.contains(p));
+    if chosen.is_some() || outside {
+        state.goto = None;
+    }
+    chosen
+}
+
+/// A small filled triangle: up/down when sorted, both when `asc` is None.
+fn paint_sort(p: &egui::Painter, c: egui::Pos2, asc: Option<bool>, color: egui::Color32) {
+    let tri = |c: egui::Pos2, up: bool, s: f32| {
+        let d = if up { -1.0 } else { 1.0 };
+        p.add(egui::Shape::convex_polygon(
+            vec![c + egui::vec2(-s, -d * s * 0.6), c + egui::vec2(s, -d * s * 0.6), c + egui::vec2(0.0, d * s * 0.8)],
+            color,
+            Stroke::NONE,
+        ));
+    };
+    match asc {
+        Some(a) => tri(c, a, 4.0),
+        None => {
+            tri(c + egui::vec2(0.0, -3.5), true, 3.0);
+            tri(c + egui::vec2(0.0, 3.5), false, 3.0);
+        }
+    }
 }
 
 /// Copy / export actions for the given rows.
@@ -703,6 +873,9 @@ fn keyboard(ui: &Ui, rs: &ResultSet, state: &mut GridState) {
         return;
     }
     let hovered = ui.ui_contains_pointer();
+    if (hovered || !state.selection.is_empty()) && state.goto.is_none() && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::J)) {
+        state.goto = Some(Goto { query: String::new(), highlight: 0, focus: true });
+    }
     if (hovered || !state.selection.is_empty()) && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
         state.selection = (0..rs.rows.len()).collect();
     }
@@ -938,6 +1111,47 @@ mod tests {
         assert_eq!(st.selection.iter().copied().collect::<Vec<_>>(), [expected], "scroll {y}, row_h {row_h}");
         // Freezing survives a new result with the same column names.
         assert_eq!(st.frozen, ["note"]);
+    }
+
+    fn key(k: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn go_to_column() {
+        let rs = ResultSet {
+            columns: (0..40).map(|i| format!("col_{i}")).collect(),
+            rows: (0..3).map(|r| (0..40).map(|c| Some(format!("{r}:{c}"))).collect()).collect(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut st = GridState::default();
+        let none = egui::Modifiers::NONE;
+        frame(&ctx, &rs, &mut st, vec![]);
+        // Hover the grid so the shortcut applies.
+        frame(&ctx, &rs, &mut st, vec![egui::Event::PointerMoved(egui::pos2(300.0, 200.0))]);
+        assert!(st.goto.is_none());
+        frame_mods(&ctx, &rs, &mut st, vec![key(egui::Key::J, egui::Modifiers::COMMAND)], egui::Modifiers::COMMAND);
+        assert!(st.goto.is_some(), "cmd+J opens the popup");
+        frame(&ctx, &rs, &mut st, vec![]);
+        frame(&ctx, &rs, &mut st, vec![egui::Event::Text("col_3".into())]);
+        frame(&ctx, &rs, &mut st, vec![]);
+        assert_eq!(st.goto.as_ref().unwrap().query, "col_3");
+        // Esc closes without jumping.
+        frame(&ctx, &rs, &mut st, vec![key(egui::Key::Escape, none)]);
+        assert!(st.goto.is_none());
+        assert!(st.scroll_x.is_none() && st.flash.is_none());
+        // Reopen, filter to col_3x (10 matches), move down once and jump.
+        st.goto = Some(Goto { query: String::new(), highlight: 0, focus: true });
+        frame(&ctx, &rs, &mut st, vec![]);
+        frame(&ctx, &rs, &mut st, vec![egui::Event::Text("COL_3".into())]);
+        frame(&ctx, &rs, &mut st, vec![key(egui::Key::ArrowDown, none)]);
+        assert_eq!(st.goto.as_ref().unwrap().highlight, 1);
+        frame(&ctx, &rs, &mut st, vec![key(egui::Key::Enter, none)]);
+        assert!(st.goto.is_none(), "enter closes");
+        // Matches are col_3, col_30.. so the highlighted one is col_30.
+        assert_eq!(st.flash.map(|f| f.0), Some(30));
+        assert!(st.scroll_x.is_some_and(|x| x > 500.0), "scroll_x {:?}", st.scroll_x);
     }
 
     #[test]

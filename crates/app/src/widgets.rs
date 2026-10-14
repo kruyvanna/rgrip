@@ -32,6 +32,8 @@ pub enum Icon {
     Copy,
     /// Close (an ×).
     Close,
+    /// Column list (three vertical bars).
+    Columns,
 }
 
 pub fn paint_icon(p: &Painter, c: Pos2, icon: Icon) {
@@ -149,6 +151,14 @@ pub fn paint_icon_tinted(p: &Painter, c: Pos2, icon: Icon, tint: Option<Color32>
             let s = Stroke::new(1.4, color_or(theme::FAINT()));
             p.line_segment([c + vec2(-4.0, -4.0), c + vec2(4.0, 4.0)], s);
             p.line_segment([c + vec2(-4.0, 4.0), c + vec2(4.0, -4.0)], s);
+        }
+        Icon::Columns => {
+            let s = thin(color_or(theme::FAINT()));
+            let r = Rect::from_center_size(c, vec2(12.0, 10.0));
+            p.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Inside);
+            for dx in [-2.0, 2.0] {
+                p.line_segment([pos2(c.x + dx, r.top()), pos2(c.x + dx, r.bottom())], s);
+            }
         }
         Icon::Console => {
             let s = thin(theme::ACCENT());
