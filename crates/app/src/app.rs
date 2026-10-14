@@ -1734,7 +1734,6 @@ impl App {
             ui.add_space(4.0);
             ui.label(RichText::new("Explorer").size(12.0).color(theme::MUTED()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                self.settings_menu(ui, actions);
                 if icon_button(ui, "+").on_hover_text("New connection").clicked() {
                     actions.push(Action::NewConnection);
                 }
@@ -1854,6 +1853,11 @@ impl App {
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
+                    let gear = title_button(ui, "Settings", |ui, r, hot| {
+                        let tint = if hot { theme::TEXT() } else { theme::MUTED() };
+                        crate::icons::paint(ui, crate::icons::Svg::Settings, r.shrink(5.0), tint);
+                    });
+                    self.settings_menu(&gear, actions);
                     if title_button(ui, "Sponsor rgrip", |ui, r, hot| {
                         let tint = if hot { Color32::from_rgb(0xea, 0x4a, 0xaa) } else { theme::MUTED() };
                         crate::icons::paint(ui, crate::icons::Svg::Heart, r.shrink(5.5), tint);
@@ -1913,10 +1917,10 @@ impl App {
             });
     }
 
-    fn settings_menu(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
+    /// The settings menu, opened from the title bar's gear button.
+    fn settings_menu(&self, button: &egui::Response, actions: &mut Vec<Action>) {
         const WIDTH: f32 = 260.0;
-        let button = icon_button(ui, "⚙").on_hover_text("Settings");
-        let mut popup = egui::Popup::menu(&button);
+        let mut popup = egui::Popup::menu(button);
         // Debug builds: RGRIP_DEMO_MENU=settings opens this menu (screenshots).
         if cfg!(debug_assertions) && std::env::var("RGRIP_DEMO_MENU").as_deref() == Ok("settings") {
             popup = popup.open(true);

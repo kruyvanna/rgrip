@@ -35,6 +35,7 @@ pub enum Svg {
     Undo,
     FolderOpen,
     Text,
+    Settings,
 }
 
 impl Svg {
@@ -63,6 +64,7 @@ impl Svg {
             Svg::Ban => lucide(r#"<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>"#),
             Svg::Undo => lucide(r#"<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/>"#),
             Svg::FolderOpen => lucide(r#"<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>"#),
+            Svg::Settings => lucide(r#"<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>"#),
             Svg::Text => lucide(r#"<path d="M17 6.1H3"/><path d="M21 12.1H3"/><path d="M15.1 18H3"/>"#),
             Svg::Heart => std::borrow::Cow::Borrowed(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>"#),
         }
@@ -137,7 +139,7 @@ mod tests {
 
     #[test]
     fn icons_rasterize() {
-        for svg in [Svg::GitHub, Svg::Refresh, Svg::Heart, Svg::X, Svg::CopyX, Svg::ArrowRightToLine, Svg::CircleX, Svg::Terminal, Svg::Link, Svg::Power, Svg::Droplet, Svg::Pencil, Svg::Trash, Svg::Table, Svg::Copy, Svg::Image, Svg::Bot, Svg::Download, Svg::GitBranch, Svg::Pin, Svg::Search, Svg::Ban, Svg::Undo, Svg::FolderOpen, Svg::Text] {
+        for svg in [Svg::GitHub, Svg::Refresh, Svg::Heart, Svg::X, Svg::CopyX, Svg::ArrowRightToLine, Svg::CircleX, Svg::Terminal, Svg::Link, Svg::Power, Svg::Droplet, Svg::Pencil, Svg::Trash, Svg::Table, Svg::Copy, Svg::Image, Svg::Bot, Svg::Download, Svg::GitBranch, Svg::Pin, Svg::Search, Svg::Ban, Svg::Undo, Svg::FolderOpen, Svg::Text, Svg::Settings] {
             let img = rasterize(svg, 32).expect("valid svg");
             assert!(img.pixels.iter().any(|p| p.a() > 200), "drew something");
         }
