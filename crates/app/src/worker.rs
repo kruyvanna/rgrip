@@ -14,23 +14,26 @@ pub enum Cmd {
     Connect(ConnectionConfig),
     Disconnect(ConnId),
     Test(ConnectionConfig),
-    Schemas(ConnId),
+    /// `Some(db)`: another database of the same server.
+    Schemas(ConnId, Option<String>),
+    Databases(ConnId),
     Tables(ConnId, String),
     Columns(ConnId, String, String),
-    Catalog(ConnId),
+    Catalog(ConnId, Option<String>),
+    /// `database`: `None` = the connection's own database.
     /// `page: Some(offset)` fetches one page of a read-only query.
-    Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize>, schema: Option<String> },
+    Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize>, schema: Option<String>, database: Option<String> },
     /// `modal`: for the tab's related-rows popup rather than the tab itself.
     TableData { conn: ConnId, tab: TabId, query: TableQuery, modal: bool },
     /// Inline-edit UPDATEs, applied in one transaction.
     SaveEdits { conn: ConnId, tab: TabId, statements: Vec<String> },
-    Cancel(ConnId),
+    Cancel(ConnId, Option<String>),
     /// Look for a newer release.
     CheckUpdate,
     /// Download, verify and install a release over `app`.
     InstallUpdate { release: rgrip_core::update::Release, app: std::path::PathBuf },
     /// Run `sql` uncapped and write it to `path`.
-    ExportAll { conn: ConnId, schema: Option<String>, sql: String, format: rgrip_core::export::Format, table: String, path: std::path::PathBuf },
+    ExportAll { conn: ConnId, database: Option<String>, schema: Option<String>, sql: String, format: rgrip_core::export::Format, table: String, path: std::path::PathBuf },
 }
 
 pub enum Ev {
@@ -38,10 +41,11 @@ pub enum Ev {
     Connected { conn: ConnId, version: String },
     ConnectFailed { conn: ConnId, error: String },
     TestResult(Result<String, String>),
-    Schemas { conn: ConnId, result: Result<Vec<String>, String> },
+    Schemas { conn: ConnId, database: Option<String>, result: Result<Vec<String>, String> },
+    Databases { conn: ConnId, result: Result<Vec<String>, String> },
     Tables { conn: ConnId, schema: String, result: Result<Vec<TableInfo>, String> },
     Columns { conn: ConnId, schema: String, table: String, result: Result<Vec<ColumnInfo>, String> },
-    Catalog { conn: ConnId, result: Result<Catalog, String> },
+    Catalog { conn: ConnId, database: Option<String>, result: Result<Catalog, String> },
     QueryDone { tab: TabId, result: Result<QueryOutput, String> },
     /// `columns`: the table's columns (primary key and types, for editing).
     /// `relations`: foreign keys from and to the table.
@@ -61,7 +65,21 @@ pub struct Worker {
     rx: mpsc::Receiver<Ev>,
 }
 
-type Conns = Arc<Mutex<HashMap<ConnId, Arc<PgConn>>>>;
+/// The main connection of each `ConnId`, plus connections to other databases
+/// of the same server, opened on demand for consoles that picked one.
+#[derive(Clone, Default)]
+struct Conns {
+    main: Arc<Mutex<HashMap<ConnId, Arc<PgConn>>>>,
+    extra: Arc<Mutex<HashMap<(ConnId, String), Arc<PgConn>>>>,
+    /// Configs of connected connections, to open the extra ones from.
+    cfgs: Arc<Mutex<HashMap<ConnId, ConnectionConfig>>>,
+}
+
+/// Key of the extra connection for `database`; `None` when the main
+/// connection serves it (no database picked, or the configured one).
+fn extra_key(conn: &str, database: Option<&str>, default: &str) -> Option<(ConnId, String)> {
+    database.filter(|d| *d != default).map(|d| (conn.to_string(), d.to_string()))
+}
 
 #[derive(Clone)]
 struct Emitter {
@@ -112,11 +130,41 @@ impl Worker {
 }
 
 fn get(conns: &Conns, id: &str) -> Result<Arc<PgConn>, String> {
-    match conns.lock().unwrap().get(id) {
+    match conns.main.lock().unwrap().get(id) {
         Some(c) if !c.is_closed() => Ok(c.clone()),
         Some(_) => Err("Connection closed".into()),
         None => Err("Not connected".into()),
     }
+}
+
+/// The connection serving `database` of `id`, connecting to it if needed.
+async fn get_db(conns: &Conns, id: &str, database: Option<&str>) -> Result<Arc<PgConn>, String> {
+    let main = get(conns, id)?;
+    let Some(cfg) = conns.cfgs.lock().unwrap().get(id).cloned() else { return Ok(main) };
+    let Some(key) = extra_key(id, database, &cfg.database) else { return Ok(main) };
+    if let Some(c) = conns.extra.lock().unwrap().get(&key)
+        && !c.is_closed()
+    {
+        return Ok(c.clone());
+    }
+    let cfg = ConnectionConfig { database: key.1.clone(), ..cfg };
+    let c = Arc::new(PgConn::connect(&cfg).await.map_err(|e| format!("Could not connect to database {}: {e}", key.1))?);
+    let mut extra = conns.extra.lock().unwrap();
+    // A concurrent run may have connected meanwhile: share that one.
+    match extra.get(&key) {
+        Some(other) if !other.is_closed() => Ok(other.clone()),
+        _ => {
+            extra.insert(key, c.clone());
+            Ok(c)
+        }
+    }
+}
+
+/// Drop every connection of `id`; dropping a client closes it.
+fn close_all(conns: &Conns, id: &str) {
+    conns.main.lock().unwrap().remove(id);
+    conns.cfgs.lock().unwrap().remove(id);
+    conns.extra.lock().unwrap().retain(|(c, _), _| c != id);
 }
 
 async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
@@ -128,15 +176,16 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             match result {
                 Ok((c, version)) => {
-                    conns.lock().unwrap().insert(cfg.id.clone(), Arc::new(c));
+                    close_all(&conns, &cfg.id);
+                    conns.cfgs.lock().unwrap().insert(cfg.id.clone(), cfg.clone());
+                    conns.main.lock().unwrap().insert(cfg.id.clone(), Arc::new(c));
                     emit.send(Ev::Connected { conn: cfg.id, version });
                 }
                 Err(error) => emit.send(Ev::ConnectFailed { conn: cfg.id, error }),
             }
         }
         Cmd::Disconnect(id) => {
-            // Dropping the client closes the connection.
-            conns.lock().unwrap().remove(&id);
+            close_all(&conns, &id);
         }
         Cmd::Test(cfg) => {
             let result = match PgConn::connect(&cfg).await {
@@ -145,12 +194,19 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::TestResult(result));
         }
-        Cmd::Schemas(conn) => {
-            let result = match get(&conns, &conn) {
+        Cmd::Schemas(conn, database) => {
+            let result = match get_db(&conns, &conn, database.as_deref()).await {
                 Ok(c) => c.schemas().await,
                 Err(e) => Err(e),
             };
-            emit.send(Ev::Schemas { conn, result });
+            emit.send(Ev::Schemas { conn, database, result });
+        }
+        Cmd::Databases(conn) => {
+            let result = match get(&conns, &conn) {
+                Ok(c) => c.databases().await,
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::Databases { conn, result });
         }
         Cmd::Tables(conn, schema) => {
             let result = match get(&conns, &conn) {
@@ -166,15 +222,15 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::Columns { conn, schema, table, result });
         }
-        Cmd::Catalog(conn) => {
-            let result = match get(&conns, &conn) {
+        Cmd::Catalog(conn, database) => {
+            let result = match get_db(&conns, &conn, database.as_deref()).await {
                 Ok(c) => c.catalog().await,
                 Err(e) => Err(e),
             };
-            emit.send(Ev::Catalog { conn, result });
+            emit.send(Ev::Catalog { conn, database, result });
         }
-        Cmd::Query { conn, tab, sql, page, schema } => {
-            let result = match (get(&conns, &conn), page) {
+        Cmd::Query { conn, tab, sql, page, schema, database } => {
+            let result = match (get_db(&conns, &conn, database.as_deref()).await, page) {
                 (Ok(c), Some(offset)) => c.execute_page_in(schema.as_deref(), &sql, offset).await,
                 (Ok(c), None) => c.execute_in(schema.as_deref(), &sql).await,
                 (Err(e), _) => Err(e),
@@ -203,8 +259,8 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::EditsSaved { tab, result });
         }
-        Cmd::ExportAll { conn, schema, sql, format, table, path } => {
-            let result = match get(&conns, &conn) {
+        Cmd::ExportAll { conn, database, schema, sql, format, table, path } => {
+            let result = match get_db(&conns, &conn, database.as_deref()).await {
                 Ok(c) => c.export_to_file(schema.as_deref(), &sql, format, &table, &path).await.map(|n| (path, n)),
                 Err(e) => Err(e),
             };
@@ -227,10 +283,28 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::UpdateInstalled(result));
         }
-        Cmd::Cancel(conn) => {
-            if let Ok(c) = get(&conns, &conn) {
+        Cmd::Cancel(conn, database) => {
+            // Never opens a connection: a query only runs on an existing one.
+            let default = conns.cfgs.lock().unwrap().get(&conn).map(|c| c.database.clone()).unwrap_or_default();
+            let target = match extra_key(&conn, database.as_deref(), &default) {
+                Some(k) => conns.extra.lock().unwrap().get(&k).cloned(),
+                None => get(&conns, &conn).ok(),
+            };
+            if let Some(c) = target {
                 let _ = c.cancel().await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extra_key;
+
+    #[test]
+    fn main_connection_serves_the_default_database() {
+        assert_eq!(extra_key("c", None, "app"), None);
+        assert_eq!(extra_key("c", Some("app"), "app"), None);
+        assert_eq!(extra_key("c", Some("other"), "app"), Some(("c".into(), "other".into())));
     }
 }
