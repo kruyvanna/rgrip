@@ -1,4 +1,5 @@
 use crate::grid::{self, GridEvent, GridState, Sort};
+use crate::icons::Svg;
 use crate::worker::{Cmd, ConnId, Ev, TabId, Worker};
 use crate::widgets::{self, Icon, TreeRow};
 use crate::{highlight, theme};
@@ -1904,20 +1905,20 @@ impl App {
             let preview: String = q.sql.lines().take(12).collect::<Vec<_>>().join("\n");
             resp.on_hover_text(RichText::new(preview).monospace().size(11.5)).context_menu(|ui| {
                 menu_layout(ui);
-                if ui.button("Open").clicked() {
+                if crate::icons::menu_item(ui, Svg::Terminal, "Open", true).clicked() {
                     actions.push(Action::OpenSaved(i));
                     ui.close();
                 }
-                if ui.button("Rename…").clicked() {
+                if crate::icons::menu_item(ui, Svg::Pencil, "Rename…", true).clicked() {
                     actions.push(Action::RenameSaved(i));
                     ui.close();
                 }
-                if ui.button("Reveal in Finder").clicked() {
+                if crate::icons::menu_item(ui, Svg::FolderOpen, "Reveal in Finder", true).clicked() {
                     actions.push(Action::RevealSaved(i));
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(RichText::new("Move to Trash").color(theme::ERROR())).clicked() {
+                if crate::icons::danger_item(ui, Svg::Trash, "Move to Trash").clicked() {
                     actions.push(Action::DeleteSaved(i));
                     ui.close();
                 }
@@ -2095,8 +2096,9 @@ impl Tree<'_> {
         if resp.clicked() && !open && matches!(conn.status, Status::Disconnected | Status::Failed(_)) {
             actions.push(Action::Connect(ci));
         }
-        resp.on_hover_text(format!("{}@{}:{}/{}", conn.cfg.user, conn.cfg.host, conn.cfg.port, conn.cfg.database))
-            .context_menu(|ui| conn_menu(ui, ci, conn, actions));
+        let resp = resp.on_hover_text(format!("{}@{}:{}/{}", conn.cfg.user, conn.cfg.host, conn.cfg.port, conn.cfg.database));
+        demo_open_menu(ui, "RGRIP_DEMO_CONN_MENU", ci, &resp);
+        resp.context_menu(|ui| conn_menu(ui, ci, conn, actions));
         if !open {
             return;
         }
@@ -2178,11 +2180,11 @@ impl Tree<'_> {
         }
         resp.context_menu(|ui| {
             menu_layout(ui);
-            if ui.button("Open data").clicked() {
+            if crate::icons::menu_item(ui, Svg::Table, "Open data", true).clicked() {
                 actions.push(Action::OpenTable(ci, schema.to_string(), t.name.clone()));
                 ui.close();
             }
-            if ui.button("Copy name").clicked() {
+            if crate::icons::menu_item(ui, Svg::Copy, "Copy name", true).clicked() {
                 ui.ctx().copy_text(format!("{}.{}", sql::quote_ident(schema), sql::quote_ident(&t.name)));
                 ui.close();
             }
@@ -2212,6 +2214,22 @@ impl Tree<'_> {
     }
 }
 
+/// Screenshot scenes (debug builds): `<var>=<index>` opens that item's
+/// context menu once, as if right-clicked.
+fn demo_open_menu(ui: &Ui, var: &'static str, index: usize, resp: &egui::Response) {
+    if !cfg!(debug_assertions) || std::env::var(var).ok().and_then(|v| v.parse::<usize>().ok()) != Some(index) {
+        return;
+    }
+    static OPENED: std::sync::Mutex<Vec<&str>> = std::sync::Mutex::new(Vec::new());
+    let mut opened = OPENED.lock().unwrap();
+    if !opened.contains(&var) {
+        opened.push(var);
+        let at = resp.rect.left_center() + egui::vec2(60.0, 6.0);
+        #[allow(deprecated)] // the Popup API has no "open at" for context menus
+        ui.ctx().memory_mut(|m| m.open_popup_at(egui::Popup::default_response_id(resp), at));
+    }
+}
+
 /// Context menus: wide enough for their longest item, never wrapping
 /// ("Copy connection URL" used to break over four lines).
 pub(crate) fn menu_layout(ui: &mut Ui) {
@@ -2221,11 +2239,11 @@ pub(crate) fn menu_layout(ui: &mut Ui) {
 
 fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
     menu_layout(ui);
-    if ui.button("New console").clicked() {
+    if crate::icons::menu_item(ui, Svg::Terminal, "New console", true).clicked() {
         actions.push(Action::NewConsole(ci));
         ui.close();
     }
-    ui.menu_button("Copy connection URL", |ui| {
+    crate::icons::submenu(ui, Svg::Link, "Copy connection URL", |ui| {
         if ui.button("Without password").clicked() {
             ui.ctx().copy_text(rgrip_core::conn_string::to_url(&conn.cfg, false));
             ui.close();
@@ -2236,21 +2254,21 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
         }
     });
     if matches!(conn.status, Status::Connected(_)) {
-        if ui.button("Refresh").clicked() {
+        if crate::icons::menu_item(ui, Svg::Refresh, "Refresh", true).clicked() {
             actions.push(Action::Refresh(ci));
             ui.close();
         }
-        if ui.button("Disconnect").clicked() {
+        if crate::icons::menu_item(ui, Svg::Power, "Disconnect", true).clicked() {
             actions.push(Action::Disconnect(ci));
             ui.close();
         }
-    } else if ui.button("Connect").clicked() {
+    } else if crate::icons::menu_item(ui, Svg::Power, "Connect", true).clicked() {
         actions.push(Action::Connect(ci));
         ui.close();
     }
     ui.separator();
     // Quicker than the dialog: tint this connection's tabs.
-    ui.menu_button("Color", |ui| {
+    crate::icons::submenu(ui, Svg::Droplet, "Color", |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for c in rgrip_core::ConnColor::ALL {
@@ -2262,13 +2280,12 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
             }
         });
     })
-    .response
     .on_hover_text("Tint this connection's tabs (e.g. red for production)");
-    if ui.button("Edit…").clicked() {
+    if crate::icons::menu_item(ui, Svg::Pencil, "Edit…", true).clicked() {
         actions.push(Action::Edit(ci));
         ui.close();
     }
-    if ui.button(RichText::new("Delete").color(theme::ERROR())).clicked() {
+    if crate::icons::danger_item(ui, Svg::Trash, "Delete").clicked() {
         actions.push(Action::Delete(ci));
         ui.close();
     }
@@ -2450,19 +2467,20 @@ fn tab_button(
         actions.push(Action::ActivateTab(i));
     }
     let tab_resp = if style.tip.is_empty() { tab_resp } else { tab_resp.on_hover_text(&style.tip) };
+    demo_open_menu(ui, "RGRIP_DEMO_TAB_MENU", i, &tab_resp);
     tab_resp.context_menu(|ui| {
         menu_layout(ui);
-        let mut item = |ui: &mut Ui, label: &str, enabled: bool, which: CloseWhich| {
-            if ui.add_enabled(enabled, Button::new(label)).clicked() {
+        let mut item = |ui: &mut Ui, icon: Svg, label: &str, enabled: bool, which: CloseWhich| {
+            if crate::icons::menu_item(ui, icon, label, enabled).clicked() {
                 actions.push(Action::Close(which));
                 ui.close();
             }
         };
-        item(ui, "Close", true, CloseWhich::One(i));
-        item(ui, "Close others", count > 1, CloseWhich::Others(i));
-        item(ui, "Close tabs to the right", i + 1 < count, CloseWhich::ToTheRight(i));
+        item(ui, Svg::X, "Close", true, CloseWhich::One(i));
+        item(ui, Svg::CopyX, "Close others", count > 1, CloseWhich::Others(i));
+        item(ui, Svg::ArrowRightToLine, "Close tabs to the right", i + 1 < count, CloseWhich::ToTheRight(i));
         ui.separator();
-        item(ui, "Close all", true, CloseWhich::All);
+        item(ui, Svg::CircleX, "Close all", true, CloseWhich::All);
     });
     rect
 }

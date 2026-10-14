@@ -297,23 +297,24 @@ pub fn show(
                         crate::app::menu_layout(ui);
                             ui.label(RichText::new(name).small().color(theme::MUTED()));
                             if is_frozen {
-                                if ui.button("Unfreeze column").clicked() {
+                                if crate::icons::menu_item(ui, crate::icons::Svg::Pin, "Unfreeze column", true).clicked() {
                                     freeze = Some(Freeze::Remove(name.clone()));
                                     ui.close();
                                 }
                             } else if ui
-                                .add_enabled(rest.len() > 1, egui::Button::new("Freeze column"))
+                                .add_enabled_ui(rest.len() > 1, |ui| crate::icons::menu_item(ui, crate::icons::Svg::Pin, "Freeze column", rest.len() > 1))
+                                .inner
                                 .on_hover_text("Keep it on the left while scrolling sideways")
                                 .clicked()
                             {
                                 freeze = Some(Freeze::Add(name.clone()));
                                 ui.close();
                             }
-                            if ui.button("Go to column…").clicked() {
+                            if crate::icons::menu_item(ui, crate::icons::Svg::Search, "Go to column…  ⌘J", true).clicked() {
                                 open_goto = true;
                                 ui.close();
                             }
-                            if !frozen.is_empty() && ui.button("Unfreeze all").clicked() {
+                            if !frozen.is_empty() && crate::icons::menu_item(ui, crate::icons::Svg::Pin, "Unfreeze all", true).clicked() {
                                 freeze = Some(Freeze::Clear);
                                 ui.close();
                             }
@@ -389,15 +390,15 @@ pub fn show(
                             let pending = e.changes.get(&(i, col));
                             let value = pending.map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
                             ui.label(RichText::new(&rs.columns[col]).small().color(theme::MUTED()));
-                            if ui.button("Edit cell").on_hover_text("Or double-click it").clicked() {
+                            if crate::icons::menu_item(ui, crate::icons::Svg::Pencil, "Edit cell", true).on_hover_text("Or double-click it").clicked() {
                                 *e.editor = Some(CellEditor::open(i, col, value));
                                 ui.close();
                             }
-                            if ui.add_enabled(value.is_some(), egui::Button::new("Set NULL")).clicked() {
+                            if crate::icons::menu_item(ui, crate::icons::Svg::Ban, "Set NULL", value.is_some()).clicked() {
                                 event = Some(GridEvent::Change { row: i, col, value: None });
                                 ui.close();
                             }
-                            if pending.is_some() && ui.button("Revert cell").clicked() {
+                            if pending.is_some() && crate::icons::menu_item(ui, crate::icons::Svg::Undo, "Revert cell", true).clicked() {
                                 event = Some(GridEvent::Revert { row: i, col });
                                 ui.close();
                             }
@@ -602,7 +603,7 @@ fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, g
     let noun = if n == 1 { "row".to_string() } else { format!("{n} rows") };
     let mut event = None;
     if !source.relations.is_empty() {
-        ui.menu_button("Related", |ui| {
+        crate::icons::submenu(ui, crate::icons::Svg::GitBranch, "Related", |ui| {
             for (i, r) in source.relations.iter().enumerate() {
                 let cols: Vec<&str> = r.columns.iter().map(|(here, there)| if r.outgoing { here.as_str() } else { there.as_str() }).collect();
                 let other = if r.other_schema == "public" { r.other_table.clone() } else { format!("{}.{}", r.other_schema, r.other_table) };
@@ -621,19 +622,19 @@ fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, g
         });
         ui.separator();
     }
-    if ui.button(format!("Copy {noun}")).on_hover_text("Tab-separated  ⌘C").clicked() {
+    if crate::icons::menu_item(ui, crate::icons::Svg::Copy, format!("Copy {noun}"), true).on_hover_text("Tab-separated  ⌘C").clicked() {
         ui.ctx().copy_text(rows_tsv(rs, rows, false));
         ui.close();
     }
-    if ui.button("Copy with header").clicked() {
+    if crate::icons::menu_item(ui, crate::icons::Svg::Text, "Copy with header", true).clicked() {
         ui.ctx().copy_text(rows_tsv(rs, rows, true));
         ui.close();
     }
-    if ui.button("Copy as image").on_hover_text("PNG of the table: paste into Telegram, Slack…").clicked() {
+    if crate::icons::menu_item(ui, crate::icons::Svg::Image, "Copy as image", true).on_hover_text("PNG of the table: paste into Telegram, Slack…").clicked() {
         crate::snapshot::copy_table(ui.ctx(), &subset(), source.table);
         ui.close();
     }
-    ui.menu_button("Copy as", |ui| {
+    crate::icons::submenu(ui, crate::icons::Svg::Copy, "Copy as", |ui| {
         let item = |ui: &mut Ui, label: &str, text: &dyn Fn() -> String| {
             if ui.button(label).clicked() {
                 ui.ctx().copy_text(text());
@@ -650,8 +651,7 @@ fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, g
         item(ui, "SQL INSERT", &|| export::export(&subset(), Format::SqlInsert, source.table));
         item(ui, "SQL  select … where id in (…)", &|| export::where_in(&subset(), source.table));
     });
-    if ui
-        .button("Copy for AI agent")
+    if crate::icons::menu_item(ui, crate::icons::Svg::Bot, "Copy for AI agent", true)
         .on_hover_text("Markdown with the query, column types and rows: paste into an agent")
         .clicked()
     {
@@ -659,7 +659,7 @@ fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, g
         ui.close();
     }
     ui.separator();
-    ui.menu_button(format!("Save {noun} as"), |ui| {
+    crate::icons::submenu(ui, crate::icons::Svg::Download, &format!("Save {noun} as"), |ui| {
         for f in Format::ALL.into_iter().filter(|f| *f != Format::GeoJson || geom) {
             if ui.button(format!("{}…", f.label())).clicked() {
                 ui.close();
