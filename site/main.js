@@ -19,7 +19,16 @@ fetch("https://api.github.com/repos/yoouTaro/rgrip/releases?per_page=5")
   })
   .catch(() => {});
 
-// Reduced motion: keep the clips on their poster frame.
-if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
-  document.querySelectorAll("video[autoplay]").forEach((v) => { v.removeAttribute("autoplay"); v.pause(); });
-}
+// The clips are the product demo, so they play even with Reduce Motion on;
+// then they get controls so they can be paused. Also start any clip the
+// browser didn't autoplay once it scrolls into view.
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const clips = document.querySelectorAll("video[autoplay]");
+clips.forEach((v) => { if (reduce) v.controls = true; });
+const io = new IntersectionObserver((entries) => {
+  entries.forEach((e) => { if (e.isIntersecting && e.target.paused && !e.target.dataset.userPaused) e.target.play().catch(() => (e.target.controls = true)); });
+}, { threshold: 0.3 });
+clips.forEach((v) => {
+  io.observe(v);
+  v.addEventListener("pause", () => { if (!v.ended && document.visibilityState === "visible" && v.controls) v.dataset.userPaused = "1"; });
+});
