@@ -705,7 +705,8 @@ impl App {
             .iter()
             .filter(|t| t.conn == conn && matches!(t.kind, TabKind::Console(_)))
             .count();
-        let name = self.conns[ci].cfg.display_name();
+        let cfg = &self.conns[ci].cfg;
+        let name = format!("{}@{}", cfg.display_name(), cfg.database);
         let title = if n == 0 { name } else { format!("{name} ({})", n + 1) };
         self.push_tab(
             conn,
@@ -1626,6 +1627,10 @@ impl App {
             } else if let Some(c) = self.tabs.get(self.active).and_then(|t| self.conn_index(&t.conn)).map(|ci| &self.conns[ci]) {
                 let (color, text) = status_style(&c.status);
                 widgets::status_dot(ui, color);
+                if let Some(col) = theme::conn_color(c.cfg.color) {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(3.0, 12.0), Sense::hover());
+                    ui.painter().rect_filled(r, 1.5, col);
+                }
                 ui.label(
                     RichText::new(format!("{}   {}:{}/{}   {text}", c.cfg.display_name(), c.cfg.host, c.cfg.port, c.cfg.database))
                         .size(11.5)
@@ -1774,7 +1779,7 @@ impl Tree<'_> {
             _ => None,
         };
         let name = conn.cfg.display_name();
-        let (resp, open) = self.row(ui, &key, 0, true, Icon::Database(dot), &name, detail, actions);
+        let (resp, open) = self.row(ui, &key, 0, true, Icon::Database(dot, theme::conn_color(conn.cfg.color)), &name, detail, actions);
         if resp.clicked() && !open && matches!(conn.status, Status::Disconnected | Status::Failed(_)) {
             actions.push(Action::Connect(ci));
         }
@@ -1929,7 +1934,15 @@ impl App {
                                     }),
                                     TabKind::Table(_) => false,
                                 };
-                                tab_button(ui, i, tab, i == self.active, dirty, self.tabs.len(), actions);
+                                let style = match self.conn_index(&tab.conn).map(|ci| &self.conns[ci]) {
+                                    Some(c) => TabStyle {
+                                        color: theme::conn_color(c.cfg.color),
+                                        tip: format!("{} · {}:{}/{}", c.cfg.display_name(), c.cfg.host, c.cfg.port, c.cfg.database),
+                                        status: status_style(&c.status).0,
+                                    },
+                                    None => TabStyle::default(),
+                                };
+                                tab_button(ui, i, tab, &style, i == self.active, dirty, self.tabs.len(), actions);
                             }
                         });
                     });
@@ -1952,11 +1965,26 @@ impl App {
     }
 }
 
+/// How a tab looks beyond its own title: its connection's color, tooltip
+/// and status.
+struct TabStyle {
+    color: Option<Color32>,
+    tip: String,
+    status: Color32,
+}
+
+impl Default for TabStyle {
+    fn default() -> Self {
+        Self { color: None, tip: String::new(), status: theme::FAINT() }
+    }
+}
+
 /// One tab in the tab bar. Returns the tab's rect.
 fn tab_button(
     ui: &mut Ui,
     i: usize,
     tab: &Tab,
+    style: &TabStyle,
     active: bool,
     dirty: bool,
     count: usize,
@@ -1991,10 +2019,18 @@ fn tab_button(
     } else {
         theme::BG()
     };
+    let fill = match style.color {
+        Some(col) => theme::tint(fill, col, if active { 0.30 } else if tab_resp.hovered() { 0.20 } else { 0.12 }),
+        None => fill,
+    };
     painter.rect_filled(rect, egui::CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, fill);
+    if let (Some(col), true) = (style.color, active) {
+        let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.5), rect.right_bottom());
+        painter.rect_filled(bar, 0.0, col);
+    }
     let cy = rect.center().y;
     let icon = match tab.kind {
-        TabKind::Console(_) => Icon::Console,
+        TabKind::Console(_) => Icon::Database(style.status, style.color),
         TabKind::Table(_) => Icon::Table,
     };
     widgets::paint_icon(painter, egui::pos2(rect.left() + PAD_L + ICON / 2.0, cy), icon);
@@ -2010,6 +2046,7 @@ fn tab_button(
     } else if tab_resp.clicked() {
         actions.push(Action::ActivateTab(i));
     }
+    let tab_resp = if style.tip.is_empty() { tab_resp } else { tab_resp.on_hover_text(&style.tip) };
     tab_resp.context_menu(|ui| {
         let mut item = |ui: &mut Ui, label: &str, enabled: bool, which: CloseWhich| {
             if ui.add_enabled(enabled, Button::new(label)).clicked() {
@@ -2960,6 +2997,8 @@ fn note(ui: &mut Ui, text: &str) {
     ui.add(egui::Label::new(RichText::new(text).size(11.5).color(theme::FAINT())).wrap());
 }
 
+const COLOR_HINT: &str = "Tint this connection's tabs (e.g. red for production)";
+
 fn general_form(ui: &mut Ui, d: &mut Dialog) {
     form_grid(ui, "conn-url", |ui| {
         let edit = TextEdit::singleline(&mut d.url).hint_text(hint("postgres://user:pass@host:5432/db"));
@@ -2993,6 +3032,17 @@ fn general_form(ui: &mut Ui, d: &mut Dialog) {
         field(ui, "Database", TextEdit::singleline(&mut d.cfg.database));
         field(ui, "User", TextEdit::singleline(&mut d.cfg.user));
         field(ui, "Password", TextEdit::singleline(&mut d.cfg.password).password(true));
+        ui.label(RichText::new("Color").color(theme::MUTED())).on_hover_text(COLOR_HINT);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for c in ConnColor::ALL {
+                let resp = widgets::color_swatch(ui, theme::conn_color(c), d.cfg.color == c).on_hover_text(format!("{}: {COLOR_HINT}", c.label()));
+                if resp.clicked() {
+                    d.cfg.color = c;
+                }
+            }
+        });
+        ui.end_row();
     });
     if d.cfg.ssh.enabled {
         ui.add_space(6.0);
@@ -3319,11 +3369,12 @@ mod tests {
             events,
             ..Default::default()
         };
+        let style = TabStyle { color: theme::conn_color(ConnColor::Red), tip: "Prod · h:1/db".into(), status: theme::FAINT() };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     for (i, t) in tabs.iter().enumerate() {
-                        rects.push(tab_button(ui, i, t, i == 0, false, tabs.len(), &mut actions));
+                        rects.push(tab_button(ui, i, t, &style, i == 0, false, tabs.len(), &mut actions));
                     }
                 });
             });

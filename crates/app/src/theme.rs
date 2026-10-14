@@ -402,6 +402,35 @@ pub fn is_dark() -> bool {
     IS_DARK.load(Ordering::Relaxed)
 }
 
+/// Swatch color for a connection color; `None` for no color.
+pub fn conn_color(c: rgrip_core::ConnColor) -> Option<Color32> {
+    use rgrip_core::ConnColor::*;
+    Some(match (c, is_dark()) {
+        (None, _) => return Option::None,
+        (Red, true) => hex(0xF7768E),
+        (Red, false) => hex(0xD6334F),
+        (Orange, true) => hex(0xFF9E64),
+        (Orange, false) => hex(0xD9701F),
+        (Yellow, true) => hex(0xE0AF68),
+        (Yellow, false) => hex(0xB8860B),
+        (Green, true) => hex(0x9ECE6A),
+        (Green, false) => hex(0x3E8E41),
+        (Blue, true) => hex(0x7AA2F7),
+        (Blue, false) => hex(0x2F6FDE),
+        (Purple, true) => hex(0xBB9AF7),
+        (Purple, false) => hex(0x8250DF),
+        (Gray, true) => hex(0x9AA0A6),
+        (Gray, false) => hex(0x6B7078),
+    })
+}
+
+/// `color` laid over `base` at strength `t`; the background only moves a
+/// little, so tab text stays readable in both themes.
+pub fn tint(base: Color32, color: Color32, t: f32) -> Color32 {
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color32::from_rgb(mix(base.r(), color.r()), mix(base.g(), color.g()), mix(base.b(), color.b()))
+}
+
 pub fn BG() -> Color32 { p().bg }
 pub fn SURFACE() -> Color32 { p().surface }
 pub fn BORDER() -> Color32 { p().border }

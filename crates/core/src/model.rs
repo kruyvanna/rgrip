@@ -69,6 +69,47 @@ impl Default for SshConfig {
     }
 }
 
+/// Tint for a connection's tabs (e.g. red for production).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnColor {
+    #[default]
+    None,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Blue,
+    Purple,
+    Gray,
+}
+
+impl ConnColor {
+    pub const ALL: [ConnColor; 8] = [
+        ConnColor::None,
+        ConnColor::Red,
+        ConnColor::Orange,
+        ConnColor::Yellow,
+        ConnColor::Green,
+        ConnColor::Blue,
+        ConnColor::Purple,
+        ConnColor::Gray,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ConnColor::None => "None",
+            ConnColor::Red => "Red",
+            ConnColor::Orange => "Orange",
+            ConnColor::Yellow => "Yellow",
+            ConnColor::Green => "Green",
+            ConnColor::Blue => "Blue",
+            ConnColor::Purple => "Purple",
+            ConnColor::Gray => "Gray",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -91,6 +132,8 @@ pub struct ConnectionConfig {
     pub ssl_client_key: String,
     #[serde(default)]
     pub ssh: SshConfig,
+    #[serde(default)]
+    pub color: ConnColor,
 }
 
 impl Default for ConnectionConfig {
@@ -112,6 +155,7 @@ impl Default for ConnectionConfig {
             ssl_client_cert: String::new(),
             ssl_client_key: String::new(),
             ssh: SshConfig::default(),
+            color: ConnColor::None,
         }
     }
 }

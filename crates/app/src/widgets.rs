@@ -9,7 +9,8 @@ use eframe::egui::{
 
 #[derive(Clone, Copy)]
 pub enum Icon {
-    Database(Color32),
+    /// Connection status color, and the connection's tint if it has one.
+    Database(Color32, Option<Color32>),
     Schema,
     Table,
     View,
@@ -45,11 +46,12 @@ pub fn paint_icon_tinted(p: &Painter, c: Pos2, icon: Icon, tint: Option<Color32>
     let thin = |color| Stroke::new(1.2, color);
     let color_or = |default: Color32| tint.unwrap_or(default);
     match icon {
-        Icon::Database(status) => {
+        Icon::Database(status, color) => {
             // Cylinder: body plus two rims, with a status dot.
             let body = Rect::from_center_size(c, vec2(10.0, 11.0));
-            p.rect_stroke(body, CornerRadius::same(3), thin(theme::MUTED()), StrokeKind::Inside);
-            p.line_segment([pos2(body.left() + 1.0, c.y - 1.5), pos2(body.right() - 1.0, c.y - 1.5)], thin(theme::MUTED()));
+            let line = color.unwrap_or(theme::MUTED());
+            p.rect_stroke(body, CornerRadius::same(3), thin(line), StrokeKind::Inside);
+            p.line_segment([pos2(body.left() + 1.0, c.y - 1.5), pos2(body.right() - 1.0, c.y - 1.5)], thin(line));
             p.circle_filled(pos2(body.right(), body.bottom()), 3.0, theme::BG());
             p.circle_filled(pos2(body.right(), body.bottom()), 2.2, status);
         }
@@ -252,4 +254,27 @@ pub fn tree_note(ui: &mut Ui, depth: usize, text: &str, color: Color32) {
         ui.add_space(indent);
         ui.add(egui::Label::new(egui::RichText::new(text).size(12.0).color(color)).wrap());
     });
+}
+
+/// A color choice for the connection dialog: a filled circle, or for
+/// "none" an outlined circle with a slash. Ringed when selected.
+pub fn color_swatch(ui: &mut Ui, color: Option<Color32>, selected: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+    let p = ui.painter();
+    let c = rect.center();
+    match color {
+        Some(col) => {
+            p.circle_filled(c, 7.0, col);
+        }
+        None => {
+            p.circle_stroke(c, 6.5, Stroke::new(1.2, theme::FAINT()));
+            p.line_segment([c + vec2(-4.0, 4.0), c + vec2(4.0, -4.0)], Stroke::new(1.2, theme::FAINT()));
+        }
+    }
+    if selected {
+        p.circle_stroke(c, 10.0, Stroke::new(1.5, color.unwrap_or(theme::MUTED())));
+    } else if resp.hovered() {
+        p.circle_stroke(c, 10.0, Stroke::new(1.0, theme::BORDER()));
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
