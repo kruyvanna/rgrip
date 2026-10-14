@@ -459,6 +459,12 @@ impl App {
         self.conns.iter().position(|c| c.cfg.id == id)
     }
 
+    /// The catalog of a tab's connection; empty until it has loaded.
+    fn tab_catalog(&self, id: TabId) -> Arc<Catalog> {
+        let conn = self.tabs.iter().find(|t| t.id == id).map(|t| t.conn.clone());
+        conn.and_then(|c| self.conn_index(&c)).map(|ci| self.conns[ci].catalog.clone()).unwrap_or_default()
+    }
+
     fn tab_mut(&mut self, id: TabId) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|t| t.id == id)
     }
@@ -556,17 +562,23 @@ impl App {
                         self.worker.send(Cmd::Catalog(conn));
                     }
                 }
-                Ev::TablePage { tab, modal: true, result, relations, .. } => {
+                Ev::TablePage { tab, modal: true, result, columns, mut relations } => {
+                    let catalog = self.tab_catalog(tab);
                     if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab)
                         && let Some(rel) = &mut t.related
                     {
+                        let inferred = rgrip_core::relations::infer(&rel.target.schema, &rel.target.table, &columns, &catalog, &relations);
+                        relations.extend(inferred);
                         rel.grid = GridState::fresh(&rel.grid);
                         rel.data = Some(result);
                         rel.relations = relations;
                     }
                 }
-                Ev::TablePage { tab, modal: false, result, columns, relations } => {
+                Ev::TablePage { tab, modal: false, result, columns, mut relations } => {
+                    let catalog = self.tab_catalog(tab);
                     if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab) {
+                        let inferred = rgrip_core::relations::infer(&t.schema, &t.table, &columns, &catalog, &relations);
+                        relations.extend(inferred);
                         t.loading = false;
                         t.grid = GridState::fresh(&t.grid);
                         t.data = Some(result);
@@ -3146,6 +3158,7 @@ mod tests {
             other_schema: "public".into(),
             other_table: table.into(),
             columns: cols.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+            inferred: false,
         };
         // users ← posts.user_id: posts whose user_id is one of these ids.
         let posts = rel(false, "posts", &[("id", "user_id")]);

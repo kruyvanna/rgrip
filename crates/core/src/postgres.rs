@@ -308,6 +308,7 @@ impl PgConn {
                     other_schema: r.get(2),
                     other_table: r.get(3),
                     columns: here.into_iter().zip(there).collect(),
+                    inferred: false,
                 }
             })
             .collect())
