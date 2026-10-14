@@ -146,3 +146,7 @@ kbd.k{min-width:0;padding:1px 5px;border-width:1px;border-radius:5px;font-size:.
 /* The striped placeholder sits behind images; the wide card has padding
    around its image, so hide it there. */
 .shot.shot-wide::before{display:none}
+
+/* Modifier keys as line icons (the font's ⌘ ⇧ ↩ glyphs render tiny). */
+.kicon{width:.95em;height:.95em;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-.12em}
+kbd .kicon + .kicon{margin-left:.15em}
