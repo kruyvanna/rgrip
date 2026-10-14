@@ -2948,6 +2948,12 @@ impl App {
     /// name, description and SQL template on the right, with a live preview.
     fn commands_editor_ui(&mut self, ctx: &egui::Context) {
         use rgrip_core::commands::{self, SlashCommand};
+        const LIST_W: f32 = 190.0;
+        const GAP: f32 = 10.0;
+        let field_label = |ui: &mut Ui, text: &str| {
+            ui.label(RichText::new(text).size(12.0).color(theme::MUTED()));
+            ui.add_space(2.0);
+        };
         let Some(ed) = &mut self.commands_editor else { return };
         // Preview against the active tab's connection, if it has a catalog.
         let catalog = self.tabs.get(self.active).and_then(|t| self.conns.iter().find(|c| c.cfg.id == t.conn)).map(|c| c.catalog.clone()).unwrap_or_default();
@@ -2960,20 +2966,22 @@ impl App {
                 ui.label(RichText::new("Type /name in the editor, then Tab to expand (or run it directly).").size(12.5).color(theme::MUTED()));
                 ui.add_space(12.0);
                 ui.horizontal_top(|ui| {
-                    // List.
+                    // List: a heading level with "Name", left-aligned rows.
                     ui.vertical(|ui| {
-                        ui.set_width(190.0);
-                        egui::ScrollArea::vertical().id_salt("cmd-list").max_height(330.0).auto_shrink([false, true]).show(ui, |ui| {
+                        ui.set_width(LIST_W);
+                        field_label(ui, "Commands");
+                        egui::ScrollArea::vertical().id_salt("cmd-list").max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
                             for (i, c) in ed.list.iter().enumerate() {
                                 let label = if c.name.is_empty() { "(unnamed)".to_string() } else { format!("/{}", c.name) };
-                                if ui.add_sized([180.0, 24.0], Button::selectable(i == ed.selected, RichText::new(label).monospace())).clicked() {
+                                if list_row(ui, &label, i == ed.selected, LIST_W).clicked() {
                                     ed.selected = i;
                                 }
                             }
                         });
-                        ui.add_space(6.0);
+                        ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Add").clicked() {
+                            if ui.button("+ Add").clicked() {
                                 ed.list.push(SlashCommand { name: format!("cmd{}", ed.list.len() + 1), help: String::new(), template: "select *\nfrom {table}\nlimit {n=50};".into() });
                                 ed.selected = ed.list.len() - 1;
                             }
@@ -2985,40 +2993,62 @@ impl App {
                     });
                     // Not a separator: in a horizontal row it stretches to
                     // the full available height and blows up the modal.
-                    ui.add_space(16.0);
+                    ui.add_space(24.0);
                     // Details.
                     ui.vertical(|ui| {
+                        let width = ui.available_width();
                         let Some(c) = ed.list.get_mut(ed.selected) else {
                             muted(ui, "No commands. Add one, or reset to the defaults.");
                             return;
                         };
-                        let field = |ui: &mut Ui, label: &str| {
-                            ui.label(RichText::new(label).size(12.0).color(theme::MUTED()));
-                        };
-                        field(ui, "Name");
-                        ui.add(TextEdit::singleline(&mut c.name).font(TextStyle::Monospace).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
-                        ui.add_space(6.0);
-                        field(ui, "Description");
-                        ui.add(TextEdit::singleline(&mut c.help).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
-                        ui.add_space(6.0);
-                        field(ui, "SQL template");
+                        field_label(ui, "Name");
+                        ui.add(TextEdit::singleline(&mut c.name).font(TextStyle::Monospace).desired_width(width).margin(Margin::symmetric(8, 6)));
+                        ui.add_space(GAP);
+                        field_label(ui, "Description");
+                        ui.add(TextEdit::singleline(&mut c.help).desired_width(width).margin(Margin::symmetric(8, 6)));
+                        ui.add_space(GAP);
+                        field_label(ui, "SQL template");
                         let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
                             let mut job = highlight::sql(buf.as_str(), TextStyle::Monospace.resolve(ui.style()));
                             job.wrap.max_width = wrap;
                             ui.fonts_mut(|f| f.layout_job(job))
                         };
-                        ui.add(TextEdit::multiline(&mut c.template).code_editor().desired_rows(5).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 6)).layouter(&mut layouter));
-                        ui.label(
-                            RichText::new("{table}  {field}  {field+_4326} (field name + suffix)  {n}  {n=100} (number, with a default)")
-                                .monospace()
-                                .size(11.5)
-                                .color(theme::FAINT()),
-                        );
-                        ui.add_space(8.0);
-                        // Preview.
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("/{} ", c.name)).monospace().color(theme::MUTED()));
-                            ui.add(TextEdit::singleline(&mut ed.preview_args).hint_text(hint(&c.args())).font(TextStyle::Monospace).desired_width(f32::INFINITY).margin(Margin::symmetric(6, 4)));
+                        ui.add(TextEdit::multiline(&mut c.template).code_editor().desired_rows(4).desired_width(width).margin(Margin::symmetric(8, 6)).layouter(&mut layouter));
+                        ui.add_space(6.0);
+                        // Placeholders as chips that wrap cleanly.
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                            for (token, what) in [
+                                ("{table}", "The table argument (schema-qualified if needed)"),
+                                ("{field}", "Geometry column: the argument, else the table's geometry column, else shape"),
+                                ("{field+_4326}", "The field name plus a suffix, quoted as needed (for aliases)"),
+                                ("{n}", "A number argument (required)"),
+                                ("{n=100}", "A number argument with a default"),
+                            ] {
+                                Frame::new().fill(theme::HOVER()).corner_radius(5).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
+                                    ui.label(RichText::new(token).monospace().size(11.5).color(theme::MUTED()));
+                                })
+                                .response
+                                .on_hover_text(what);
+                            }
+                        });
+                        ui.add_space(GAP + 4.0);
+                        // Preview: the command prefix sits inside the input.
+                        field_label(ui, "Preview");
+                        Frame::new().fill(theme::BG()).stroke(Stroke::new(1.0, theme::BORDER())).corner_radius(8).inner_margin(Margin::symmetric(8, 5)).show(ui, |ui| {
+                            ui.set_width(width - 18.0);
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.label(RichText::new(format!("/{} ", c.name)).monospace().color(theme::MUTED()));
+                                ui.add(
+                                    TextEdit::singleline(&mut ed.preview_args)
+                                        .hint_text(hint(&c.args()))
+                                        .font(TextStyle::Monospace)
+                                        .frame(false)
+                                        .margin(Margin::ZERO)
+                                        .desired_width(f32::INFINITY),
+                                );
+                            });
                         });
                         let line = format!("/{} {}", c.name, ed.preview_args);
                         let preview = match c.problem() {
@@ -3029,8 +3059,9 @@ impl App {
                             Ok(sql) => (sql.clone(), theme::TEXT()),
                             Err(e) => (e.clone(), theme::WARN()),
                         };
+                        ui.add_space(6.0);
                         Frame::new().fill(theme::BG()).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
+                            ui.set_width(width - 20.0);
                             ui.label(RichText::new(text).monospace().size(12.5).color(color));
                         });
                     });
@@ -3511,6 +3542,17 @@ fn segment(ui: &mut Ui, selected: bool, text: &str) -> bool {
             .frame_when_inactive(selected),
     );
     r.clicked()
+}
+
+/// A full-width, left-aligned selectable list row (monospace).
+fn list_row(ui: &mut Ui, text: &str, selected: bool, width: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 28.0), Sense::click());
+    let fill = if selected { theme::SELECTED() } else if resp.hovered() { theme::HOVER() } else { Color32::TRANSPARENT };
+    ui.painter().rect_filled(rect, 6.0, fill);
+    let color = if selected { theme::TEXT() } else { theme::MUTED() };
+    let font = TextStyle::Monospace.resolve(ui.style());
+    ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, text, font, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A 24 pt square title-bar button; `paint` draws its icon (hot = hovered).
