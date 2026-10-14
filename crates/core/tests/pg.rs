@@ -80,7 +80,7 @@ async fn end_to_end() {
         assert_eq!(items.columns[2], ("tags".to_string(), "text[]".to_string()));
         assert!(catalog.tables.iter().any(|t| t.schema == "pg_catalog" && t.name == "pg_stat_activity"));
         let sql = format!("select i.ta from {schema}.items i");
-        let c = rgrip_core::complete::complete(&sql, 11, &catalog, false).unwrap();
+        let c = rgrip_core::complete::complete(&sql, 11, &catalog, "public", false).unwrap();
         assert_eq!(c.items[0].label, "tags");
 
         // Server-side paging: 1000 rows per page, `truncated` = more pages.
@@ -97,7 +97,7 @@ async fn end_to_end() {
         assert!(err.contains("line 2, column 3"), "{err}");
         // Export-all writes every row, not just one page.
         let path = std::env::temp_dir().join(format!("rgrip-export-{}.csv", std::process::id()));
-        let n = conn.export_to_file(q, rgrip_core::export::Format::Csv, "t", &path).await.unwrap();
+        let n = conn.export_to_file(None, q, rgrip_core::export::Format::Csv, "t", &path).await.unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(n, 2500);
@@ -110,6 +110,21 @@ async fn end_to_end() {
 
         let err = conn.execute("select 1;\nselect nope").await.unwrap_err();
         assert!(err.contains("42703") && err.contains("line 2"), "{err}");
+
+        // A console's schema resolves unqualified names (execute, paging, export).
+        let name = |out: QueryOutput| out.statements[0].result.as_ref().unwrap().rows[0][1].clone();
+        let out = conn.execute_in(Some(&schema), "select * from items order by id").await.unwrap();
+        assert_eq!(name(out).as_deref(), Some("a"));
+        let out = conn.execute_page_in(Some(&schema), "select * from items order by id", 0).await.unwrap();
+        assert_eq!(name(out).as_deref(), Some("a"));
+        assert!(conn.execute_in(Some("public"), "select * from items").await.is_err());
+        let path = std::env::temp_dir().join(format!("rgrip-schema-{}.csv", std::process::id()));
+        let n = conn.export_to_file(Some(&schema), "select * from items", rgrip_core::export::Format::Csv, "items", &path).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(n, 3);
+        let err = conn.execute_in(Some("rgrip_no_such_schema"), "select 1").await.unwrap_err();
+        assert!(err.contains("no longer exists"), "{err}");
+        conn.execute_in(None, "select 1").await.unwrap();
 
         // Foreign keys, both directions, including a self-reference.
         conn.execute(&format!(

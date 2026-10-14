@@ -339,14 +339,16 @@ fn is_system_schema(s: &str) -> bool {
 }
 
 impl Catalog {
-    fn resolve(&self, r: &TableRef) -> Option<&CatalogTable> {
+    /// `default`: the console's schema, tried before `public`.
+    fn resolve(&self, r: &TableRef, default: &str) -> Option<&CatalogTable> {
         let candidates = self.tables.iter().filter(|t| t.name == r.table);
         match &r.schema {
             Some(s) => candidates.into_iter().find(|t| &t.schema == s),
             None => {
                 let all: Vec<_> = candidates.collect();
                 all.iter()
-                    .find(|t| t.schema == "public")
+                    .find(|t| t.schema == default)
+                    .or_else(|| all.iter().find(|t| t.schema == "public"))
                     .or_else(|| all.iter().find(|t| t.schema == "pg_catalog"))
                     .or_else(|| all.first())
                     .copied()
@@ -415,7 +417,8 @@ enum Context {
 
 /// Compute suggestions for the cursor at byte offset `cursor`.
 /// `forced` (⌃Space) allows an empty prefix outside of `x.` positions.
-pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Option<Completion> {
+/// `schema` is the console's schema, where unqualified names resolve first.
+pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, schema: &str, forced: bool) -> Option<Completion> {
     let cursor = cursor.min(sql.len());
     if !sql.is_char_boundary(cursor) || ends_in_literal(&sql[..cursor]) {
         return None;
@@ -490,7 +493,7 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Op
 
     let refs = table_refs(&stmt);
     let resolved: Vec<(&TableRef, &CatalogTable)> =
-        refs.iter().filter_map(|r| catalog.resolve(r).map(|t| (r, t))).collect();
+        refs.iter().filter_map(|r| catalog.resolve(r, schema).map(|t| (r, t))).collect();
 
     let mut items = Vec::new();
     if let Some(q) = qualifier {
@@ -499,7 +502,7 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Op
             .find(|(r, _)| r.alias.as_deref() == Some(q.as_str()))
             .or_else(|| resolved.iter().find(|(r, _)| r.table == q))
             .map(|(_, t)| *t)
-            .or_else(|| catalog.resolve(&TableRef { schema: None, table: q.clone(), alias: None }));
+            .or_else(|| catalog.resolve(&TableRef { schema: None, table: q.clone(), alias: None }, schema));
         if let Some(t) = target {
             push_columns(&mut items, t, false);
             if postgis {
@@ -508,13 +511,13 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Op
             }
         }
         for t in catalog.tables.iter().filter(|t| t.schema == q) {
-            push_table(&mut items, t, false);
+            push_table(&mut items, t, false, schema);
         }
     } else {
         match context(before) {
             Context::Table => {
                 for t in &catalog.tables {
-                    push_table(&mut items, t, true);
+                    push_table(&mut items, t, true, schema);
                 }
                 for s in catalog.schemas() {
                     items.push(Suggestion {
@@ -541,7 +544,7 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, forced: bool) -> Op
                 push_functions(&mut items, &prefix);
                 push_keywords(&mut items, &prefix);
                 for t in &catalog.tables {
-                    push_table(&mut items, t, true);
+                    push_table(&mut items, t, true, schema);
                 }
             }
         }
@@ -620,8 +623,8 @@ fn push_columns(items: &mut Vec<Suggestion>, t: &CatalogTable, show_table: bool)
     }
 }
 
-fn push_table(items: &mut Vec<Suggestion>, t: &CatalogTable, qualify: bool) {
-    let needs_schema = qualify && !matches!(t.schema.as_str(), "public" | "pg_catalog");
+fn push_table(items: &mut Vec<Suggestion>, t: &CatalogTable, qualify: bool, default: &str) {
+    let needs_schema = qualify && !matches!(t.schema.as_str(), "public" | "pg_catalog") && t.schema != default;
     let insert = if needs_schema { format!("{}.{}", ident(&t.schema), ident(&t.name)) } else { ident(&t.name) };
     let kind = match t.kind {
         TableKind::View | TableKind::MaterializedView => ItemKind::View,
@@ -811,11 +814,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn console_schema_is_preferred() {
+        let mut c = catalog();
+        c.tables.push(CatalogTable { schema: "billing".into(), name: "users".into(), kind: TableKind::Table, columns: vec![("account".into(), "text".into())] });
+        let cols = |schema: &str| -> Vec<String> {
+            let sql = "select u. from users u";
+            complete(sql, 9, &c, schema, false).unwrap().items.into_iter().map(|s| s.label).collect()
+        };
+        assert!(cols("public").contains(&"email".to_string()));
+        assert!(cols("billing").contains(&"account".to_string()));
+        assert!(!cols("billing").contains(&"email".to_string()));
+        // Tables of the console schema are offered unqualified.
+        let items = complete("select * from inv", 17, &c, "billing", false).unwrap().items;
+        assert_eq!(items[0].insert, "invoices");
+        let items = complete("select * from inv", 17, &c, "public", false).unwrap().items;
+        assert_eq!(items[0].insert, "billing.invoices");
+    }
+
     /// `|` marks the cursor.
     fn labels(input: &str) -> Vec<String> {
         let cursor = input.find('|').unwrap();
         let sql = input.replace('|', "");
-        complete(&sql, cursor, &catalog(), false)
+        complete(&sql, cursor, &catalog(), "public", false)
             .map(|c| c.items.into_iter().map(|s| s.label).collect())
             .unwrap_or_default()
     }
@@ -823,7 +844,7 @@ mod tests {
     fn first_insert(input: &str) -> String {
         let cursor = input.find('|').unwrap();
         let sql = input.replace('|', "");
-        complete(&sql, cursor, &catalog(), false).unwrap().items[0].insert.clone()
+        complete(&sql, cursor, &catalog(), "public", false).unwrap().items[0].insert.clone()
     }
 
     #[test]
@@ -892,14 +913,14 @@ mod tests {
     fn empty_prefix_needs_dot_or_force() {
         assert!(labels("select * from |").is_empty());
         let sql = "select * from ";
-        let c = complete(sql, sql.len(), &catalog(), true).unwrap();
+        let c = complete(sql, sql.len(), &catalog(), "public", true).unwrap();
         assert_eq!(c.items[0].label, "users");
     }
 
     #[test]
     fn replace_range_covers_whole_word() {
         let sql = "select * from usXXers";
-        let c = complete(sql, 16, &catalog(), false).unwrap();
+        let c = complete(sql, 16, &catalog(), "public", false).unwrap();
         assert_eq!(c.replace, 14..21);
         assert_eq!(c.prefix, "us");
     }
@@ -931,7 +952,7 @@ mod tests {
     fn complete_with(input: &str, catalog: &Catalog) -> Vec<Suggestion> {
         let cursor = input.find('|').unwrap();
         let sql = input.replace('|', "");
-        complete(&sql, cursor, catalog, false).map(|c| c.items).unwrap_or_default()
+        complete(&sql, cursor, catalog, "public", false).map(|c| c.items).unwrap_or_default()
     }
 
     #[test]
@@ -963,7 +984,7 @@ mod tests {
         let input = "select p.| from parcels p";
         let cursor = input.find('|').unwrap();
         let sql = input.replace('|', "");
-        let c = complete(&sql, cursor, &spatial_catalog(), false).unwrap();
+        let c = complete(&sql, cursor, &spatial_catalog(), "public", false).unwrap();
         let t = c.items.iter().find(|s| s.label == "ST_Transform(geom, 4326)").unwrap();
         assert_eq!(t.insert, "ST_Transform(p.geom, 4326) AS geom");
         assert_eq!(t.replace, Some(7..9)); // replaces "p."
@@ -976,14 +997,14 @@ mod tests {
         let input = "select 1;\n/con|";
         let cursor = input.find('|').unwrap();
         let sql = input.replace('|', "");
-        let c = complete(&sql, cursor, &catalog(), false).unwrap();
+        let c = complete(&sql, cursor, &catalog(), "public", false).unwrap();
         assert_eq!(c.replace, 10..14);
         assert_eq!(c.items.iter().map(|s| s.insert.as_str()).collect::<Vec<_>>(), ["/con_4326 ", "/con_4326_2 ", "/con_merc "]);
         // Just the slash lists everything; division doesn't.
-        assert_eq!(complete("/", 1, &catalog(), false).unwrap().items.len(), crate::commands::COMMANDS.len());
-        assert!(complete("select a/b", 9, &catalog(), false).is_none_or(|c| c.items.iter().all(|s| s.kind != ItemKind::Command)));
+        assert_eq!(complete("/", 1, &catalog(), "public", false).unwrap().items.len(), crate::commands::COMMANDS.len());
+        assert!(complete("select a/b", 9, &catalog(), "public", false).is_none_or(|c| c.items.iter().all(|s| s.kind != ItemKind::Command)));
         // No SQL suggestions while typing a command's arguments.
-        assert!(complete("/con_4326 us", 12, &catalog(), false).is_none());
+        assert!(complete("/con_4326 us", 12, &catalog(), "public", false).is_none());
     }
 
     #[test]
