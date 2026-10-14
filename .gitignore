@@ -3,3 +3,4 @@ dev/certs/
 dev/ssh/id_ed25519*
 dist/
 .DS_Store
+.claude/
