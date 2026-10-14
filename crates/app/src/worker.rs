@@ -10,6 +10,9 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 pub type ConnId = String;
 pub type TabId = u64;
 
+/// Related-row counts stop here ("1000+").
+pub const PROBE_CAP: usize = 1000;
+
 pub enum Cmd {
     Connect(ConnectionConfig),
     Disconnect(ConnId),
@@ -25,6 +28,9 @@ pub enum Cmd {
     Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize>, schema: Option<String>, database: Option<String> },
     /// `modal`: for the tab's related-rows popup rather than the tab itself.
     TableData { conn: ConnId, tab: TabId, query: TableQuery, modal: bool },
+    /// Count matches of related-row filters (schema, table, filter) for the
+    /// Related menu; `key` comes back with the counts.
+    ProbeRelations { conn: ConnId, tab: TabId, modal: bool, key: Vec<usize>, probes: Vec<(String, String, String)> },
     /// Inline-edit UPDATEs, applied in one transaction.
     SaveEdits { conn: ConnId, tab: TabId, statements: Vec<String> },
     Cancel(ConnId, Option<String>),
@@ -50,6 +56,8 @@ pub enum Ev {
     /// `columns`: the table's columns (primary key and types, for editing).
     /// `relations`: foreign keys from and to the table.
     TablePage { tab: TabId, modal: bool, result: Result<ResultSet, String>, columns: Vec<ColumnInfo>, relations: Vec<Relation> },
+    /// Match counts per probe (`None`: failed or timed out).
+    RelationProbe { tab: TabId, modal: bool, key: Vec<usize>, counts: Vec<Option<i64>> },
     /// Rows updated, or why nothing was saved.
     EditsSaved { tab: TabId, result: Result<usize, String> },
     TableCount { tab: TabId, modal: bool, result: Result<i64, String> },
@@ -251,6 +259,14 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                 let count = c.table_count(&query).await;
                 emit.send(Ev::TableCount { tab, modal, result: count });
             }
+        }
+        Cmd::ProbeRelations { conn, tab, modal, key, probes } => {
+            let Ok(c) = get(&conns, &conn) else { return };
+            let mut counts = Vec::with_capacity(probes.len());
+            for (schema, table, filter) in &probes {
+                counts.push(c.count_capped(schema, table, filter, PROBE_CAP).await.ok());
+            }
+            emit.send(Ev::RelationProbe { tab, modal, key, counts });
         }
         Cmd::SaveEdits { conn, tab, statements } => {
             let result = match get(&conns, &conn) {

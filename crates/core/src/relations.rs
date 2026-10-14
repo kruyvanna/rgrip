@@ -101,9 +101,25 @@ fn names_table(stem: &str, t: &CatalogTable) -> bool {
     plurals(stem).iter().any(|n| t.name.eq_ignore_ascii_case(n))
 }
 
+/// Keys that hold row identities (as opposed to codes or names): a bare
+/// table-name reference can point at any of these.
+const IDENTITY_KEYS: &[&str] = &["id", "globalid", "guid", "uuid"];
+
 /// Which column of `t` a column named `col` (in another table) refers to,
-/// by the naming rules in the module docs.
-fn target(col: &str, t: &CatalogTable) -> Option<String> {
+/// by the naming rules in the module docs, plus other keys it may hold
+/// instead (bare table-name references only).
+fn target(col: &str, t: &CatalogTable) -> Option<(String, Vec<String>)> {
+    let main = target_main(col, t)?;
+    let c = col.to_lowercase();
+    let alternatives = if names_table(&c, t) {
+        t.keys.iter().filter(|k| !k.eq_ignore_ascii_case(&main) && IDENTITY_KEYS.contains(&k.to_lowercase().as_str())).cloned().collect()
+    } else {
+        Vec::new()
+    };
+    Some((main, alternatives))
+}
+
+fn target_main(col: &str, t: &CatalogTable) -> Option<String> {
     let c = col.to_lowercase();
     // `X_id` → X.id
     if let Some(stem) = c.strip_suffix("_id").filter(|s| !s.is_empty())
@@ -112,9 +128,12 @@ fn target(col: &str, t: &CatalogTable) -> Option<String> {
     {
         return Some(id.clone());
     }
-    // `parcel` → parcel.id (only a unique id: a bare name is a weaker hint)
-    if names_table(&c, t) && has_key(t, "id") {
-        return column(t, "id").map(|(id, _)| id.clone());
+    // `parcel` → parcel.id (or another identity key; a bare name is a
+    // weaker hint, so only unique keys count)
+    if names_table(&c, t)
+        && let Some(k) = IDENTITY_KEYS.iter().find_map(|k| t.keys.iter().find(|x| x.eq_ignore_ascii_case(k)))
+    {
+        return Some(k.clone());
     }
     // `[prefix_]parcel_globalid` → parcel.globalid
     for key in &t.keys {
@@ -160,7 +179,7 @@ pub fn infer(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalo
     };
 
     let mut out: Vec<Relation> = Vec::new();
-    let mut add = |outgoing: bool, other: &CatalogTable, here: &str, there: &str| {
+    let mut add = |outgoing: bool, other: &CatalogTable, here: &str, there: &str, alternatives: Vec<(String, String)>| {
         let r = Relation {
             name: if outgoing { format!("inferred: {table}.{here} → {}.{there}", other.name) } else { format!("inferred: {}.{there} → {table}.{here}", other.name) },
             outgoing,
@@ -168,6 +187,7 @@ pub fn infer(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalo
             other_table: other.name.clone(),
             columns: vec![(here.to_string(), there.to_string())],
             inferred: true,
+            alternatives,
         };
         if !covered(existing, &r) && !out.iter().any(|o| (o.outgoing, &o.other_schema, &o.other_table, &o.columns) == (r.outgoing, &r.other_schema, &r.other_table, &r.columns)) {
             out.push(r);
@@ -177,18 +197,19 @@ pub fn infer(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalo
 
     // Outgoing: this.col → other.key
     for col in columns.iter().filter(|c| !is_key(&c.name)) {
-        let matches: Vec<(&CatalogTable, String)> = candidates
+        let matches: Vec<(&CatalogTable, String, Vec<String>)> = candidates
             .iter()
             .filter(|t| !(t.schema == schema && t.name == table) || !col.name.eq_ignore_ascii_case("id"))
             .filter_map(|t| {
-                let there = target(&col.name, t)?;
-                ty_of(t, &there).filter(|ty| compatible(&col.data_type, ty)).map(|_| (*t, there))
+                let (there, alts) = target(&col.name, t)?;
+                let fits = |c: &str| ty_of(t, c).is_some_and(|ty| compatible(&col.data_type, &ty));
+                fits(&there).then(|| (*t, there, alts.into_iter().filter(|a| fits(a)).collect()))
             })
             .collect();
-        let same: Vec<_> = matches.iter().filter(|(t, _)| t.schema == schema).collect();
+        let same: Vec<_> = matches.iter().filter(|(t, _, _)| t.schema == schema).collect();
         let pick = if same.len() == 1 { Some(same[0]) } else if same.is_empty() && matches.len() == 1 { Some(&matches[0]) } else { None };
-        if let Some((t, there)) = pick {
-            add(true, t, &col.name, there);
+        if let Some((t, there, alts)) = pick {
+            add(true, t, &col.name, there, alts.iter().map(|a| (col.name.clone(), a.clone())).collect());
         }
     }
 
@@ -208,13 +229,14 @@ pub fn infer(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalo
                 // Shared distinctive key name.
                 keys.iter()
                     .find(|k| k.eq_ignore_ascii_case(c) && k.len() >= 3 && !GENERIC_KEYS.contains(&k.to_lowercase().as_str()))
-                    .map(|k| k.to_string())
+                    .map(|k| (k.to_string(), Vec::new()))
             });
-            if let Some(here) = here
-                && let Some(here_ty) = ty_of(&me, &here)
-                && compatible(&here_ty, ty)
+            let fits = |k: &str| ty_of(&me, k).is_some_and(|here_ty| compatible(&here_ty, ty));
+            if let Some((here, alts)) = here
+                && fits(&here)
             {
-                add(false, t, &here, c);
+                let alts = alts.into_iter().filter(|a| fits(a)).map(|a| (a, c.clone())).collect();
+                add(false, t, &here, c, alts);
             }
         }
     }
@@ -304,6 +326,7 @@ mod tests {
             other_table: "users".into(),
             columns: vec![("user_id".into(), "id".into())],
             inferred: false,
+            alternatives: Vec::new(),
         };
         assert!(infer("public", "posts", &cols, &catalog(), &[fk]).is_empty());
     }
@@ -364,6 +387,9 @@ mod tests {
             "audit_log.parcel is an integer: no match; objectid/access_id aren't references"
         );
         let building = &cat.tables[1];
-        assert_eq!(brief(infer("mlmupc", "building", &cols(building), &cat, &[])), ["→ parcel.id=parcel"]);
+        let out = infer("mlmupc", "building", &cols(building), &cat, &[]);
+        assert_eq!(brief(out.clone()), ["→ parcel.id=parcel"]);
+        // A bare name may hold either identity key: globalid is an alternative.
+        assert_eq!(out[0].alternatives, [("parcel".to_string(), "globalid".to_string())]);
     }
 }

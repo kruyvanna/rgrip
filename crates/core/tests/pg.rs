@@ -156,6 +156,12 @@ async fn end_to_end() {
         assert_eq!(rel[0].columns, [("pa".to_string(), "a".to_string()), ("pb".to_string(), "b".to_string())]);
         assert!(conn.relations(&schema, "items").await.unwrap().is_empty());
 
+        // Related-row counts are capped.
+        assert_eq!(conn.count_capped(&schema, "items", "true", 2).await.unwrap(), 2);
+        assert_eq!(conn.count_capped(&schema, "items", "name = 'b'", 1000).await.unwrap(), 1);
+        assert!(conn.count_capped(&schema, "items", "nope = 1", 10).await.is_err());
+        conn.execute("select 1").await.unwrap();
+
         // Inline edits: all-or-nothing, one row each.
         use rgrip_core::edit::update_sql;
         let names = || async {

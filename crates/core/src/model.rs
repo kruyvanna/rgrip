@@ -255,6 +255,10 @@ pub struct Relation {
     pub columns: Vec<(String, String)>,
     /// Guessed from column names; no foreign key constraint backs it.
     pub inferred: bool,
+    /// Other single-column pairs that may be the real link (an ArcGIS
+    /// `parcel.land_right` can hold `land_right.id` or `.globalid`);
+    /// following the relation matches any of them.
+    pub alternatives: Vec<(String, String)>,
 }
 
 /// Rows are kept as text (Postgres text protocol), `None` is SQL NULL.

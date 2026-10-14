@@ -238,10 +238,47 @@ struct TableView {
     fk_relations: Vec<Relation>,
     /// Related rows shown in a popup over the tab.
     related: Option<Related>,
+    /// Related-row counts for the rows the row menu was opened on.
+    probe: Option<Probe>,
     /// Pending inline edits: (row, col) → new value.
     changes: std::collections::BTreeMap<(usize, usize), Option<String>>,
     editor: Option<grid::CellEditor>,
     saving: bool,
+}
+
+/// Match counts for each relation (and each of its alternative keys) of
+/// some rows, from the database.
+struct Probe {
+    /// The rows counted for.
+    rows: Vec<usize>,
+    /// (relation, variant) per probe, in the order sent.
+    map: Vec<(usize, usize)>,
+    /// Filled in when the counts arrive.
+    counts: Vec<Option<i64>>,
+}
+
+impl Probe {
+    /// For `rows`, the best count per relation (for the menu).
+    fn best(&self, rows: &[usize], relations: usize) -> Vec<Option<i64>> {
+        let mut best = vec![None; relations];
+        if self.rows != rows {
+            return Vec::new();
+        }
+        for (&(ri, _), c) in self.map.iter().zip(&self.counts) {
+            if let (Some(c), Some(b)) = (c, best.get_mut(ri)) {
+                *b = Some(b.unwrap_or(0).max(*c));
+            }
+        }
+        best
+    }
+
+    /// For `rows`, which variants of relation `ri` matched (empty: unknown).
+    fn matched(&self, rows: &[usize], ri: usize) -> Vec<usize> {
+        if self.rows != rows {
+            return Vec::new();
+        }
+        self.map.iter().zip(&self.counts).filter(|((r, _), c)| *r == ri && c.is_some_and(|c| c > 0)).map(|((_, v), _)| *v).collect()
+    }
 }
 
 /// What a related-rows popup shows: rows of `schema.table` matching `filter`.
@@ -265,6 +302,7 @@ struct Related {
     columns: Vec<ColumnInfo>,
     fk_relations: Vec<Relation>,
     grid: GridState,
+    probe: Option<Probe>,
 }
 
 impl Related {
@@ -302,6 +340,7 @@ impl TableView {
             columns: Vec::new(),
             fk_relations: Vec::new(),
             related: None,
+            probe: None,
             changes: Default::default(),
             editor: None,
             saving: false,
@@ -483,6 +522,8 @@ enum TabAction {
     OpenFiltered { schema: String, table: String, filter: String },
     /// Show related rows in the tab's popup (stacking on an open one).
     ShowRelated(RelatedTarget),
+    /// Count related rows for the row menu (`modal`: the popup's rows).
+    Probe { modal: bool, rows: Vec<usize>, probes: Vec<(String, String, String)>, map: Vec<(usize, usize)> },
     /// Popup: back to the previous related rows.
     RelatedBack,
     /// Next (`true`) or previous page of a paged console query.
@@ -738,6 +779,14 @@ impl App {
                         // Edits are keyed by row index: they belong to the old page.
                         t.changes.clear();
                         t.editor = None;
+                    }
+                }
+                Ev::RelationProbe { tab, modal, key, counts } => {
+                    if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab) {
+                        let probe = if modal { t.related.as_mut().and_then(|r| r.probe.as_mut()) } else { t.probe.as_mut() };
+                        if let Some(p) = probe.filter(|p| p.rows == key) {
+                            p.counts = counts;
+                        }
                     }
                 }
                 Ev::EditsSaved { tab, result } => {
@@ -1279,6 +1328,7 @@ impl App {
                             columns: Vec::new(),
                             fk_relations: Vec::new(),
                             grid: GridState::default(),
+                            probe: None,
                         })
                     }
                 }
@@ -1286,6 +1336,18 @@ impl App {
                 if connected {
                     self.worker.send(Cmd::TableData { conn: tab.conn.clone(), tab: tab.id, query, modal: true });
                 }
+            }
+            (TabAction::Probe { modal, rows, probes, map }, TabKind::Table(t)) => {
+                if !connected || probes.is_empty() {
+                    return;
+                }
+                let probe = Probe { rows: rows.clone(), map, counts: Vec::new() };
+                match (modal, &mut t.related) {
+                    (true, Some(rel)) => rel.probe = Some(probe),
+                    (true, None) => return,
+                    (false, _) => t.probe = Some(probe),
+                }
+                self.worker.send(Cmd::ProbeRelations { conn: tab.conn.clone(), tab: tab.id, modal, key: rows, probes });
             }
             (TabAction::RelatedBack, TabKind::Table(t)) => {
                 let Some(rel) = &mut t.related else { return };
@@ -1460,7 +1522,9 @@ impl App {
                     if let Some(row) = env("RGRIP_DEMO_ROW_MENU").and_then(|v| v.parse().ok())
                         && once("row-menu")
                     {
-                        t.grid.selection = [row].into();
+                        if !t.grid.selection.contains(&row) {
+                            t.grid.selection = [row].into();
+                        }
                         t.grid.demo_menu = Some(row);
                     }
                     if env("RGRIP_DEMO_TABLE_VIEW").as_deref() == Some("map") {
@@ -1490,7 +1554,7 @@ impl App {
                         (Some(other), None) => {
                             if let Some(r) = t.relations.iter().find(|r| r.other_table == other) {
                                 let rows: Vec<usize> = if t.grid.selection.is_empty() { vec![0] } else { t.grid.selection.iter().copied().collect() };
-                                follow_action = Some(follow(r, rs, &rows));
+                                follow_action = Some(follow(r, rs, &rows, &[]));
                             }
                             false
                         }
@@ -2731,7 +2795,7 @@ fn console_ui(
             match *view {
                 View::Result(n) if n < sets.len() => {
                     let row_offset = if paged.is_some() { *offset } else { 0 };
-                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations: &[] };
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations: &[], counts: &[] };
                     grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, None, row_offset, &source, None);
                 }
                 View::Map(n) if n < sets.len() => {
@@ -2980,8 +3044,9 @@ fn with_inferred(schema: &str, table: &str, columns: &[ColumnInfo], fks: &[Relat
 }
 
 /// Show the rows related to `rows` through `r` in the popup.
-fn follow(r: &Relation, rs: &ResultSet, rows: &[usize]) -> TabAction {
-    match related_filter(r, rs, rows) {
+/// `only`: the variants known to match (empty: try them all).
+fn follow(r: &Relation, rs: &ResultSet, rows: &[usize], only: &[usize]) -> TabAction {
+    match related_filter_only(r, rs, rows, only) {
         Some(filter) => {
             let (arrow, cols): (&str, Vec<&str>) = if r.outgoing {
                 ("→", r.columns.iter().map(|(here, _)| here.as_str()).collect())
@@ -3002,9 +3067,15 @@ fn follow(r: &Relation, rs: &ResultSet, rows: &[usize]) -> TabAction {
 
 /// WHERE for the other side of `r`, matching the given rows' key values.
 /// `None` when every key is NULL (nothing related) or a column is missing.
-fn related_filter(r: &Relation, rs: &ResultSet, rows: &[usize]) -> Option<String> {
-    let pairs: Vec<(usize, &str)> = r
-        .columns
+/// The column pairs a relation may join on: the main pairs, then each
+/// alternative key on its own.
+fn relation_variants(r: &Relation) -> Vec<Vec<(String, String)>> {
+    std::iter::once(r.columns.clone()).chain(r.alternatives.iter().map(|p| vec![p.clone()])).collect()
+}
+
+/// WHERE on the other side for one variant, matching the given rows' values.
+fn variant_filter(pairs: &[(String, String)], rs: &ResultSet, rows: &[usize]) -> Option<String> {
+    let pairs: Vec<(usize, &str)> = pairs
         .iter()
         .map(|(here, there)| Some((rs.columns.iter().position(|c| c == here)?, there.as_str())))
         .collect::<Option<_>>()?;
@@ -3014,6 +3085,45 @@ fn related_filter(r: &Relation, rs: &ResultSet, rows: &[usize]) -> Option<String
         .map(|row| pairs.iter().map(|&(c, there)| (there, row[c].as_deref())).collect())
         .collect();
     rgrip_core::edit::match_rows(&keys)
+}
+
+/// WHERE for the other side of `r`, matching the given rows' key values:
+/// any of its variants (only those in `only`, when given). `None` when
+/// every key is NULL (nothing related) or a column is missing.
+fn related_filter_only(r: &Relation, rs: &ResultSet, rows: &[usize], only: &[usize]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for (v, pairs) in relation_variants(r).iter().enumerate() {
+        if !only.is_empty() && !only.contains(&v) {
+            continue;
+        }
+        if let Some(f) = variant_filter(pairs, rs, rows).filter(|f| !parts.contains(f)) {
+            parts.push(f);
+        }
+    }
+    match parts.len() {
+        0 => None,
+        1 => parts.pop(),
+        _ => Some(parts.iter().map(|p| format!("({p})")).collect::<Vec<_>>().join(" or ")),
+    }
+}
+
+#[cfg(test)]
+fn related_filter(r: &Relation, rs: &ResultSet, rows: &[usize]) -> Option<String> {
+    related_filter_only(r, rs, rows, &[])
+}
+
+/// One count per relation variant for `rows` (what the row menu shows).
+fn probe_action(relations: &[Relation], rs: &ResultSet, rows: Vec<usize>, modal: bool) -> Option<TabAction> {
+    let (mut probes, mut map) = (Vec::new(), Vec::new());
+    for (ri, r) in relations.iter().enumerate() {
+        for (vi, pairs) in relation_variants(r).iter().enumerate() {
+            if let Some(f) = variant_filter(pairs, rs, &rows) {
+                probes.push((r.other_schema.clone(), r.other_table.clone(), f));
+                map.push((ri, vi));
+            }
+        }
+    }
+    (!probes.is_empty()).then_some(TabAction::Probe { modal, rows, probes, map })
 }
 
 /// One UPDATE per edited row, matched on the primary key values as loaded.
@@ -3147,6 +3257,8 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
             let sort = t.order.as_ref().map(|(c, asc)| Sort { column: c, ascending: *asc });
             let offset = (t.page * PAGE_SIZE) as usize;
             let kinds: Vec<_> = rs.columns.iter().map(|c| t.temporal.get(c).copied()).collect();
+            let menu_rows: Vec<usize> = t.grid.selection.iter().copied().collect();
+            let counts = t.probe.as_ref().map(|p| p.best(&menu_rows, t.relations.len())).unwrap_or_default();
             let editing = (!t.key.is_empty() && !t.saving).then_some(grid::Editing {
                 changes: &t.changes,
                 editor: &mut t.editor,
@@ -3159,7 +3271,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 &mut t.grid,
                 sort,
                 offset,
-                &grid::Source { table: &table_name, sql: Some(&table_sql), relations: &t.relations },
+                &grid::Source { table: &table_name, sql: Some(&table_sql), relations: &t.relations, counts: &counts },
                 editing,
             );
             match event {
@@ -3174,7 +3286,11 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                     t.changes.remove(&(row, col));
                 }
                 Some(GridEvent::Follow { relation, rows }) => {
-                    action = Some(follow(&t.relations[relation], rs, &rows));
+                    let only = t.probe.as_ref().map(|p| p.matched(&rows, relation)).unwrap_or_default();
+                    action = Some(follow(&t.relations[relation], rs, &rows, &only));
+                }
+                Some(GridEvent::RowsMenu { rows }) => {
+                    action = probe_action(&t.relations, rs, rows, false);
                 }
                 // Sorting reloads the page, which would drop pending edits.
                 Some(GridEvent::HeaderClicked(_)) if !t.changes.is_empty() => {
@@ -3250,10 +3366,17 @@ fn related_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction
                 Some(Ok(rs)) if rs.rows.is_empty() => centered(ui, |ui| muted(ui, "no related rows")),
                 Some(Ok(rs)) => {
                     let name = format!("{}.{}", rel.target.schema, rel.target.table);
-                    let source = grid::Source { table: &name, sql: None, relations: &rel.relations };
+                    let menu_rows: Vec<usize> = rel.grid.selection.iter().copied().collect();
+                    let counts = rel.probe.as_ref().map(|p| p.best(&menu_rows, rel.relations.len())).unwrap_or_default();
+                    let source = grid::Source { table: &name, sql: None, relations: &rel.relations, counts: &counts };
                     let event = grid::show(ui, Id::new(("related-grid", tab_id)), rs, &mut rel.grid, None, 0, &source, None);
-                    if let Some(GridEvent::Follow { relation, rows }) = event {
-                        action = Some(follow(&rel.relations[relation], rs, &rows));
+                    match event {
+                        Some(GridEvent::Follow { relation, rows }) => {
+                            let only = rel.probe.as_ref().map(|p| p.matched(&rows, relation)).unwrap_or_default();
+                            action = Some(follow(&rel.relations[relation], rs, &rows, &only));
+                        }
+                        Some(GridEvent::RowsMenu { rows }) => action = probe_action(&rel.relations, rs, rows, true),
+                        _ => {}
                     }
                 }
             }
@@ -3988,6 +4111,7 @@ mod tests {
             columns: Vec::new(),
             fk_relations: Vec::new(),
             grid: GridState::default(),
+            probe: None,
         });
         let ctx = egui::Context::default();
         let mut frame = |t: &mut TableView, events: Vec<egui::Event>| {
@@ -4028,6 +4152,7 @@ mod tests {
             other_table: table.into(),
             columns: cols.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
             inferred: false,
+            alternatives: Vec::new(),
         };
         // users ← posts.user_id: posts whose user_id is one of these ids.
         let posts = rel(false, "posts", &[("id", "user_id")]);
@@ -4044,6 +4169,24 @@ mod tests {
         assert_eq!(related_filter(&user, &post_rows, &[0, 1]).as_deref(), Some(r#""id" = '7'"#));
         // A key column that isn't in the result.
         assert_eq!(related_filter(&rel(true, "x", &[("nope", "id")]), &users, &[0]), None);
+        // An inferred link that may use either key matches both.
+        let parcels = ResultSet {
+            columns: vec!["id".into(), "land_right".into()],
+            rows: vec![vec![s("p1"), s("{6726-AB}")]],
+            ..Default::default()
+        };
+        let mut lr = rel(true, "land_right", &[("land_right", "id")]);
+        lr.alternatives = vec![("land_right".into(), "globalid".into())];
+        assert_eq!(related_filter(&lr, &parcels, &[0]).as_deref(), Some(r#"("id" = '{6726-AB}') or ("globalid" = '{6726-AB}')"#));
+        // Counting: one probe per variant; following keeps the variants that matched.
+        let Some(TabAction::Probe { probes, map, .. }) = probe_action(std::slice::from_ref(&lr), &parcels, vec![0], false) else { panic!("probe") };
+        assert_eq!(map, [(0, 0), (0, 1)]);
+        assert_eq!(probes[1], ("public".into(), "land_right".into(), r#""globalid" = '{6726-AB}'"#.into()));
+        let probe = Probe { rows: vec![0], map, counts: vec![Some(0), Some(1)] };
+        assert_eq!(probe.best(&[0], 1), [Some(1)]);
+        assert_eq!(probe.matched(&[0], 0), [1]);
+        assert!(probe.best(&[5], 1).is_empty(), "counts are for other rows");
+        assert_eq!(related_filter_only(&lr, &parcels, &[0], &probe.matched(&[0], 0)).as_deref(), Some(r#""globalid" = '{6726-AB}'"#));
     }
 
     struct Harness {

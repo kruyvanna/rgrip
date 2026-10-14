@@ -55,6 +55,9 @@ pub struct Source<'a> {
     pub sql: Option<&'a str>,
     /// Foreign keys of the table, for "Related" in the row menu.
     pub relations: &'a [rgrip_core::Relation],
+    /// Matching rows per relation for the rows the menu acts on (empty: not
+    /// counted yet; `None`: couldn't count).
+    pub counts: &'a [Option<i64>],
 }
 
 /// Per-result-set derived data.
@@ -80,6 +83,8 @@ pub enum GridEvent {
     Revert { row: usize, col: usize },
     /// Open the rows related to `rows` through `source.relations[relation]`.
     Follow { relation: usize, rows: Vec<usize> },
+    /// The row menu opened for `rows`: a chance to count related rows.
+    RowsMenu { rows: Vec<usize> },
 }
 
 /// Inline editing, for table tabs whose rows have a primary key.
@@ -314,6 +319,9 @@ pub fn show(
                                 open_goto = true;
                                 ui.close();
                             }
+                            ui.separator();
+                            let all: Vec<usize> = (0..rs.rows.len()).collect();
+                            copy_column_items(ui, rs, &all, i, "Copy column values");
                             if !frozen.is_empty() && crate::icons::menu_item(ui, crate::icons::Svg::Pin, "Unfreeze all", true).clicked() {
                                 freeze = Some(Freeze::Clear);
                                 ui.close();
@@ -371,6 +379,7 @@ pub fn show(
                     }
                     let response = row.response();
                     if !gutter && demo_menu == Some(i) {
+                        menu_col = cols.get(1).or(cols.first()).copied();
                         // Context menus open at a stored pointer position.
                         let at = response.rect.left_center() + egui::vec2(180.0, 0.0);
                         #[allow(deprecated)] // the Popup API has no "open at" for context menus
@@ -385,11 +394,26 @@ pub fn show(
                     }
                     response.context_menu(|ui| {
                         crate::app::menu_layout(ui);
+                        // The menu acts on the selection (or just this row).
+                        let rows: Vec<usize> = if selection.contains(&i) { selection.iter().copied().collect() } else { vec![i] };
                         // Cell actions for the right-clicked cell.
+                        if let Some(col) = menu_col.filter(|c| *c < rs.columns.len()) {
+                            ui.label(RichText::new(&rs.columns[col]).small().color(theme::MUTED()));
+                            let shown = changes.and_then(|c| c.get(&(i, col))).map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
+                            if crate::icons::menu_item(ui, crate::icons::Svg::Copy, "Copy value", shown.is_some()).clicked() {
+                                ui.ctx().copy_text(shown.unwrap_or_default().to_string());
+                                ui.close();
+                            }
+                            if rows.len() > 1 {
+                                copy_column_items(ui, rs, &rows, col, &format!("Copy {} ({} values)", rs.columns[col], rows.len()));
+                            }
+                            if edit.is_some() && !cache.geom_cols.contains(&col) {
+                                ui.separator();
+                            }
+                        }
                         if let (Some(e), Some(col)) = (edit.as_mut(), menu_col.filter(|c| !cache.geom_cols.contains(c))) {
                             let pending = e.changes.get(&(i, col));
                             let value = pending.map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
-                            ui.label(RichText::new(&rs.columns[col]).small().color(theme::MUTED()));
                             if crate::icons::menu_item(ui, crate::icons::Svg::Pencil, "Edit cell", true).on_hover_text("Or double-click it").clicked() {
                                 *e.editor = Some(CellEditor::open(i, col, value));
                                 ui.close();
@@ -404,8 +428,9 @@ pub fn show(
                             }
                             ui.separator();
                         }
-                        // The menu acts on the selection (or just this row).
-                        let rows: Vec<usize> = if selection.contains(&i) { selection.iter().copied().collect() } else { vec![i] };
+                        if menu_col.is_some() {
+                            ui.separator();
+                        }
                         if let Some(e) = rows_menu(ui, rs, &rows, source, geom) {
                             event = Some(e);
                         }
@@ -451,6 +476,7 @@ pub fn show(
         None => {}
     }
     state.menu_col = menu_col;
+    let opened_menu = menu_row;
     if flash.is_none() {
         state.flash = None;
     }
@@ -488,6 +514,9 @@ pub fn show(
     if let Some(i) = menu_row.filter(|i| !state.selection.contains(i)) {
         state.selection = [i].into();
         state.anchor = Some(i);
+    }
+    if opened_menu.is_some() && event.is_none() && !source.relations.is_empty() {
+        event = Some(GridEvent::RowsMenu { rows: state.selection.iter().copied().collect() });
     }
     event
 }
@@ -595,6 +624,44 @@ fn paint_sort(p: &egui::Painter, c: egui::Pos2, asc: Option<bool>, color: egui::
     }
 }
 
+/// Copy one column of `rows`: every value (one per line, NULL as `NULL`),
+/// the distinct values, or the distinct values as an SQL list.
+fn copy_column_items(ui: &mut Ui, rs: &ResultSet, rows: &[usize], col: usize, label: &str) {
+    if crate::icons::menu_item(ui, crate::icons::Svg::Text, label, true).clicked() {
+        ui.ctx().copy_text(column_lines(rs, rows, col));
+        ui.close();
+    }
+    if crate::icons::menu_item(ui, crate::icons::Svg::Copy, "Copy distinct values", true).clicked() {
+        ui.ctx().copy_text(column_distinct(rs, rows, col).join("\n"));
+        ui.close();
+    }
+    if crate::icons::menu_item(ui, crate::icons::Svg::Table, "Copy as SQL list", true)
+        .on_hover_text("Distinct values for  where col in (…)")
+        .clicked()
+    {
+        ui.ctx().copy_text(column_sql_list(rs, rows, col));
+        ui.close();
+    }
+}
+
+fn column_lines(rs: &ResultSet, rows: &[usize], col: usize) -> String {
+    rows.iter().filter_map(|&r| rs.rows.get(r)).map(|row| row[col].as_deref().unwrap_or("NULL")).collect::<Vec<_>>().join("\n")
+}
+
+/// Distinct non-NULL values, in first-seen order.
+fn column_distinct<'a>(rs: &'a ResultSet, rows: &[usize], col: usize) -> Vec<&'a str> {
+    let mut seen = std::collections::HashSet::new();
+    rows.iter().filter_map(|&r| rs.rows.get(r)?[col].as_deref()).filter(|v| seen.insert(*v)).collect()
+}
+
+/// `'a', 'b'`, or `1, 2` when every value is a plain number.
+fn column_sql_list(rs: &ResultSet, rows: &[usize], col: usize) -> String {
+    let values = column_distinct(rs, rows, col);
+    let numeric = !values.is_empty() && values.iter().all(|v| !v.is_empty() && v.parse::<f64>().is_ok() && !v.starts_with('0') || *v == "0");
+    let items: Vec<String> = values.iter().map(|v| if numeric { v.to_string() } else { format!("'{}'", v.replace('\'', "''")) }).collect();
+    items.join(", ")
+}
+
 /// Copy / export actions for the given rows.
 fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, geom: bool) -> Option<GridEvent> {
     use rgrip_core::export::{self, Format};
@@ -614,7 +681,15 @@ fn rows_menu(ui: &mut Ui, rs: &ResultSet, rows: &[usize], source: &Source<'_>, g
                     label.push_str("  ~ inferred");
                     hover.push_str("\nGuessed from column names (no foreign key constraint)");
                 }
-                if ui.button(label).on_hover_text(hover).clicked() {
+                // Counted matches for these rows; a guess with none is dimmed.
+                let count = source.counts.get(i).copied().flatten();
+                match count {
+                    Some(n) if n >= crate::worker::PROBE_CAP as i64 => label.push_str(&format!("  · {}+", crate::worker::PROBE_CAP)),
+                    Some(n) => label.push_str(&format!("  · {n}")),
+                    None => {}
+                }
+                let text = if count == Some(0) { RichText::new(label).color(theme::FAINT()) } else { RichText::new(label) };
+                if ui.button(text).on_hover_text(hover).clicked() {
                     event = Some(GridEvent::Follow { relation: i, rows: rows.to_vec() });
                     ui.close();
                 }
@@ -936,7 +1011,7 @@ mod tests {
         };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[] }, None);
+                show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[] }, None);
             });
         });
     }
@@ -997,7 +1072,7 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let edit = Some(Editing { changes, editor: &mut *editor, kinds });
-                out = show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[] }, edit);
+                out = show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[] }, edit);
             });
         });
         out
@@ -1173,6 +1248,29 @@ mod tests {
     }
 
     #[test]
+    fn column_copies() {
+        let s = |v: &str| Some(v.to_string());
+        let rs = ResultSet {
+            columns: vec!["id".into(), "land_right".into()],
+            rows: vec![
+                vec![s("1"), s("{23F7220B-490C}")],
+                vec![s("2"), None],
+                vec![s("3"), s("O'Neil")],
+                vec![s("4"), s("{23F7220B-490C}")],
+            ],
+            ..Default::default()
+        };
+        let all = [0, 1, 2, 3];
+        assert_eq!(column_lines(&rs, &all, 1), "{23F7220B-490C}\nNULL\nO'Neil\n{23F7220B-490C}");
+        assert_eq!(column_distinct(&rs, &all, 1), ["{23F7220B-490C}", "O'Neil"]);
+        assert_eq!(column_sql_list(&rs, &all, 1), "'{23F7220B-490C}', 'O''Neil'");
+        assert_eq!(column_sql_list(&rs, &[0, 2], 0), "1, 3");
+        // Leading zeros are codes, not numbers.
+        let codes = ResultSet { columns: vec!["zip".into()], rows: vec![vec![s("012")], vec![s("7")]], ..Default::default() };
+        assert_eq!(column_sql_list(&codes, &[0, 1], 0), "'012', '7'");
+    }
+
+    #[test]
     fn cell_text_is_bounded() {
         assert_eq!(cell_text("a\nb", 10), "a↵ b");
         assert_eq!(cell_text("abcdef", 3), "abc…");
@@ -1233,7 +1331,7 @@ mod perf {
             let start = Instant::now();
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    show(ui, egui::Id::new("perf"), &rs, &mut state, None, 0, &Source { table: "t", sql: None, relations: &[] }, None);
+                    show(ui, egui::Id::new("perf"), &rs, &mut state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[] }, None);
                 });
             });
             // Tessellation runs every frame in the real app too.

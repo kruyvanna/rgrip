@@ -279,6 +279,28 @@ impl PgConn {
             .collect())
     }
 
+    /// How many rows of `schema.table` match `filter`, counting at most
+    /// `cap`. Bounded by a short statement timeout so a guessed relation on
+    /// a huge unindexed table can't stall the connection.
+    pub async fn count_capped(&self, schema: &str, table: &str, filter: &str, cap: usize) -> Result<i64, String> {
+        let sql = format!(
+            "set statement_timeout = 2000; select count(*) from (select 1 from {} where {filter} limit {cap}) x; reset statement_timeout",
+            qualified(schema, table)
+        );
+        let result = self.client.simple_query(&sql).await;
+        if result.is_err() {
+            let _ = self.client.batch_execute("reset statement_timeout").await;
+        }
+        let messages = result.map_err(|e| format_error(&e, None))?;
+        messages
+            .iter()
+            .find_map(|m| match m {
+                SimpleQueryMessage::Row(r) => r.get(0).and_then(|v| v.parse().ok()),
+                _ => None,
+            })
+            .ok_or_else(|| "no count".to_string())
+    }
+
     /// Foreign keys from and to a table (a self-reference appears both ways).
     pub async fn relations(&self, schema: &str, table: &str) -> Result<Vec<Relation>, String> {
         // `cols(rel, keys)`: attribute names of `keys` in `rel`, in key order.
@@ -322,6 +344,7 @@ impl PgConn {
                     other_table: r.get(3),
                     columns: here.into_iter().zip(there).collect(),
                     inferred: false,
+                    alternatives: Vec::new(),
                 }
             })
             .collect())
