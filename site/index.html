@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>rgrip: PostGIS, without opening QGIS</title>
-  <meta name="description" content="A tiny (9 MB) native PostgreSQL client that puts your PostGIS data on a map. Free and open source.">
+  <title>rgrip: a small Postgres client, with a map</title>
+  <meta name="description" content="A small native PostgreSQL client with a built-in map for PostGIS data. Free and open source.">
   <meta name="theme-color" content="#1c1c1e">
   <link rel="icon" type="image/png" href="img/icon.png">
   <link rel="apple-touch-icon" href="img/icon.png">
@@ -12,13 +12,13 @@
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="rgrip">
-  <meta property="og:title" content="rgrip: PostGIS, without opening QGIS">
-  <meta property="og:description" content="A tiny (9 MB) native PostgreSQL client that puts your PostGIS data on a map. Free and open source.">
+  <meta property="og:title" content="rgrip: a small Postgres client, with a map">
+  <meta property="og:description" content="A small native PostgreSQL client with a built-in map for PostGIS data. Free and open source.">
   <meta property="og:url" content="https://yoouTaro.github.io/rgrip/">
   <meta property="og:image" content="https://yoouTaro.github.io/rgrip/img/hero.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="rgrip: PostGIS, without opening QGIS">
-  <meta name="twitter:description" content="A tiny (9 MB) native PostgreSQL client that puts your PostGIS data on a map. Free and open source.">
+  <meta name="twitter:title" content="rgrip: a small Postgres client, with a map">
+  <meta name="twitter:description" content="A small native PostgreSQL client with a built-in map for PostGIS data. Free and open source.">
   <meta name="twitter:image" content="https://yoouTaro.github.io/rgrip/img/hero.png">
 
   <link rel="stylesheet" href="style.css">
@@ -46,19 +46,18 @@
   <main id="main">
     <section class="hero" id="top">
       <div class="wrap">
-        <p class="eyebrow">Free · open source · 9 MB</p>
-        <h1>PostGIS, <span class="grad">without opening QGIS</span>.</h1>
-        <p class="lead">A tiny native PostgreSQL client that puts any query's geometry on a map: UTM, Web Mercator, even ArcGIS <code>st_geometry</code>. Then copy the rows as an image and drop them in the team chat.</p>
+        <p class="eyebrow">Free and open source</p>
+        <h1>A small Postgres client, <span class="grad">with a map</span>.</h1>
+        <p class="lead">rgrip is a native PostgreSQL client written in Rust. Run a query and look at your PostGIS data on a map, follow relations between tables, and copy results to share.</p>
         <div class="cta">
           <a class="btn btn-primary" data-download href="https://github.com/yoouTaro/rgrip/releases">Download for macOS</a>
           <a class="btn btn-ghost" href="https://github.com/yoouTaro/rgrip">View on GitHub</a>
         </div>
         <p class="fine">macOS · Apple silicon · MIT OR Apache-2.0</p>
         <ul class="stats" aria-label="Measured on rgrip 0.0.7">
-          <li><b>9 MB</b><span>download</span></li>
+          <li><b>~9 MB</b><span>download</span></li>
           <li><b>~75 MB</b><span>memory at idle</span></li>
-          <li><b>0%</b><span>CPU when idle</span></li>
-          <li><b>No JVM</b><span>no Electron, just Rust</span></li>
+          <li><b>Native</b><span>written in Rust</span></li>
         </ul>
         <figure class="shot shot-hero">
           <img src="img/hero.png" alt="rgrip main window: schema explorer, SQL console and results grid" width="1600" height="1000" fetchpriority="high">

@@ -8,6 +8,6 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yoouTaro/rgrip"
 homepage = "https://yoouTaro.github.io/rgrip/"
-description = "PostGIS, without opening QGIS. A tiny (9 MB) native PostgreSQL client in Rust that puts any query's geometry on a map."
+description = "A small native PostgreSQL client in Rust, with a built-in map for PostGIS data."
 keywords = ["postgres", "postgis", "database", "gui", "egui"]
 categories = ["database", "gui"]
