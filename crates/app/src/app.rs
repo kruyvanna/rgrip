@@ -319,6 +319,8 @@ enum Action {
     Connect(usize),
     Disconnect(usize),
     Edit(usize),
+    /// Set a connection's tab color (explorer menu).
+    SetColor(usize, rgrip_core::ConnColor),
     Delete(usize),
     Refresh(usize),
     NewConsole(usize),
@@ -910,6 +912,10 @@ impl App {
                 self.worker.send(Cmd::Disconnect(c.cfg.id.clone()));
                 c.status = Status::Disconnected;
                 c.clear_cache();
+            }
+            Action::SetColor(ci, color) => {
+                self.conns[ci].cfg.color = color;
+                self.save_config();
             }
             Action::Edit(ci) => {
                 self.dialog = Some(Dialog::new(self.conns[ci].cfg.clone(), false));
@@ -2073,6 +2079,21 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
         ui.close();
     }
     ui.separator();
+    // Quicker than the dialog: tint this connection's tabs.
+    ui.menu_button("Color", |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for c in rgrip_core::ConnColor::ALL {
+                let resp = widgets::color_swatch(ui, theme::conn_color(c), conn.cfg.color == c).on_hover_text(c.label());
+                if resp.clicked() {
+                    actions.push(Action::SetColor(ci, c));
+                    ui.close();
+                }
+            }
+        });
+    })
+    .response
+    .on_hover_text("Tint this connection's tabs (e.g. red for production)");
     if ui.button("Edit…").clicked() {
         actions.push(Action::Edit(ci));
         ui.close();
@@ -2200,9 +2221,10 @@ fn tab_button(
         None => fill,
     };
     painter.rect_filled(rect, egui::CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, fill);
-    if let (Some(col), true) = (style.color, active) {
+    // The active tab gets a bar: the connection's color, else the accent.
+    if active {
         let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.5), rect.right_bottom());
-        painter.rect_filled(bar, 0.0, col);
+        painter.rect_filled(bar, 0.0, style.color.unwrap_or(theme::ACCENT()));
     }
     let cy = rect.center().y;
     let icon = match tab.kind {
@@ -2215,7 +2237,7 @@ fn tab_button(
         painter.rect_filled(close_rect, 4.0, theme::BORDER());
     }
     let x_color = if close_resp.hovered() { theme::TEXT() } else if active || tab_resp.hovered() { theme::MUTED() } else { theme::FAINT() };
-    painter.text(close_rect.center(), egui::Align2::CENTER_CENTER, "×", FontId::proportional(14.0), x_color);
+    widgets::paint_icon_tinted(painter, close_rect.center(), Icon::Close, Some(x_color));
 
     if close_resp.clicked() || tab_resp.middle_clicked() {
         actions.push(Action::Close(CloseWhich::One(i)));
