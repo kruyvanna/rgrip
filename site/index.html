@@ -106,19 +106,37 @@
         <div class="row">
           <div class="txt">
             <p class="tag">Relations</p>
-            <h3>Follow foreign keys, both ways</h3>
-            <p>Right-click a row and jump to the rows it points to, or the rows pointing at it. Keep chaining, step Back, or promote any hop to its own tab.</p>
+            <h3>Follow relations, even without foreign keys</h3>
+            <p>Right-click a row and jump to the rows it points to, or the rows pointing at it. No constraints? rgrip infers relations from column names and types (<code>customer_id</code> → <code>customers.id</code>) and marks them as inferred. Keep chaining, step Back, or open any hop as a tab.</p>
           </div>
-          <figure class="shot"><img src="img/related.png" alt="Related-rows popup following foreign keys" width="1600" height="1000" loading="lazy"></figure>
+          <figure class="shot"><img src="img/inferred.png" alt="Related rows found through an inferred relation" width="1600" height="1000" loading="lazy"></figure>
         </div>
 
         <div class="row rev">
           <div class="txt">
             <p class="tag">Grid</p>
-            <h3>Pin what matters</h3>
-            <p>Freeze columns so keys and names stay put while you scroll through wide tables. The grid is virtualized and pages 1,000 rows at a time from the server.</p>
+            <h3>Wide tables, tamed</h3>
+            <p>Freeze key columns so they stay put while you scroll, and jump to any column with <kbd>⌘J</kbd>. The grid is virtualized and pages 1,000 rows at a time from the server.</p>
           </div>
-          <figure class="shot"><img src="img/freeze.png" alt="Results grid with frozen columns" width="1600" height="1000" loading="lazy"></figure>
+          <figure class="shot"><img src="img/goto.png" alt="Go to column search over a sorted table" width="1600" height="1000" loading="lazy"></figure>
+        </div>
+
+        <div class="row">
+          <div class="txt">
+            <p class="tag">Safety</p>
+            <h3>Know when you're on prod</h3>
+            <p>Give a connection a color and every tab of it is tinted, titled <code>name@database</code>. Each console has its own schema picker, so unqualified names resolve where you expect.</p>
+          </div>
+          <figure class="shot"><img src="img/tabs.png" alt="Red-tinted production tabs and the console schema picker" width="1600" height="1000" loading="lazy"></figure>
+        </div>
+
+        <div class="row rev">
+          <div class="txt">
+            <p class="tag">Yours</p>
+            <h3>Your own slash commands</h3>
+            <p>Type <code>/count parcels</code> and press Tab. Edit the built-ins or add your own in Settings: an SQL template with <code>{table}</code>, <code>{field}</code> and <code>{n=100}</code>, with a live preview.</p>
+          </div>
+          <figure class="shot"><img src="img/commands.png" alt="Slash command editor with a live preview" width="1600" height="1000" loading="lazy"></figure>
         </div>
 
         <div class="row">
@@ -142,6 +160,7 @@
           <div><dt><kbd>⇧</kbd><kbd>⌘</kbd><kbd>F</kbd></dt><dd>Format SQL</dd></div>
           <div><dt><kbd>⌘</kbd><kbd>N</kbd></dt><dd>New query</dd></div>
           <div><dt><kbd>⌘</kbd><kbd>W</kbd></dt><dd>Close tab</dd></div>
+          <div><dt><kbd>⌘</kbd><kbd>J</kbd></dt><dd>Go to column</dd></div>
           <div><dt><kbd>Tab</kbd></dt><dd>Expand slash command</dd></div>
         </dl>
       </div>

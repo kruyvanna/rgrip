@@ -72,12 +72,16 @@
     <td><img src="docs/screenshots/edit.png" alt="Inline editing"><br><sub>Inline editing with a date picker and pending changes</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/related.png" alt="Related rows"><br><sub>Follow foreign keys with Related</sub></td>
-    <td><img src="docs/screenshots/freeze.png" alt="Frozen columns"><br><sub>Freeze columns while scrolling</sub></td>
+    <td><img src="docs/screenshots/inferred.png" alt="Inferred relation"><br><sub>Related rows through an inferred relation (no FK)</sub></td>
+    <td><img src="docs/screenshots/goto.png" alt="Go to column"><br><sub>Go to column (⌘J) and sort indicators</sub></td>
   </tr>
   <tr>
+    <td><img src="docs/screenshots/tabs.png" alt="Connection colors"><br><sub>Color-coded connection tabs and the console schema picker</sub></td>
+    <td><img src="docs/screenshots/commands.png" alt="Slash commands"><br><sub>Your own slash commands, with a live preview</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/freeze.png" alt="Frozen columns"><br><sub>Freeze columns while scrolling</sub></td>
     <td><img src="docs/screenshots/copy-image.png" alt="Copy as image"><br><sub>Copy rows as an image</sub></td>
-    <td><img src="docs/screenshots/complete.png" alt="Autocomplete"><br><sub>Context-aware autocomplete with column types</sub></td>
   </tr>
 </table>
 
@@ -120,6 +124,7 @@ To build the app bundle yourself:
 | ⇧⌘F | Format query |
 | ⌘N | New query |
 | ⌘W | Close tab |
+| ⌘J | Go to column (in a results grid) |
 | Tab | Expand slash command |
 | Esc | Close popups / cancel cell edit |
 

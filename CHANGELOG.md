@@ -5,6 +5,17 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.0.8-alpha] - 2026-10-14
+
+### Added
+- Smart relations: Related also follows relations inferred from column names and types when there is no foreign key (`orders.customer_id` → `customers.id`, plurals, shared key names like `parcel_code`). Inferred ones are marked `~ inferred`; generic keys such as `objectid` are ignored.
+- Go to column: ⌘J, the corner button of any grid, or the header menu. Search, jump and the column flashes.
+- Sort indicators: painted arrows on sorted columns, a hint on sortable headers.
+- Connection colors: tint every tab of a connection (e.g. red for production); console tabs are titled `name@database`.
+- Schema picker per console: queries, paging and Export all run with that schema on the `search_path`; autocomplete and slash commands prefer it.
+- Configurable slash commands (Settings → Slash commands…): edit the built-ins or add your own SQL templates with `{table}`, `{field}`, `{field+_4326}` and `{n=100}`, with a live preview. Saved to `commands.toml`.
+- Title bar buttons: appearance (System / Light / Dark), check for updates (or "Update to x.y"), GitHub and Sponsor.
+
 ## [0.0.7-alpha] - 2026-10-13
 
 ### Added
@@ -97,7 +108,8 @@ First alpha: a minimal DataGrip-style PostgreSQL client written in Rust.
 - Khmer typed into the SQL editor is not shaped yet.
 - Only macOS on Apple silicon is published; other platforms can build from source.
 
-[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.7-alpha...HEAD
+[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.8-alpha...HEAD
+[0.0.8-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.8-alpha
 [0.0.7-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.7-alpha
 [0.0.6-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.6-alpha
 [0.0.5-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.5-alpha
