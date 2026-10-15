@@ -47,6 +47,8 @@ scene tabmenu RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_SQL="select 1;" RGRIP_DEMO_MORE=
 scene connmenu RGRIP_DEMO_SQL="select 1;" RGRIP_DEMO_CONN_MENU=0
 scene sticky RGRIP_DEMO_EXPAND=public,tiger RGRIP_DEMO_EXPLORER_SCROLL=420 RGRIP_DEMO_SQL="select 1;"
 scene split RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_TABLE_VIEW=split RGRIP_DEMO_SELECT=2,7,9,15
+scene import RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_IMPORT="$PWD/crates/core/tests/fixtures/places.csv"
+scene import-geojson RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_IMPORT="$PWD/crates/core/tests/fixtures/places.geojson"
 scene confirm RGRIP_DEMO_COLOR=red RGRIP_DEMO_SQL="update demo.owners set verified = verified;"
 scene goto RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_SORT=price_usd:desc RGRIP_DEMO_GOTO=sur
 scene rowmenu RGRIP_DEMO_EXPAND=legacy RGRIP_DEMO_TABLE=legacy.customers RGRIP_DEMO_ROW_MENU=1

@@ -45,6 +45,9 @@ pub struct ImportDialog {
     pub schema: String,
     /// Tables of the schema, to catch name clashes and to append to.
     tables: Vec<String>,
+    /// The name made from the file name, until the user types one: the
+    /// table name is kept clear of existing tables as they load.
+    auto_name: Option<String>,
     path: Option<PathBuf>,
     loading: Option<mpsc::Receiver<Result<Opened, String>>>,
     opened: Option<Opened>,
@@ -78,6 +81,7 @@ impl ImportDialog {
             conn,
             schema,
             tables: Vec::new(),
+            auto_name: None,
             path: None,
             loading: None,
             opened: None,
@@ -102,6 +106,18 @@ impl ImportDialog {
         }
     }
 
+    /// `name`, `name_2`, … whichever isn't taken yet.
+    fn free_name(&mut self) {
+        let Some(base) = &self.auto_name else { return };
+        let mut name = base.clone();
+        let mut n = 2;
+        while self.tables.contains(&name) {
+            name = format!("{base}_{n}");
+            n += 1;
+        }
+        self.table = name;
+    }
+
     pub fn table(&self) -> &str {
         self.table.trim()
     }
@@ -123,6 +139,18 @@ impl ImportDialog {
         if let Some(file) = dialog.pick_file() {
             self.open(ctx, file, None);
         }
+    }
+
+    /// Debug screenshot scenes: start with a file already picked.
+    #[cfg(debug_assertions)]
+    pub fn demo_open(&mut self, ctx: &egui::Context, path: PathBuf) {
+        self.open(ctx, path, None);
+    }
+
+    /// Whether a file is shown and no longer being read.
+    #[cfg(debug_assertions)]
+    pub fn demo_ready(&self) -> bool {
+        self.opened.is_some() && self.loading.is_none()
     }
 
     /// Read the file on a thread: big GeoJSON takes a moment to parse.
@@ -171,14 +199,8 @@ impl ImportDialog {
         if self.table.is_empty() || self.create {
             let stem = self.path.as_ref().and_then(|p| p.file_stem()).and_then(|s| s.to_str()).unwrap_or("");
             if self.create {
-                let base = import::sanitize_name(stem, "imported");
-                let mut name = base.clone();
-                let mut n = 2;
-                while self.tables.contains(&name) {
-                    name = format!("{base}_{n}");
-                    n += 1;
-                }
-                self.table = name;
+                self.auto_name = Some(import::sanitize_name(stem, "imported"));
+                self.free_name();
             }
         }
         self.preview = ResultSet {
@@ -226,8 +248,8 @@ impl ImportDialog {
             self.target.clear();
             self.cols = self.inferred.clone();
             if create && let Some(p) = &self.path {
-                let base = import::sanitize_name(p.file_stem().and_then(|s| s.to_str()).unwrap_or(""), "imported");
-                self.table = base;
+                self.auto_name = Some(import::sanitize_name(p.file_stem().and_then(|s| s.to_str()).unwrap_or(""), "imported"));
+                self.free_name();
             } else if !create {
                 self.table = self.tables.first().cloned().unwrap_or_default();
             }
@@ -304,7 +326,12 @@ impl ImportDialog {
     /// them). `target`: columns of the table being appended to,
     /// when the explorer has them.
     pub fn ui(&mut self, ctx: &egui::Context, tables: Vec<String>, target: Option<&[ColumnInfo]>) -> Outcome {
-        self.tables = tables;
+        if tables != self.tables {
+            self.tables = tables;
+            if self.create {
+                self.free_name();
+            }
+        }
         if let Some(rx) = &self.loading {
             match rx.try_recv() {
                 Ok(Ok(o)) => {
@@ -402,7 +429,9 @@ impl ImportDialog {
             }
             ui.add_space(8.0);
             if self.create {
-                ui.add(TextEdit::singleline(&mut self.table).desired_width(220.0).hint_text("table name"));
+                if ui.add(TextEdit::singleline(&mut self.table).desired_width(220.0).hint_text("table name")).changed() {
+                    self.auto_name = None;
+                }
             } else {
                 let before = self.table.clone();
                 egui::ComboBox::from_id_salt("import-table").selected_text(&self.table).width(220.0).show_ui(ui, |ui| {
@@ -480,7 +509,10 @@ impl ImportDialog {
                 for (i, c) in self.cols.iter_mut().enumerate() {
                     ui.checkbox(&mut c.include, "");
                     let source = RichText::new(&c.source).monospace().color(if c.include { theme::TEXT() } else { theme::FAINT() });
-                    ui.add_sized([220.0, 20.0], egui::Label::new(source).truncate());
+                    ui.allocate_ui_with_layout(egui::vec2(220.0, 20.0), Layout::left_to_right(Align::Center), |ui| {
+                        ui.set_min_width(220.0);
+                        ui.add(egui::Label::new(source).truncate());
+                    });
                     if append && !target.is_empty() {
                         egui::ComboBox::from_id_salt(("import-target", i)).selected_text(&c.name).width(200.0).show_ui(ui, |ui| {
                             for (name, ty) in &target {
@@ -493,7 +525,7 @@ impl ImportDialog {
                         });
                         ui.label(RichText::new(sql_short(&c.ty, &target, &c.name)).size(12.0).color(theme::MUTED()));
                     } else {
-                        ui.add(TextEdit::singleline(&mut c.name).desired_width(200.0));
+                        ui.add_sized([200.0, 20.0], TextEdit::singleline(&mut c.name));
                         if append {
                             ui.label(RichText::new("loading columns…").size(12.0).color(theme::FAINT()));
                         } else {

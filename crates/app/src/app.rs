@@ -1685,8 +1685,28 @@ impl App {
                 _ => false,
             },
         };
-        // A pending confirmation is a scene of its own (no results come).
-        let settled = settled || self.confirm.is_some();
+        // `RGRIP_DEMO_IMPORT=<file>`: the import dialog with that file picked,
+        // into the first `RGRIP_DEMO_EXPAND` schema.
+        static IMPORT_OPENED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        // Connects, then waits for the schema's tables, as when opened from
+        // the explorer.
+        if env("RGRIP_DEMO_IMPORT").is_some() && self.conns.first().is_some_and(|c| matches!(c.status, Status::Disconnected)) {
+            self.apply(Action::Connect(0));
+        }
+        let import_schema = env("RGRIP_DEMO_EXPAND").and_then(|v| v.split(',').next().map(String::from)).unwrap_or_else(|| "public".into());
+        if let Some(file) = env("RGRIP_DEMO_IMPORT")
+            && self.conns.first().is_some_and(|c| matches!(c.tables.get(&import_schema), Some(Load::Ready(_))))
+            && !IMPORT_OPENED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            let schema = import_schema;
+            self.apply(Action::Import(0, schema, None));
+            if let Some(d) = &mut self.import {
+                d.demo_open(&self.egui_ctx, file.into());
+            }
+        }
+        // A pending confirmation or the import dialog is a scene of its own
+        // (no results come).
+        let settled = settled || self.confirm.is_some() || self.import.as_ref().is_some_and(|d| d.demo_ready());
         if let Some(a) = follow_action {
             self.tab_action(self.active, a);
         }
@@ -2653,7 +2673,7 @@ impl Tree<'_> {
         let (resp, open) = self.row(ui, &key, 1, true, Icon::Schema, schema, count.as_deref(), actions);
         resp.context_menu(|ui| {
             menu_layout(ui);
-            if crate::icons::menu_item(ui, Svg::Upload, "Import data…", true).clicked() {
+            if crate::icons::menu_item(ui, Svg::Upload, "Import data…", !conn.cfg.read_only).clicked() {
                 actions.push(Action::Import(ci, schema.to_string(), None));
                 ui.close();
             }
@@ -2692,7 +2712,7 @@ impl Tree<'_> {
                 actions.push(Action::OpenTable(ci, schema.to_string(), t.name.clone()));
                 ui.close();
             }
-            if matches!(t.kind, TableKind::Table | TableKind::Partitioned) && crate::icons::menu_item(ui, Svg::Upload, "Import into this table…", true).clicked() {
+            if matches!(t.kind, TableKind::Table | TableKind::Partitioned) && crate::icons::menu_item(ui, Svg::Upload, "Import into this table…", !conn.cfg.read_only).clicked() {
                 actions.push(Action::Import(ci, schema.to_string(), Some(t.name.clone())));
                 ui.close();
             }
@@ -3985,8 +4005,8 @@ fn default_query_name(sql: &str, n: usize) -> String {
 }
 
 impl App {
-    /// Settings → Slash commands: list on the left, the selected command's
-    /// name, description and SQL template on the right, with a live preview.
+    /// The import dialog, fed the schema's tables and, when appending, the
+    /// target's columns.
     fn import_ui(&mut self, ctx: &egui::Context) {
         use crate::import::Outcome;
         let Some(d) = &mut self.import else { return };
@@ -4016,6 +4036,8 @@ impl App {
         }
     }
 
+    /// Settings → Slash commands: list on the left, the selected command's
+    /// name, description and SQL template on the right, with a live preview.
     fn commands_editor_ui(&mut self, ctx: &egui::Context) {
         use rgrip_core::commands::{self, SlashCommand};
         const LIST_W: f32 = 190.0;
