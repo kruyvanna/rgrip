@@ -5,6 +5,9 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Import data: right-click a schema (Import data…) or a table (Import into this table…) to load a CSV / TSV, GeoJSON or Shapefile. Pick the file, check a 50-row preview, edit column names and inferred types (integer, bigint, numeric, text, boolean, date, timestamp, jsonb, geometry), set the SRID, then create a new table or append to an existing one. CSV delimiter is detected (UTF-8 and BOM, quoted fields), lon/lat columns can become a point column, and a Shapefile's `.prj` is read to guess the SRID (WGS 84, UTM zones, EPSG codes). Rows go in with COPY inside one transaction on a connection of its own, with live progress; any error rolls everything back and names the row.
+
 ## [0.0.8-alpha] - 2026-10-14
 
 ### Added

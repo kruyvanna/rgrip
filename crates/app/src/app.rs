@@ -418,6 +418,8 @@ enum Action {
     Refresh(usize),
     NewConsole(usize),
     OpenTable(usize, String, String),
+    /// Import a file into a schema, or into one of its tables.
+    Import(usize, String, Option<String>),
     LoadSchemas(usize),
     LoadTables(usize, String),
     LoadColumns(usize, String, String),
@@ -569,6 +571,8 @@ pub struct App {
     selected: Option<String>,
     /// Slash command editor (Settings), while open.
     commands_editor: Option<CommandsEditor>,
+    /// The Import data dialog, while open.
+    import: Option<crate::import::ImportDialog>,
     /// Debug demo recordings: the scripted steps being played.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     demo_play: Option<DemoPlay>,
@@ -629,6 +633,7 @@ impl App {
             demo_settled: None,
             demo_play: None,
             commands_editor: None,
+            import: None,
         }
     }
 
@@ -821,6 +826,25 @@ impl App {
                             }
                             Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
                         }
+                    }
+                }
+                Ev::ImportProgress { conn, rows } => {
+                    if let Some(d) = self.import.as_mut().filter(|d| d.conn == conn) {
+                        d.progress(rows);
+                    }
+                }
+                Ev::ImportDone { conn, schema, table, result } => {
+                    if let Ok(n) = &result {
+                        self.toast = Some((format!("Imported {} into {schema}.{table}", plural(*n, "row")), theme::OK(), Instant::now()));
+                        // The table list and the autocomplete catalog know the new table.
+                        if let Some(ci) = self.conn_index(&conn) {
+                            self.conns[ci].columns.remove(&(schema.clone(), table));
+                            self.worker.send(Cmd::Tables(conn.clone(), schema));
+                            self.worker.send(Cmd::Catalog(conn.clone(), None));
+                        }
+                    }
+                    if let Some(d) = self.import.as_mut().filter(|d| d.conn == conn) {
+                        d.finished(result);
                     }
                 }
                 Ev::Exported(result) => {
@@ -1076,6 +1100,12 @@ impl App {
             }
             Action::NewConsole(ci) => self.open_console(ci),
             Action::OpenTable(ci, s, t) => self.open_table(ci, s, t),
+            Action::Import(ci, schema, table) => {
+                if !matches!(self.conns[ci].tables.get(&schema), Some(Load::Ready(_) | Load::Loading)) {
+                    self.apply(Action::LoadTables(ci, schema.clone()));
+                }
+                self.import = Some(crate::import::ImportDialog::new(self.conns[ci].cfg.id.clone(), schema, table));
+            }
             Action::LoadSchemas(ci) => {
                 let c = &mut self.conns[ci];
                 c.schemas = Some(Load::Loading);
@@ -1938,6 +1968,7 @@ impl eframe::App for App {
         self.dialog_ui(ctx);
         self.name_prompt_ui(ctx);
         self.commands_editor_ui(ctx);
+        self.import_ui(ctx);
 
         if let Some(a) = tab_action {
             self.tab_action(self.active, a);
@@ -2525,7 +2556,14 @@ impl Tree<'_> {
             Some(Load::Ready(t)) => Some(t.len().to_string()),
             _ => None,
         };
-        let (_, open) = self.row(ui, &key, 1, true, Icon::Schema, schema, count.as_deref(), actions);
+        let (resp, open) = self.row(ui, &key, 1, true, Icon::Schema, schema, count.as_deref(), actions);
+        resp.context_menu(|ui| {
+            menu_layout(ui);
+            if crate::icons::menu_item(ui, Svg::Upload, "Import data…", true).clicked() {
+                actions.push(Action::Import(ci, schema.to_string(), None));
+                ui.close();
+            }
+        });
         if !open {
             return;
         }
@@ -2558,6 +2596,10 @@ impl Tree<'_> {
             menu_layout(ui);
             if crate::icons::menu_item(ui, Svg::Table, "Open data", true).clicked() {
                 actions.push(Action::OpenTable(ci, schema.to_string(), t.name.clone()));
+                ui.close();
+            }
+            if matches!(t.kind, TableKind::Table | TableKind::Partitioned) && crate::icons::menu_item(ui, Svg::Upload, "Import into this table…", true).clicked() {
+                actions.push(Action::Import(ci, schema.to_string(), Some(t.name.clone())));
                 ui.close();
             }
             if crate::icons::menu_item(ui, Svg::Copy, "Copy name", true).clicked() {
@@ -3747,6 +3789,35 @@ fn default_query_name(sql: &str, n: usize) -> String {
 impl App {
     /// Settings → Slash commands: list on the left, the selected command's
     /// name, description and SQL template on the right, with a live preview.
+    fn import_ui(&mut self, ctx: &egui::Context) {
+        use crate::import::Outcome;
+        let Some(d) = &mut self.import else { return };
+        let Some(ci) = self.conns.iter().position(|c| c.cfg.id == d.conn) else {
+            self.import = None;
+            return;
+        };
+        let conn = &self.conns[ci];
+        let tables = match conn.tables.get(&d.schema) {
+            Some(Load::Ready(t)) => t.iter().filter(|t| matches!(t.kind, TableKind::Table | TableKind::Partitioned)).map(|t| t.name.clone()).collect(),
+            _ => Vec::new(),
+        };
+        let target = match conn.columns.get(&(d.schema.clone(), d.table().to_string())) {
+            Some(Load::Ready(cols)) => Some(cols.as_slice()),
+            _ => None,
+        };
+        let (id, schema) = (d.conn.clone(), d.schema.clone());
+        match d.ui(ctx, tables, target) {
+            Outcome::Keep => {}
+            Outcome::Close => self.import = None,
+            Outcome::Start(request) => self.worker.send(Cmd::Import { conn: id, request }),
+            Outcome::NeedColumns(table) => self.apply(Action::LoadColumns(ci, schema, table)),
+            Outcome::OpenTable(table) => {
+                self.import = None;
+                self.open_table(ci, schema, table);
+            }
+        }
+    }
+
     fn commands_editor_ui(&mut self, ctx: &egui::Context) {
         use rgrip_core::commands::{self, SlashCommand};
         const LIST_W: f32 = 190.0;

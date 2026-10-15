@@ -594,6 +594,48 @@ impl PgConn {
         Ok(counts.len())
     }
 
+    /// Load a file into a table, all or nothing. `progress` gets the rows
+    /// sent so far. The caller should use a connection of its own: the
+    /// transaction would otherwise swallow other queries on a shared one.
+    pub async fn import(&self, req: &crate::import::ImportRequest, mut progress: impl FnMut(usize)) -> Result<usize, String> {
+        use futures_util::SinkExt;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let _reader = crate::import::spawn_encoder(req.clone(), tx);
+        self.client.batch_execute("begin").await.map_err(|e| format_error(&e, None))?;
+        let load = async {
+            let db = |e: tokio_postgres::Error| import_error(&e);
+            if req.create {
+                self.client.batch_execute(&crate::import::create_table_sql(req)).await.map_err(db)?;
+            }
+            let sink = self.client.copy_in::<_, bytes::Bytes>(&crate::import::copy_sql(req)).await.map_err(db)?;
+            futures_util::pin_mut!(sink);
+            let mut sent = 0;
+            while let Some(chunk) = rx.recv().await {
+                // A file error ends the load here; dropping the sink aborts the COPY.
+                let (data, rows) = chunk?;
+                sink.send(data).await.map_err(db)?;
+                sent += rows;
+                progress(sent);
+            }
+            let copied = sink.finish().await.map_err(db)?;
+            for stmt in crate::import::index_sql(req) {
+                self.client.batch_execute(&stmt).await.map_err(db)?;
+            }
+            Ok::<_, String>(copied as usize)
+        }
+        .await;
+        match load {
+            Ok(n) => {
+                self.client.batch_execute("commit").await.map_err(|e| format_error(&e, None))?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = self.client.batch_execute("rollback").await;
+                Err(e)
+            }
+        }
+    }
+
     pub async fn cancel(&self) -> Result<(), String> {
         self.cancel.cancel_query(self.tls.clone()).await.map_err(|e| e.to_string())
     }
@@ -684,6 +726,16 @@ fn format_error_inner(e: &tokio_postgres::Error, sql: Option<(&str, usize)>) -> 
     if let (Some(ErrorPosition::Original(pos)), Some((sql, shift))) = (db.position(), sql) {
         let (line, col) = crate::sql::line_col(sql, (*pos as usize).saturating_sub(shift).max(1));
         s += &format!("\nPosition: line {line}, column {col}");
+    }
+    s
+}
+
+/// Like [`format_error`], plus where COPY failed ("COPY t, line 5, column x"):
+/// its line numbers count data rows, so line N is row N of the file.
+fn import_error(e: &tokio_postgres::Error) -> String {
+    let mut s = format_error(e, None);
+    if let Some(w) = e.as_db_error().and_then(|d| d.where_()) {
+        s += &format!("\nWhere: {w} (line numbers count data rows, without the header)");
     }
     s
 }
