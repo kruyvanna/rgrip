@@ -132,7 +132,7 @@ To build the app bundle yourself:
 
 Connections and saved queries are stored in `~/Library/Application Support/dev.rgrip.rgrip/` (`connections.toml`, and `.sql` files under `queries/`).
 
-> **Note:** passwords are currently stored in plain text there (file mode 0600). Keychain support is not implemented yet.
+Passwords (database, SSH password and key passphrase) are stored in the macOS Keychain (service `dev.rgrip.rgrip`), not in `connections.toml`. Older plain-text passwords are moved to the Keychain automatically on first launch. If the Keychain is unavailable, rgrip shows a notice and keeps them in the file (mode 0600) as before.
 
 ## Project layout
 

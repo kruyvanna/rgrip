@@ -13,10 +13,93 @@ pub fn config_path() -> Option<PathBuf> {
         .map(|d| d.config_dir().join("connections.toml"))
 }
 
-pub fn load_connections() -> Vec<ConnectionConfig> {
-    let Some(path) = config_path() else {
-        return Vec::new();
-    };
+/// Where connection secrets live. The OS credential store in the app; an
+/// in-memory map in tests so they never touch the real Keychain.
+pub trait SecretStore {
+    fn get(&self, account: &str) -> Result<Option<String>, String>;
+    fn set(&self, account: &str, value: &str) -> Result<(), String>;
+    /// Deleting something that isn't there is not an error.
+    fn delete(&self, account: &str) -> Result<(), String>;
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const KEYCHAIN_SERVICE: &str = "dev.rgrip.rgrip";
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct KeyringStore;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl KeyringStore {
+    fn entry(account: &str) -> Result<keyring::Entry, String> {
+        keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl SecretStore for KeyringStore {
+    fn get(&self, account: &str) -> Result<Option<String>, String> {
+        match Self::entry(account)?.get_password() {
+            Ok(v) => Ok(Some(v)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    fn set(&self, account: &str, value: &str) -> Result<(), String> {
+        Self::entry(account)?.set_password(value).map_err(|e| e.to_string())
+    }
+    fn delete(&self, account: &str) -> Result<(), String> {
+        match Self::entry(account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// No credential store on this platform: secrets stay in the 0600 file.
+/// (keyring's default backend there is a throwaway mock, so don't use it.)
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+struct KeyringStore;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+impl SecretStore for KeyringStore {
+    fn get(&self, _: &str) -> Result<Option<String>, String> {
+        Err("no credential store on this platform".into())
+    }
+    fn set(&self, _: &str, _: &str) -> Result<(), String> {
+        Err("no credential store on this platform".into())
+    }
+    fn delete(&self, _: &str) -> Result<(), String> {
+        Err("no credential store on this platform".into())
+    }
+}
+
+/// The secret fields of a connection and their Keychain account suffixes.
+fn secret_fields(c: &mut ConnectionConfig) -> [(&'static str, &mut String); 3] {
+    [("password", &mut c.password), ("ssh_password", &mut c.ssh.password), ("ssh_passphrase", &mut c.ssh.passphrase)]
+}
+
+fn account(id: &str, field: &str) -> String {
+    format!("{id}:{field}")
+}
+
+static KEYCHAIN_WARNING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static KEYCHAIN_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Remember a Keychain problem to show once per run (the first one wins).
+fn warn_keychain(err: &str) {
+    if !KEYCHAIN_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        && let Ok(mut w) = KEYCHAIN_WARNING.lock()
+    {
+        *w = Some(format!("Keychain unavailable ({err}); passwords stay in connections.toml"));
+    }
+}
+
+/// The pending one-time Keychain notice, if any.
+pub fn take_keychain_warning() -> Option<String> {
+    KEYCHAIN_WARNING.lock().ok().and_then(|mut w| w.take())
+}
+
+fn parse_file(path: &Path) -> Vec<ConnectionConfig> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| toml::from_str::<ConfigFile>(&s).ok())
@@ -24,21 +107,84 @@ pub fn load_connections() -> Vec<ConnectionConfig> {
         .unwrap_or_default()
 }
 
+pub fn load_connections() -> Vec<ConnectionConfig> {
+    let Some(path) = config_path() else {
+        return Vec::new();
+    };
+    load_connections_at(&path, &KeyringStore)
+}
+
 pub fn save_connections(connections: &[ConnectionConfig]) -> Result<(), String> {
     let path = config_path().ok_or("no config directory")?;
+    save_connections_at(&path, &KeyringStore, connections)
+}
+
+fn load_connections_at(path: &Path, store: &dyn SecretStore) -> Vec<ConnectionConfig> {
+    let mut conns = parse_file(path);
+    let mut migrated = false;
+    for c in &mut conns {
+        let id = c.id.clone();
+        for (field, value) in secret_fields(c) {
+            let acct = account(&id, field);
+            if value.is_empty() {
+                match store.get(&acct) {
+                    Ok(Some(v)) => *value = v,
+                    Ok(None) => {}
+                    Err(e) => warn_keychain(&e),
+                }
+            } else {
+                // Plain-text secret from an older file: move it to the store.
+                match store.set(&acct, value) {
+                    Ok(()) => migrated = true,
+                    Err(e) => warn_keychain(&e),
+                }
+            }
+        }
+    }
+    // Rewrite only to drop secrets whose store write succeeded; save re-checks
+    // each one, so nothing is blanked unless it is safely in the store.
+    if migrated {
+        let _ = save_connections_at(path, store, &conns);
+    }
+    conns
+}
+
+fn save_connections_at(path: &Path, store: &dyn SecretStore, connections: &[ConnectionConfig]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let file = ConfigFile {
-        connections: connections.to_vec(),
-    };
-    let text = toml::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    // Passwords live in this file, keep it private.
+    // Connections that vanished since the last save were deleted: drop their secrets.
+    for mut old in parse_file(path) {
+        if !connections.iter().any(|c| c.id == old.id) {
+            let id = old.id.clone();
+            for (field, _) in secret_fields(&mut old) {
+                let _ = store.delete(&account(&id, field));
+            }
+        }
+    }
+    let mut out = connections.to_vec();
+    for c in &mut out {
+        let id = c.id.clone();
+        for (field, value) in secret_fields(c) {
+            let acct = account(&id, field);
+            if value.is_empty() {
+                // Cleared in the UI: don't leave a stale secret behind.
+                let _ = store.delete(&acct);
+            } else if let Err(e) = store.set(&acct, value) {
+                // Keep the plain value in the file rather than lose it.
+                warn_keychain(&e);
+            } else {
+                value.clear();
+            }
+        }
+    }
+    let text = toml::to_string_pretty(&ConfigFile { connections: out }).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| e.to_string())?;
+    // Secrets may still live in this file (fallback), keep it private.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
 }
@@ -352,5 +498,106 @@ mod tests {
         // `help` is optional.
         let one: CommandsFile = toml::from_str("[[command]]\nname = 'x'\ntemplate = 'select 1'\n").unwrap();
         assert_eq!(one.commands[0].help, "");
+    }
+
+    #[derive(Default)]
+    struct MemStore {
+        items: std::sync::Mutex<std::collections::HashMap<String, String>>,
+        /// Simulates a locked or denied Keychain.
+        broken: bool,
+    }
+
+    impl SecretStore for MemStore {
+        fn get(&self, a: &str) -> Result<Option<String>, String> {
+            if self.broken { return Err("denied".into()); }
+            Ok(self.items.lock().unwrap().get(a).cloned())
+        }
+        fn set(&self, a: &str, v: &str) -> Result<(), String> {
+            if self.broken { return Err("denied".into()); }
+            self.items.lock().unwrap().insert(a.into(), v.into());
+            Ok(())
+        }
+        fn delete(&self, a: &str) -> Result<(), String> {
+            if self.broken { return Err("denied".into()); }
+            self.items.lock().unwrap().remove(a);
+            Ok(())
+        }
+    }
+
+    fn secret_conn(id: &str) -> ConnectionConfig {
+        let mut c = ConnectionConfig { id: id.into(), name: id.into(), ..Default::default() };
+        c.password = "pw-secret".into();
+        c.ssh.password = "ssh-secret".into();
+        c.ssh.passphrase = "kp-secret".into();
+        c
+    }
+
+    fn temp_file(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rgrip-keychain-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("connections.toml")
+    }
+
+    #[test]
+    fn secrets_round_trip_through_store_not_file() {
+        let (path, store) = (temp_file("rt"), MemStore::default());
+        save_connections_at(&path, &store, &[secret_conn("a")]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("pw-secret") && !text.contains("kp-secret") && !text.contains("ssh-secret"));
+        assert_eq!(store.get("a:password").unwrap().as_deref(), Some("pw-secret"));
+        let back = load_connections_at(&path, &store);
+        assert_eq!((back[0].password.as_str(), back[0].ssh.password.as_str(), back[0].ssh.passphrase.as_str()), ("pw-secret", "ssh-secret", "kp-secret"));
+    }
+
+    #[test]
+    fn plain_text_file_migrates_to_store() {
+        let (path, store) = (temp_file("mig"), MemStore::default());
+        let plain = toml::to_string_pretty(&ConfigFile { connections: vec![secret_conn("a")] }).unwrap();
+        std::fs::write(&path, plain).unwrap();
+        let loaded = load_connections_at(&path, &store);
+        assert_eq!(loaded[0].password, "pw-secret");
+        assert_eq!(store.get("a:ssh_passphrase").unwrap().as_deref(), Some("kp-secret"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("pw-secret") && !text.contains("kp-secret"));
+    }
+
+    #[test]
+    fn denied_store_keeps_plain_text() {
+        let (path, store) = (temp_file("deny"), MemStore { broken: true, ..Default::default() });
+        let plain = toml::to_string_pretty(&ConfigFile { connections: vec![secret_conn("a")] }).unwrap();
+        std::fs::write(&path, &plain).unwrap();
+        // Load must not lose or blank anything.
+        assert_eq!(load_connections_at(&path, &store)[0].password, "pw-secret");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), plain);
+        // Save falls back to plain text too.
+        save_connections_at(&path, &store, &[secret_conn("a")]).unwrap();
+        assert_eq!(parse_file(&path)[0].ssh.password, "ssh-secret");
+        assert!(take_keychain_warning().is_some());
+    }
+
+    #[test]
+    fn removed_connection_and_cleared_secret_leave_the_store() {
+        let (path, store) = (temp_file("del"), MemStore::default());
+        save_connections_at(&path, &store, &[secret_conn("a"), secret_conn("b")]).unwrap();
+        let mut a = secret_conn("a");
+        a.password.clear();
+        save_connections_at(&path, &store, &[a]).unwrap();
+        assert_eq!(store.get("a:password").unwrap(), None);
+        assert_eq!(store.get("a:ssh_password").unwrap().as_deref(), Some("ssh-secret"));
+        assert_eq!(store.get("b:password").unwrap(), None);
+        assert_eq!(store.get("b:ssh_passphrase").unwrap(), None);
+    }
+
+    /// Talks to the real Keychain (may prompt): `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn real_keychain_round_trip() {
+        let acct = format!("test-{}:password", std::process::id());
+        KeyringStore.set(&acct, "secret").unwrap();
+        assert_eq!(KeyringStore.get(&acct).unwrap().as_deref(), Some("secret"));
+        KeyringStore.delete(&acct).unwrap();
+        assert_eq!(KeyringStore.get(&acct).unwrap(), None);
     }
 }

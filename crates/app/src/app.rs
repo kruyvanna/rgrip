@@ -620,7 +620,7 @@ impl App {
             next_tab: 1,
             dialog: None,
             filter: String::new(),
-            notice: None,
+            notice: config::take_keychain_warning(),
             saved: config::load_queries(),
             name_prompt: None,
             toast: None,
@@ -650,6 +650,8 @@ impl App {
         let cfgs: Vec<_> = self.conns.iter().map(|c| c.cfg.clone()).collect();
         if let Err(e) = config::save_connections(&cfgs) {
             self.notice = Some(format!("Could not save connections: {e}"));
+        } else if let Some(w) = config::take_keychain_warning() {
+            self.notice = Some(w);
         }
     }
 

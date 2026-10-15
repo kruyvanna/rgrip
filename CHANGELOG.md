@@ -5,6 +5,9 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- Passwords, SSH passwords and key passphrases are stored in the macOS Keychain instead of plain text in `connections.toml`. Existing plain-text secrets migrate automatically; if the Keychain is unavailable rgrip warns once and falls back to the file.
+
 ## [0.0.8-alpha] - 2026-10-14
 
 ### Added
