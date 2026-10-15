@@ -29,7 +29,9 @@ pub enum Outcome {
 enum Key {
     /// A new identity column `id` (or `gid`, … when taken).
     New,
-    Column(String),
+    /// An imported column, by its place in `cols`: names change as they're
+    /// edited, and two can be the same for a moment.
+    Column(usize),
     None,
 }
 
@@ -225,6 +227,7 @@ impl ImportDialog {
         self.grid = GridState::default();
         self.inferred = cols.clone();
         self.cols = cols;
+        self.key = Key::New;
         self.mapped_for = None;
         self.sampled = o.sample.len();
         // The sample lives on in `preview`; keep the rest light to clone per frame.
@@ -262,6 +265,7 @@ impl ImportDialog {
             self.asked_columns = None;
             self.target.clear();
             self.cols = self.inferred.clone();
+            self.key = Key::New;
             if create && let Some(p) = &self.path {
                 self.auto_name = Some(import::sanitize_name(p.file_stem().and_then(|s| s.to_str()).unwrap_or(""), "imported"));
                 self.free_name();
@@ -276,8 +280,17 @@ impl ImportDialog {
         let taken = |n: &str| self.cols.iter().any(|c| c.include && c.name.trim() == n);
         match &self.key {
             Key::New => Some(["id", "gid", "fid", "row_id"].into_iter().find(|n| !taken(n)).unwrap_or("rgrip_id").to_string()),
-            Key::Column(c) if taken(c) => Some(c.clone()),
-            Key::Column(_) | Key::None => None,
+            Key::Column(i) => self.cols.get(*i).filter(|c| c.include).map(|c| c.name.trim().to_string()),
+            Key::None => None,
+        }
+    }
+
+    /// Unticking the key column takes the key back to a new one.
+    fn settle_key(&mut self) {
+        if let Key::Column(i) = self.key
+            && !self.cols.get(i).is_some_and(|c| c.include && c.ty != "geometry")
+        {
+            self.key = Key::New;
         }
     }
 
@@ -527,16 +540,17 @@ impl ImportDialog {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Primary key").color(theme::MUTED()));
+                self.settle_key();
                 let new = format!("new column {}", self.key_name().filter(|_| self.key == Key::New).unwrap_or_else(|| "id".into()));
                 let text = match &self.key {
                     Key::New => new.clone(),
-                    Key::Column(c) => c.clone(),
+                    Key::Column(i) => self.cols[*i].name.trim().to_string(),
                     Key::None => "none".into(),
                 };
                 egui::ComboBox::from_id_salt("import-key").selected_text(text).width(200.0).show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.key, Key::New, new);
-                    for c in self.cols.iter().filter(|c| c.include && c.ty != "geometry") {
-                        ui.selectable_value(&mut self.key, Key::Column(c.name.trim().to_string()), c.name.trim());
+                    for (i, c) in self.cols.iter().enumerate().filter(|(_, c)| c.include && c.ty != "geometry") {
+                        ui.selectable_value(&mut self.key, Key::Column(i), c.name.trim());
                     }
                     ui.selectable_value(&mut self.key, Key::None, "none");
                 });
@@ -684,4 +698,29 @@ fn sql_short(ty: &str, target: &[(String, String)], name: &str) -> String {
 
 fn plural_rows(n: usize) -> String {
     crate::app::plural(n, "row")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col(i: usize, name: &str) -> Col {
+        Col { kind: Kind::Field(i), include: true, source: name.into(), name: name.into(), ty: "text".into() }
+    }
+
+    /// Rename a column to `code` and make it the key, untick it, then name
+    /// another one `code`: the key doesn't follow the name.
+    #[test]
+    fn key_follows_the_column_not_its_name() {
+        let mut d = ImportDialog::new("c".into(), "public".into(), None);
+        d.cols = vec![col(0, "shapeiso"), col(1, "shapename")];
+        d.cols[0].name = "code".into();
+        d.key = Key::Column(0);
+        assert_eq!(d.key_name().as_deref(), Some("code"));
+        d.cols[0].include = false;
+        d.cols[1].name = "code".into();
+        d.settle_key();
+        assert!(d.key == Key::New);
+        assert_eq!(d.key_name().as_deref(), Some("id"));
+    }
 }
