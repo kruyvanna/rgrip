@@ -192,3 +192,29 @@ async fn end_to_end() {
     conn.execute(&format!("drop schema {schema} cascade")).await.unwrap();
     result
 }
+
+#[tokio::test]
+async fn read_only_session_rejects_writes() {
+    let Ok(rw) = PgConn::connect(&cfg()).await else {
+        eprintln!("skipping: no postgres reachable");
+        return;
+    };
+    let table = format!("rgrip_ro_{}", std::process::id());
+    rw.execute(&format!("create table {table} (a int)")).await.unwrap();
+
+    let result = async {
+        let ro = PgConn::connect(&ConnectionConfig { read_only: true, ..cfg() }).await.unwrap();
+        let out = ro.execute(&format!("select * from {table}")).await.unwrap();
+        assert!(out.statements[0].result.is_some(), "reads still work");
+
+        let err = ro.execute(&format!("insert into {table} values (1)")).await.unwrap_err();
+        assert!(err.contains("This connection is read-only"), "{err}");
+        assert!(err.contains("25006"), "{err}");
+
+        // The writable connection is unaffected.
+        rw.execute(&format!("insert into {table} values (2)")).await.unwrap();
+    }
+    .await;
+    rw.execute(&format!("drop table {table}")).await.unwrap();
+    result
+}

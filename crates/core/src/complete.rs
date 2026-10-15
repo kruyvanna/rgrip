@@ -148,38 +148,38 @@ const RESERVED: &[&str] = &[
 ];
 
 #[derive(Clone, Debug, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     /// Identifier or keyword; unquoted words are lowercased.
     Word { text: String, quoted: bool },
     Punct(char),
 }
 
 #[derive(Clone, Debug)]
-struct Token {
-    tok: Tok,
+pub(crate) struct Token {
+    pub(crate) tok: Tok,
     start: usize,
     end: usize,
 }
 
 impl Token {
-    fn word(&self) -> Option<&str> {
+    pub(crate) fn word(&self) -> Option<&str> {
         match &self.tok {
             Tok::Word { text, .. } => Some(text),
             Tok::Punct(_) => None,
         }
     }
 
-    fn is_word(&self, w: &str) -> bool {
+    pub(crate) fn is_word(&self, w: &str) -> bool {
         matches!(&self.tok, Tok::Word { text, quoted: false } if text == w)
     }
 
-    fn is_punct(&self, c: char) -> bool {
+    pub(crate) fn is_punct(&self, c: char) -> bool {
         self.tok == Tok::Punct(c)
     }
 }
 
 /// Tokenize, skipping strings, comments and numbers.
-fn tokenize(s: &str) -> Vec<Token> {
+pub(crate) fn tokenize(s: &str) -> Vec<Token> {
     let b = s.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;

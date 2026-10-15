@@ -134,6 +134,9 @@ pub struct ConnectionConfig {
     pub ssh: SshConfig,
     #[serde(default)]
     pub color: ConnColor,
+    /// Postgres rejects writes: the session is set read-only on connect.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl Default for ConnectionConfig {
@@ -156,6 +159,7 @@ impl Default for ConnectionConfig {
             ssl_client_key: String::new(),
             ssh: SshConfig::default(),
             color: ConnColor::None,
+            read_only: false,
         }
     }
 }

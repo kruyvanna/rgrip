@@ -517,6 +517,38 @@ enum NameTarget {
     Rename(String),
 }
 
+/// Statements waiting for the user's go-ahead (see `rgrip_core::safety`).
+struct Confirm {
+    tab: TabId,
+    kind: ConfirmKind,
+    title: String,
+    /// Statement, why it is risky, and whether it is dangerous anywhere
+    /// (rather than just a write on production).
+    items: Vec<(String, String, bool)>,
+    /// The keyboard focus was put on Cancel.
+    focused: bool,
+}
+
+enum ConfirmKind {
+    Run { all: bool },
+    Save,
+}
+
+const READ_ONLY_HINT: &str = "This connection is read-only: Postgres rejects writes. Untick it in the connection's settings to edit.";
+
+/// The statements of `sql` that need a go-ahead: dangerous ones anywhere,
+/// any write on production.
+fn risky_items(sql: &str, production: bool) -> Vec<(String, String, bool)> {
+    rgrip_core::safety::classify(sql)
+        .into_iter()
+        .filter(|f| f.danger.is_some() || production)
+        .map(|f| match f.danger {
+            Some(why) => (sql[f.range].to_string(), why.to_string(), true),
+            None => (sql[f.range].to_string(), "Writes to a production connection".to_string(), false),
+        })
+        .collect()
+}
+
 enum TabAction {
     /// Load the connection's schemas (for the console's schema picker).
     LoadSchemas,
@@ -556,6 +588,9 @@ pub struct App {
     notice: Option<String>,
     saved: Vec<SavedQuery>,
     name_prompt: Option<NamePrompt>,
+    confirm: Option<Confirm>,
+    /// The next Run / Save was confirmed: don't ask again.
+    skip_confirm: bool,
     settings: Settings,
     update: UpdateState,
     /// Close the window at the end of this frame (relaunching after an update).
@@ -623,6 +658,8 @@ impl App {
             notice: config::take_keychain_warning(),
             saved: config::load_queries(),
             name_prompt: None,
+            confirm: None,
+            skip_confirm: false,
             toast: None,
             expanded: HashSet::new(),
             selected: None,
@@ -1195,7 +1232,8 @@ impl App {
         let tab = &mut self.tabs[ti];
         match (action, &mut tab.kind) {
             (TabAction::Run { all }, TabKind::Console(c)) => {
-                if c.running.is_some() {
+                let confirmed = std::mem::take(&mut self.skip_confirm);
+                if c.running.is_some() || self.confirm.is_some() {
                     return;
                 }
                 let at = sql::char_to_byte(&c.sql, c.cursor.start);
@@ -1220,6 +1258,14 @@ impl App {
                 };
                 if text.trim().is_empty() {
                     return;
+                }
+                let cfg = &self.conns[ci].cfg;
+                if !confirmed {
+                    let items = risky_items(&text, cfg.color == ConnColor::Red);
+                    if !items.is_empty() {
+                        self.confirm = Some(Confirm { tab: tab.id, kind: ConfirmKind::Run { all }, title: format!("Run on {}?", cfg.display_name()), items, focused: false });
+                        return;
+                    }
                 }
                 c.running = Some(Instant::now());
                 c.popup = None;
@@ -1319,12 +1365,23 @@ impl App {
                 }
             }
             (TabAction::SaveEdits, TabKind::Table(t)) => {
+                let confirmed = std::mem::take(&mut self.skip_confirm);
+                if self.conns[ci].cfg.read_only {
+                    self.toast = Some((READ_ONLY_HINT.into(), theme::WARN(), Instant::now()));
+                    return;
+                }
                 let Some(Ok(rs)) = &t.data else { return };
                 if t.changes.is_empty() || t.saving || !connected {
                     return;
                 }
                 match edit_statements(t, rs) {
                     Ok(statements) => {
+                        let cfg = &self.conns[ci].cfg;
+                        if cfg.color == ConnColor::Red && !confirmed {
+                            let items = statements.iter().map(|s| (s.clone(), "Updates a row on a production connection".to_string(), false)).collect();
+                            self.confirm = Some(Confirm { tab: tab.id, kind: ConfirmKind::Save, title: format!("Save {} to {}?", plural(t.changes.len(), "change"), cfg.display_name()), items, focused: false });
+                            return;
+                        }
                         t.saving = true;
                         t.editor = None;
                         self.worker.send(Cmd::SaveEdits { conn: tab.conn.clone(), tab: tab.id, statements });
@@ -1912,6 +1969,11 @@ impl eframe::App for App {
             actions.push(Action::Close(CloseWhich::One(self.active)));
         }
 
+        // Before the panels, or the editor's own ⌘↩ would take it.
+        if self.confirm.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
+            self.accept_confirm();
+        }
+
         self.title_bar(ctx, &mut actions);
 
         egui::TopBottomPanel::bottom("status")
@@ -1939,6 +2001,7 @@ impl eframe::App for App {
 
         self.dialog_ui(ctx);
         self.name_prompt_ui(ctx);
+        self.confirm_ui(ctx);
         self.commands_editor_ui(ctx);
 
         if let Some(a) = tab_action {
@@ -2279,6 +2342,9 @@ impl App {
                         .size(11.5)
                         .color(theme::MUTED()),
                 );
+                if c.cfg.read_only {
+                    read_only_badge(ui);
+                }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 match &self.update {
@@ -2467,6 +2533,7 @@ impl Tree<'_> {
         let (dot, _) = status_style(&conn.status);
         let detail = match conn.status {
             Status::Connecting => Some("connecting…"),
+            _ if conn.cfg.read_only => Some("read-only"),
             _ => None,
         };
         let name = conn.cfg.display_name();
@@ -2714,6 +2781,7 @@ impl App {
     }
 
     fn tab_content(&mut self, ui: &mut Ui) -> Option<TabAction> {
+        let read_only = self.tabs.get(self.active).and_then(|t| self.conn_index(&t.conn)).is_some_and(|ci| self.conns[ci].cfg.read_only);
         let (catalog, schemas, databases, default_db, load_schemas) = {
             let tab = self.tabs.get(self.active)?;
             let database = match &tab.kind {
@@ -2740,10 +2808,10 @@ impl App {
         let id = tab.id;
         match &mut tab.kind {
             TabKind::Console(c) => {
-                let action = console_ui(ui, id, c, &catalog, &schemas, &databases, &default_db, dirty);
+                let action = console_ui(ui, id, c, &catalog, &schemas, &databases, &default_db, dirty, read_only);
                 action.or(load_schemas.then_some(TabAction::LoadSchemas))
             }
-            TabKind::Table(t) => table_ui(ui, id, t),
+            TabKind::Table(t) => table_ui(ui, id, t, read_only),
         }
     }
 }
@@ -2879,6 +2947,7 @@ fn console_ui(
     databases: &[String],
     default_db: &str,
     dirty: bool,
+    read_only: bool,
 ) -> Option<TabAction> {
     let mut action = None;
     let editor_id = Id::new(("editor", tab_id));
@@ -2944,6 +3013,9 @@ fn console_ui(
             if ghost_button(ui, "Format").on_hover_text("Format selection or all  ⇧⌘F").clicked() {
                 format = true;
             }
+        }
+        if read_only {
+            read_only_badge(ui);
         }
         // Right side: save state, then the schema (stays visible while running).
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -3481,7 +3553,20 @@ fn edit_statements(t: &TableView, rs: &ResultSet) -> Result<Vec<String>, String>
         .collect())
 }
 
-fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> {
+/// A small lock and "read-only" for connections whose session rejects writes.
+fn read_only_badge(ui: &mut Ui) {
+    let resp = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
+            crate::icons::paint(ui, Svg::Lock, r, theme::WARN());
+            ui.label(RichText::new("read-only").size(11.5).color(theme::WARN()));
+        })
+        .response;
+    resp.on_hover_text("Postgres rejects writes on this connection");
+}
+
+fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> Option<TabAction> {
     let mut action = None;
     if !t.changes.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
         action = Some(TabAction::SaveEdits);
@@ -3536,6 +3621,9 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 t.changes.clear();
                 t.editor = None;
             }
+        } else if read_only {
+            ui.add_space(8.0);
+            ui.label(RichText::new("read-only").small().color(theme::FAINT())).on_hover_text(READ_ONLY_HINT);
         } else if matches!(&t.data, Some(Ok(_))) && t.key.is_empty() && !t.loading {
             ui.add_space(8.0);
             ui.label(RichText::new("read-only").small().color(theme::FAINT()))
@@ -3597,7 +3685,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
             let kinds: Vec<_> = rs.columns.iter().map(|c| t.temporal.get(c).copied()).collect();
             let menu_rows: Vec<usize> = t.grid.selection.iter().copied().collect();
             let counts = t.probe.as_ref().map(|p| p.best(&menu_rows, t.relations.len())).unwrap_or_default();
-            let editing = (!t.key.is_empty() && !t.saving).then_some(grid::Editing {
+            let editing = (!t.key.is_empty() && !t.saving && !read_only).then_some(grid::Editing {
                 changes: &t.changes,
                 editor: &mut t.editor,
                 kinds: &kinds,
@@ -3918,6 +4006,85 @@ impl App {
         }
     }
 
+    /// Run or save what the confirmation was asking about.
+    fn accept_confirm(&mut self) {
+        let Some(c) = self.confirm.take() else { return };
+        let Some(ti) = self.tabs.iter().position(|t| t.id == c.tab) else { return };
+        self.skip_confirm = true;
+        self.tab_action(ti, match c.kind {
+            ConfirmKind::Run { all } => TabAction::Run { all },
+            ConfirmKind::Save => TabAction::SaveEdits,
+        });
+        self.skip_confirm = false;
+    }
+
+    fn confirm_ui(&mut self, ctx: &egui::Context) {
+        let Some(c) = &mut self.confirm else { return };
+        match confirm_modal(ctx, c) {
+            Some(true) => self.accept_confirm(),
+            Some(false) => self.confirm = None,
+            None => {}
+        }
+    }
+}
+
+/// "Run on <connection>?" with the risky statements and why. `Some(true)`:
+/// run anyway; `Some(false)`: cancelled. Cancel has the focus, so a stray
+/// Enter doesn't run anything.
+fn confirm_modal(ctx: &egui::Context, c: &mut Confirm) -> Option<bool> {
+    {
+        let (mut go, mut cancel) = (false, false);
+        let modal = egui::Modal::new(Id::new("risk-confirm"))
+            .frame(
+                Frame::new()
+                    .fill(theme::SURFACE())
+                    .stroke(Stroke::new(1.0, theme::BORDER()))
+                    .corner_radius(12)
+                    .inner_margin(Margin::same(20)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(480.0);
+                ui.label(RichText::new(&c.title).heading().color(theme::TEXT()));
+                ui.add_space(10.0);
+                egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
+                    for (sql, why, danger) in &c.items {
+                        ui.label(RichText::new(why).size(12.0).strong().color(if *danger { theme::ERROR() } else { theme::WARN() }));
+                        // Long statements are cut: the reason is what matters here.
+                        let shown: String = sql.lines().take(4).collect::<Vec<_>>().join("\n");
+                        let cut = shown.chars().count() > 300 || sql.lines().count() > 4;
+                        let shown = if cut { format!("{}…", shown.chars().take(300).collect::<String>()) } else { shown };
+                        ui.add(egui::Label::new(RichText::new(shown).monospace().size(12.0).color(theme::MUTED())).wrap());
+                        ui.add_space(8.0);
+                    }
+                });
+                ui.add_space(10.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let danger = c.items.iter().any(|i| i.2);
+                    let fill = if danger { theme::ERROR() } else { theme::ACCENT() };
+                    if ui.add(Button::new(RichText::new("Run anyway  ⌘↩").color(theme::BG())).fill(fill)).clicked() {
+                        go = true;
+                    }
+                    let cancel_button = ui.button("Cancel");
+                    if !c.focused {
+                        cancel_button.request_focus();
+                        c.focused = true;
+                    }
+                    if cancel_button.clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if go {
+            Some(true)
+        } else if cancel || modal.should_close() {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
+impl App {
     fn name_prompt_ui(&mut self, ctx: &egui::Context) {
         let Some(prompt) = &mut self.name_prompt else { return };
         let title = match prompt.target {
@@ -4232,6 +4399,9 @@ fn general_form(ui: &mut Ui, d: &mut Dialog) {
             }
         });
         ui.end_row();
+        ui.label(RichText::new("Read-only").color(theme::MUTED()));
+        ui.checkbox(&mut d.cfg.read_only, "Postgres rejects writes on this connection");
+        ui.end_row();
     });
     if d.cfg.ssh.enabled {
         ui.add_space(6.0);
@@ -4460,7 +4630,7 @@ mod tests {
             };
             let mut action = None;
             let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| action = table_ui(ui, 1, t));
+                egui::CentralPanel::default().show(ctx, |ui| action = table_ui(ui, 1, t, false));
             });
             action
         };
@@ -4562,6 +4732,51 @@ mod tests {
         assert_eq!(related_filter_only(&lr, &parcels, &[0], &probe.matched(&[0], 0)).as_deref(), Some(r#""globalid" = '{6726-AB}'"#));
     }
 
+    #[test]
+    fn risky_items_by_connection() {
+        let sql = "select 1; insert into t values (1); delete from t";
+        let dev = risky_items(sql, false);
+        assert_eq!(dev.len(), 1, "only the unfiltered delete is dangerous off production");
+        assert!(dev[0].2 && dev[0].0 == "delete from t");
+        let prod = risky_items(sql, true);
+        assert_eq!(prod.len(), 2);
+        assert!(!prod[0].2 && prod[0].1.contains("production"));
+        assert!(risky_items("select * from t", true).is_empty());
+    }
+
+    fn confirm_frame(ctx: &egui::Context, c: &mut Confirm, events: Vec<egui::Event>) -> Option<bool> {
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))), events, ..Default::default() };
+        let mut out = None;
+        let _ = ctx.run(input, |ctx| out = confirm_modal(ctx, c));
+        out
+    }
+
+    #[test]
+    fn confirm_modal_cancels_with_escape() {
+        let ctx = egui::Context::default();
+        let items = risky_items("delete from t", false);
+        let mut c = Confirm { tab: 1, kind: ConfirmKind::Run { all: false }, title: "Run on prod?".into(), items, focused: false };
+        assert_eq!(confirm_frame(&ctx, &mut c, vec![]), None);
+        assert_eq!(confirm_frame(&ctx, &mut c, vec![]), None, "waits for a choice");
+        let esc = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        assert_eq!(confirm_frame(&ctx, &mut c, vec![esc]), Some(false));
+    }
+
+    #[test]
+    fn read_only_console_and_table_render() {
+        let ctx = egui::Context::default();
+        let mut console = Console::new();
+        let input = || egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))), ..Default::default() };
+        let _ = ctx.run(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                console_ui(ui, 1, &mut console, &Catalog { tables: Vec::new() }, &[], &[], "db", false, true);
+            });
+        });
+        let _ = ctx.run(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| read_only_badge(ui));
+        });
+    }
+
     struct Harness {
         ctx: egui::Context,
         console: Console,
@@ -4598,7 +4813,7 @@ mod tests {
             let (console, catalog) = (&mut self.console, &self.catalog);
             let _ = self.ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    console_ui(ui, 1, console, catalog, &[], &[], "db", false);
+                    console_ui(ui, 1, console, catalog, &[], &[], "db", false, false);
                 });
             });
         }

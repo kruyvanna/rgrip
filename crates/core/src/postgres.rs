@@ -207,6 +207,10 @@ impl PgConn {
         tokio::spawn(async move {
             let _ = connection.await;
         });
+        if cfg.read_only {
+            // Server-side, so every query on this session is refused, not just ours.
+            client.batch_execute("set session characteristics as transaction read only").await.map_err(|e| format_error(&e, None))?;
+        }
         let cancel = client.cancel_token();
         Ok(Self { client, cancel, tls, tunnel, schema_lock: Default::default() })
     }
@@ -674,7 +678,11 @@ fn format_error_inner(e: &tokio_postgres::Error, sql: Option<(&str, usize)>) -> 
         }
         return s;
     };
-    let mut s = format!("[{}] {}", db.code().code(), db.message());
+    let mut s = if db.code().code() == "25006" {
+        "This connection is read-only (25006)".to_string()
+    } else {
+        format!("[{}] {}", db.code().code(), db.message())
+    };
     if let Some(d) = db.detail() {
         s += &format!("\nDetail: {d}");
     }

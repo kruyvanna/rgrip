@@ -5,6 +5,10 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Read-only connections: a checkbox in the connection dialog makes the session read-only on the server (including the per-database connections), so Postgres refuses writes with "This connection is read-only". A lock badge shows in the explorer, console toolbar and status bar, and inline editing is turned off.
+- Confirm before risky statements: Run / Run all asks first for `DELETE`/`UPDATE` without `WHERE`, `TRUNCATE`, `DROP` and `ALTER … DROP` on any connection, and for any write on a red (production) connection, listing each statement with the reason. Cancel is the default; ⌘↩ runs anyway. Saving inline edits on a red connection asks once.
+
 ### Changed
 - Passwords, SSH passwords and key passphrases are stored in the macOS Keychain instead of plain text in `connections.toml`. Existing plain-text secrets migrate automatically; if the Keychain is unavailable rgrip warns once and falls back to the file.
 
