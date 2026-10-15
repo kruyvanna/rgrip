@@ -3738,6 +3738,10 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
     if !t.changes.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
         action = Some(TabAction::SaveEdits);
     }
+    // Like the ↻ button: not while edits are pending (a reload drops them).
+    if t.changes.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::R)) {
+        action = Some(TabAction::Reload);
+    }
     toolbar(ui, |ui| {
         ui.label(RichText::new(format!("{}.{}", t.schema, t.table)).strong());
         ui.add_space(8.0);
@@ -3759,7 +3763,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                 action = Some(TabAction::Reload);
             }
         }
-        if ui.add_enabled_ui(!locked, |ui| ghost_button(ui, "↻").on_hover_text("Reload")).inner.clicked() {
+        if ui.add_enabled_ui(!locked, |ui| ghost_button(ui, "↻").on_hover_text("Reload  ⌘R")).inner.clicked() {
             action = Some(TabAction::Reload);
         }
         if let Some(Ok(rs)) = &t.data {

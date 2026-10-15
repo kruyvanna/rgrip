@@ -125,6 +125,7 @@ To build the app bundle yourself:
 | ⌘N | New query |
 | ⌘W | Close tab |
 | ⌘J | Go to column (in a results grid) |
+| ⌘R | Reload a table tab |
 | Tab | Expand slash command |
 | Esc | Close popups / cancel cell edit |
 
