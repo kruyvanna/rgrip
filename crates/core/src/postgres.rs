@@ -598,6 +598,12 @@ impl PgConn {
         Ok(counts.len())
     }
 
+    /// A schema change (one statement, its own transaction): unlike
+    /// `apply_updates`, no row count is expected.
+    pub async fn alter(&self, sql: &str) -> Result<(), String> {
+        self.client.batch_execute(sql).await.map_err(|e| format_error(&e, None))
+    }
+
     /// Load a file into a table, all or nothing. `progress` gets the rows
     /// sent so far. The caller should use a connection of its own: the
     /// transaction would otherwise swallow other queries on a shared one.

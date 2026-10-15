@@ -33,6 +33,8 @@ pub enum Cmd {
     ProbeRelations { conn: ConnId, tab: TabId, modal: bool, key: Vec<usize>, probes: Vec<(String, String, String)> },
     /// Inline-edit UPDATEs, applied in one transaction.
     SaveEdits { conn: ConnId, tab: TabId, statements: Vec<String> },
+    /// Add a primary key to a table tab's table.
+    AddKey { conn: ConnId, tab: TabId, sql: String },
     Cancel(ConnId, Option<String>),
     /// Look for a newer release.
     CheckUpdate,
@@ -62,6 +64,7 @@ pub enum Ev {
     RelationProbe { tab: TabId, modal: bool, key: Vec<usize>, counts: Vec<Option<i64>> },
     /// Rows updated, or why nothing was saved.
     EditsSaved { tab: TabId, result: Result<usize, String> },
+    KeyAdded { tab: TabId, result: Result<(), String> },
     TableCount { tab: TabId, modal: bool, result: Result<i64, String> },
     /// Path and row count, or an error.
     Exported(Result<(std::path::PathBuf, usize), String>),
@@ -273,6 +276,13 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                 counts.push(c.count_capped(schema, table, filter, PROBE_CAP).await.ok());
             }
             emit.send(Ev::RelationProbe { tab, modal, key, counts });
+        }
+        Cmd::AddKey { conn, tab, sql } => {
+            let result = match get(&conns, &conn) {
+                Ok(c) => c.alter(&sql).await,
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::KeyAdded { tab, result });
         }
         Cmd::SaveEdits { conn, tab, statements } => {
             let result = match get(&conns, &conn) {

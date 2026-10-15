@@ -870,24 +870,32 @@ impl App {
                 }
                 Ev::EditsSaved { tab, result } => {
                     let Some(ti) = self.tabs.iter().position(|t| t.id == tab) else { continue };
+                    if let TabKind::Table(t) = &mut self.tabs[ti].kind {
+                        t.saving = false;
+                        match result {
+                            Ok(n) => {
+                                t.changes.clear();
+                                self.toast = Some((format!("Saved {}", plural(n, "row")), theme::OK(), Instant::now()));
+                                self.tab_action(ti, TabAction::Reload);
+                            }
+                            Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
+                        }
+                    }
+                }
+                Ev::KeyAdded { tab, result } => {
+                    let Some(ti) = self.tabs.iter().position(|t| t.id == tab) else { continue };
                     let conn = self.tabs[ti].conn.clone();
                     let TabKind::Table(t) = &mut self.tabs[ti].kind else { continue };
                     t.saving = false;
                     match result {
-                        Ok(_) if t.changes.is_empty() => {
-                            // No pending edits: this was AddKey. The explorer and
-                            // the catalog learn the new column and key.
+                        Ok(()) => {
                             self.toast = Some((format!("Added a primary key to {}.{}", t.schema, t.table), theme::OK(), Instant::now()));
+                            // The explorer and the catalog learn the new column and key.
                             let key = (t.schema.clone(), t.table.clone());
                             if let Some(ci) = self.conn_index(&conn) {
                                 self.conns[ci].columns.remove(&key);
                                 self.worker.send(Cmd::Catalog(conn, None));
                             }
-                            self.tab_action(ti, TabAction::Reload);
-                        }
-                        Ok(n) => {
-                            t.changes.clear();
-                            self.toast = Some((format!("Saved {}", plural(n, "row")), theme::OK(), Instant::now()));
                             self.tab_action(ti, TabAction::Reload);
                         }
                         Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
@@ -1472,7 +1480,7 @@ impl App {
                     return;
                 }
                 t.saving = true;
-                self.worker.send(Cmd::SaveEdits { conn: tab.conn.clone(), tab: tab.id, statements: vec![sql] });
+                self.worker.send(Cmd::AddKey { conn: tab.conn.clone(), tab: tab.id, sql });
             }
             (TabAction::ShowRelated(target), TabKind::Table(t)) => {
                 match &mut t.related {

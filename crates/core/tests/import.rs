@@ -141,3 +141,18 @@ async fn imports_files() {
     let _ = conn.execute(&format!("drop schema {schema} cascade")).await;
     result
 }
+
+/// Add primary key on a table without one: existing rows get numbered.
+#[tokio::test]
+async fn adds_a_primary_key() {
+    let Ok(conn) = PgConn::connect(&cfg()).await else {
+        eprintln!("no server: skipped");
+        return;
+    };
+    conn.alter("drop table if exists public.rgrip_test_nokey; create table public.rgrip_test_nokey as select v from (values ('a'), ('b'), ('c')) t(v)").await.unwrap();
+    conn.alter("alter table \"public\".\"rgrip_test_nokey\" add column \"id\" bigint generated always as identity primary key").await.unwrap();
+    let got = rows(&conn, "select id::text, v from public.rgrip_test_nokey order by id").await;
+    conn.alter("drop table public.rgrip_test_nokey").await.unwrap();
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[0][0].as_deref(), Some("1"));
+}

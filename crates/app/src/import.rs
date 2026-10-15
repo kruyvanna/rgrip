@@ -73,6 +73,8 @@ pub struct ImportDialog {
     key: Key,
     /// Target table whose columns `cols` are currently mapped to.
     mapped_for: Option<String>,
+    /// Target columns that fill themselves (a default, identity or the key).
+    self_filled: Vec<String>,
     /// Columns of the target as (name, type), once mapped.
     target: Vec<(String, String)>,
     asked_columns: Option<String>,
@@ -106,6 +108,7 @@ impl ImportDialog {
             spatial_index: true,
             key: Key::New,
             mapped_for: None,
+            self_filled: Vec::new(),
             target: Vec::new(),
             asked_columns: None,
             preview: ResultSet::default(),
@@ -232,6 +235,7 @@ impl ImportDialog {
     /// Match the file's columns to the columns of the table being appended to.
     fn map_to_target(&mut self, columns: &[ColumnInfo]) {
         self.target = columns.iter().map(|c| (c.name.clone(), c.data_type.clone())).collect();
+        self.self_filled = columns.iter().filter(|c| c.default.is_some() || c.primary_key).map(|c| c.name.clone()).collect();
         self.cols = self.inferred.clone();
         for c in &mut self.cols {
             let hit = match c.kind {
@@ -547,10 +551,23 @@ impl ImportDialog {
         ui.add_space(10.0);
 
         // Columns.
-        ui.label(RichText::new("Columns").color(theme::MUTED()));
-        ui.add_space(2.0);
         let append = !self.create;
         let target = self.target.clone();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Columns").color(theme::MUTED()));
+            // Matching is by name: say which of the table's columns stay empty,
+            // so a renamed field isn't silently dropped.
+            let empty: Vec<&str> = target
+                .iter()
+                .filter(|(n, _)| !self.self_filled.contains(n) && !self.cols.iter().any(|c| c.include && c.name == *n))
+                .map(|(n, _)| n.as_str())
+                .collect();
+            if append && !empty.is_empty() && !target.is_empty() {
+                ui.add_space(8.0);
+                ui.label(RichText::new(format!("No values for {}: pick a column of the table next to a field", empty.join(", "))).size(12.0).color(theme::WARN()));
+            }
+        });
+        ui.add_space(2.0);
         egui::ScrollArea::vertical().id_salt("import-cols").max_height(190.0).auto_shrink([false, true]).show(ui, |ui| {
             egui::Grid::new("import-cols-grid").num_columns(4).spacing([14.0, 5.0]).striped(true).show(ui, |ui| {
                 for (i, c) in self.cols.iter_mut().enumerate() {
