@@ -8,6 +8,10 @@ All notable changes to rgrip are documented here. The format is based on
 ### Added
 - Read-only connections: a checkbox in the connection dialog makes the session read-only on the server (including the per-database connections), so Postgres refuses writes with "This connection is read-only". A lock badge shows in the explorer, console toolbar and status bar, and inline editing is turned off.
 - Confirm before risky statements: Run / Run all asks first for `DELETE`/`UPDATE` without `WHERE`, `TRUNCATE`, `DROP` and `ALTER … DROP` on any connection, and for any write on a red (production) connection, listing each statement with the reason. Cancel is the default; ⌘↩ runs anyway. Saving inline edits on a red connection asks once.
+- Linked map and grid: rows selected in the grid are highlighted on the map (accent color, drawn on top), and clicking a feature selects its row in the grid (⌘-click adds or removes; the grid scrolls to it). The feature popup still opens on click.
+- Zoom to selected: a button on the map next to Fit; opening the map with rows selected fits to them.
+- Split view: Grid / Map / Split in table tabs and console results, side by side with a resizable divider, live-linked.
+- Filter by area: draw a box on the map (button, or hold shift and drag) to set the table's WHERE filter to `ST_Intersects(geom, ST_Transform(ST_MakeEnvelope(…, 4326), srid))` and reload. The area stays on the map until cleared.
 
 ### Changed
 - Passwords, SSH passwords and key passphrases are stored in the macOS Keychain instead of plain text in `connections.toml`. Existing plain-text secrets migrate automatically; if the Keychain is unavailable rgrip warns once and falls back to the file.
