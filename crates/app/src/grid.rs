@@ -30,6 +30,8 @@ pub struct GridState {
     pub frozen: Vec<String>,
     /// Shared vertical offset of the frozen and scrolling halves.
     scroll_y: f32,
+    /// One-shot: scroll this row into view (set when the map selects a row).
+    pub reveal: Option<usize>,
     /// One-shot horizontal offset for the scrolling half (screenshot scenes).
     pub scroll_x: Option<f32>,
     /// The "Go to column" popup, when open.
@@ -197,6 +199,10 @@ pub fn show(
     ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
 
     keyboard(ui, rs, state);
+    // Both halves follow `scroll_y`, so setting it moves the whole grid.
+    if let Some(i) = state.reveal.take() {
+        state.scroll_y = reveal_offset(i, row_h);
+    }
     let selection = state.selection.clone();
     let mut clicked_row = None;
     let mut menu_row = None;
@@ -519,6 +525,11 @@ pub fn show(
         event = Some(GridEvent::RowsMenu { rows: state.selection.iter().copied().collect() });
     }
     event
+}
+
+/// Vertical offset that shows `row` a couple of rows below the top edge.
+fn reveal_offset(row: usize, row_h: f32) -> f32 {
+    (row as f32 - 2.0).max(0.0) * row_h
 }
 
 /// Scroll the scrolling half so `col` is near its left edge, and flash it.
@@ -1204,6 +1215,27 @@ mod tests {
         assert_eq!(st.selection.iter().copied().collect::<Vec<_>>(), [expected], "scroll {y}, row_h {row_h}");
         // Freezing survives a new result with the same column names.
         assert_eq!(st.frozen, ["note"]);
+    }
+
+    #[test]
+    fn reveal_scrolls_row_into_view() {
+        let rs = ResultSet {
+            columns: vec!["id".into()],
+            rows: (0..300).map(|i| vec![Some(i.to_string())]).collect(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut st = GridState::default();
+        frame(&ctx, &rs, &mut st, vec![]);
+        st.reveal = Some(150);
+        for _ in 0..3 {
+            frame(&ctx, &rs, &mut st, vec![]);
+        }
+        let h = ctx.style().text_styles[&TextStyle::Monospace].size;
+        let row_h = ctx.fonts_mut(|f| f.row_height(&egui::FontId::monospace(h))) + 10.0;
+        assert!(st.reveal.is_none());
+        assert!((st.scroll_y - 148.0 * row_h).abs() < 1.0, "scroll {}", st.scroll_y);
+        assert_eq!(reveal_offset(1, 25.0), 0.0);
     }
 
     fn key(k: egui::Key, modifiers: egui::Modifiers) -> egui::Event {

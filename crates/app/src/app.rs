@@ -108,7 +108,18 @@ enum View {
     Result(usize),
     /// Map of a result set's geometries.
     Map(usize),
+    /// Grid and map side by side, selection linked.
+    Split(usize),
     Output,
+}
+
+/// What a table tab shows.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Pane {
+    #[default]
+    Grid,
+    Map,
+    Split,
 }
 
 struct Console {
@@ -224,7 +235,7 @@ struct TableView {
     data: Option<Result<ResultSet, String>>,
     total: Option<i64>,
     grid: GridState,
-    show_map: bool,
+    pane: Pane,
     map: crate::map::MapView,
     /// Primary key columns; empty means the table can't be edited inline.
     key: Vec<String>,
@@ -332,7 +343,7 @@ impl TableView {
             data: None,
             total: None,
             grid: GridState::default(),
-            show_map: false,
+            pane: Pane::Grid,
             map: Default::default(),
             key: Vec::new(),
             temporal: HashMap::new(),
@@ -1548,7 +1559,7 @@ impl App {
                         t.grid.demo_menu = Some(row);
                     }
                     if env("RGRIP_DEMO_TABLE_VIEW").as_deref() == Some("map") {
-                        t.show_map = true;
+                        t.pane = Pane::Map;
                         t.map.selected = env("RGRIP_DEMO_FEATURE").and_then(|v| v.parse().ok());
                     }
                     if let (Some(edits), true) = (env("RGRIP_DEMO_EDITS"), t.changes.is_empty()) {
@@ -1696,8 +1707,20 @@ impl App {
             }
             "view" => {
                 match self.tabs.get_mut(active).map(|t| &mut t.kind) {
-                    Some(TabKind::Console(c)) => c.view = if arg == "map" { View::Map(0) } else { View::Result(0) },
-                    Some(TabKind::Table(t)) => t.show_map = arg == "map",
+                    Some(TabKind::Console(c)) => {
+                        c.view = match arg {
+                            "map" => View::Map(0),
+                            "split" => View::Split(0),
+                            _ => View::Result(0),
+                        }
+                    }
+                    Some(TabKind::Table(t)) => {
+                        t.pane = match arg {
+                            "map" => Pane::Map,
+                            "split" => Pane::Split,
+                            _ => Pane::Grid,
+                        }
+                    }
                     None => {}
                 }
                 return advance(self);
@@ -3066,10 +3089,24 @@ fn console_ui(
                         *view = View::Result(n);
                         *grid = GridState::fresh(grid);
                     }
-                    if !rs.geometry_columns().is_empty()
-                        && segment(ui, *view == View::Map(n), if sets.len() > 1 { "Map ↑" } else { "Map" })
-                    {
-                        *view = View::Map(n);
+                    if !rs.geometry_columns().is_empty() {
+                        // The grid's selection is per result set.
+                        let other = !matches!(*view, View::Result(m) | View::Map(m) | View::Split(m) if m == n);
+                        if segment(ui, *view == View::Map(n), if sets.len() > 1 { "Map ↑" } else { "Map" }) {
+                            if other {
+                                *grid = GridState::fresh(grid);
+                            }
+                            map.opened(!grid.selection.is_empty());
+                            *view = View::Map(n);
+                        }
+                        if segment(ui, *view == View::Split(n), if sets.len() > 1 { "Split ↑" } else { "Split" })
+                        {
+                            if other {
+                                *grid = GridState::fresh(grid);
+                            }
+                            map.opened(!grid.selection.is_empty());
+                            *view = View::Split(n);
+                        }
                     }
                 }
                 if segment(ui, *view == View::Output, "Output") {
@@ -3078,7 +3115,7 @@ fn console_ui(
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let ms = out.elapsed.as_secs_f64() * 1000.0;
                     let result = match *view {
-                        View::Result(n) | View::Map(n) => sets.get(n).copied(),
+                        View::Result(n) | View::Map(n) | View::Split(n) => sets.get(n).copied(),
                         View::Output => None,
                     };
                     if let Some(rs) = result {
@@ -3121,10 +3158,32 @@ fn console_ui(
                     if cols.is_empty() {
                         centered(ui, |ui| muted(ui, "No geometry columns in this result"));
                     } else {
-                        if let Some(col) = map.show(ui, sets[n], &cols, paged.is_some()) {
+                        let link = crate::map::Link { selection: &mut grid.selection, reveal: &mut grid.reveal, area_filter: None };
+                        if let Some(col) = map.show(ui, sets[n], &cols, paged.is_some(), link).reproject {
                             action = Some(TabAction::Reproject(col));
                         }
                     }
+                }
+                View::Split(n) if n < sets.len() => {
+                    let cols = sets[n].geometry_columns().to_vec();
+                    let row_offset = if paged.is_some() { *offset } else { 0 };
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations: &[], counts: &[] };
+                    let can_reproject = paged.is_some();
+                    let reproject = &mut action;
+                    split_view(
+                        ui,
+                        Id::new(("split", tab_id)),
+                        grid,
+                        |ui, g| {
+                            let link = crate::map::Link { selection: &mut g.selection, reveal: &mut g.reveal, area_filter: None };
+                            if let Some(col) = map.show(ui, sets[n], &cols, can_reproject, link).reproject {
+                                *reproject = Some(TabAction::Reproject(col));
+                            }
+                        },
+                        |ui, g| {
+                            grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], g, None, row_offset, &source, None);
+                        },
+                    );
                 }
                 _ => output_log(ui, out),
             }
@@ -3511,11 +3570,20 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
         if let Some(Ok(rs)) = &t.data {
             if !rs.geometry_columns().is_empty() {
                 ui.add_space(6.0);
-                if segment(ui, !t.show_map, "Grid") {
-                    t.show_map = false;
+                if segment(ui, t.pane == Pane::Grid, "Grid") {
+                    t.pane = Pane::Grid;
                 }
-                if segment(ui, t.show_map, "Map") {
-                    t.show_map = true;
+                if segment(ui, t.pane == Pane::Map, "Map") {
+                    if t.pane == Pane::Grid {
+                        t.map.opened(!t.grid.selection.is_empty());
+                    }
+                    t.pane = Pane::Map;
+                }
+                if segment(ui, t.pane == Pane::Split, "Split") {
+                    if t.pane == Pane::Grid {
+                        t.map.opened(!t.grid.selection.is_empty());
+                    }
+                    t.pane = Pane::Split;
                 }
             }
         }
@@ -3584,11 +3652,9 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 ui.label(RichText::new(e.as_str()).monospace().color(theme::ERROR()));
             });
         }
-        Some(Ok(rs)) if t.show_map && !rs.geometry_columns().is_empty() => {
-            let cols = rs.geometry_columns().to_vec();
-            t.map.show(ui, rs, &cols, false);
-        }
         Some(Ok(rs)) => {
+            let cols = rs.geometry_columns().to_vec();
+            let pane = if cols.is_empty() { Pane::Grid } else { t.pane };
             let (table_name, table_sql) = (format!("{}.{}", t.schema, t.table), rgrip_core::postgres::table_select_sql(&t.query()));
             let sort = t.order.as_ref().map(|(c, asc)| Sort { column: c, ascending: *asc });
             let offset = (t.page * PAGE_SIZE) as usize;
@@ -3600,16 +3666,56 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> 
                 editor: &mut t.editor,
                 kinds: &kinds,
             });
-            let event = grid::show(
-                ui,
-                Id::new(("table-grid", tab_id)),
-                rs,
-                &mut t.grid,
-                sort,
-                offset,
-                &grid::Source { table: &table_name, sql: Some(&table_sql), relations: &t.relations, counts: &counts },
-                editing,
-            );
+            // Both views take the grid state as an argument (they share its selection).
+            let draw_grid = |ui: &mut Ui, g: &mut GridState| {
+                grid::show(
+                    ui,
+                    Id::new(("table-grid", tab_id)),
+                    rs,
+                    g,
+                    sort,
+                    offset,
+                    &grid::Source { table: &table_name, sql: Some(&table_sql), relations: &t.relations, counts: &counts },
+                    editing,
+                )
+            };
+            let applied = t.applied_filter.as_str();
+            let map = &mut t.map;
+            let mut draw_map = |ui: &mut Ui, g: &mut GridState| {
+                let link = crate::map::Link { selection: &mut g.selection, reveal: &mut g.reveal, area_filter: Some(applied) };
+                map.show(ui, rs, &cols, false, link)
+            };
+            let mut event = None;
+            let mut map_out = crate::map::MapOutput::default();
+            match pane {
+                Pane::Grid => event = draw_grid(ui, &mut t.grid),
+                Pane::Map => map_out = draw_map(ui, &mut t.grid),
+                Pane::Split => {
+                    let (mut e, mut m) = (None, None);
+                    split_view(ui, Id::new(("split", tab_id)), &mut t.grid, |ui, g| m = Some(draw_map(ui, g)), |ui, g| e = draw_grid(ui, g));
+                    event = e;
+                    map_out = m.unwrap_or_default();
+                }
+            }
+            match map_out.area {
+                // Reloading drops pending edits, so it waits for Save / Discard.
+                Some(_) if !t.changes.is_empty() => {
+                    action = Some(TabAction::Notify("Save or discard your changes first".into()));
+                }
+                Some(crate::map::AreaEvent::Set(sql)) => {
+                    t.filter = sql.clone();
+                    t.applied_filter = sql;
+                    t.page = 0;
+                    action = Some(TabAction::Reload);
+                }
+                Some(crate::map::AreaEvent::Clear) => {
+                    t.filter.clear();
+                    t.applied_filter.clear();
+                    t.page = 0;
+                    action = Some(TabAction::Reload);
+                }
+                None => {}
+            }
             match event {
                 Some(GridEvent::Change { row, col, value }) => {
                     if rs.rows[row][col] == value {
@@ -4400,6 +4506,24 @@ fn hint(text: &str) -> RichText {
 
 pub(crate) fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
+}
+
+/// Map in a resizable panel on the right, grid in the rest. Both get the
+/// shared grid state: the map runs first so a click on it shows in the grid
+/// in the same frame; a grid click shows on the map by repainting.
+fn split_view(ui: &mut Ui, id: Id, state: &mut GridState, map: impl FnOnce(&mut Ui, &mut GridState), grid: impl FnOnce(&mut Ui, &mut GridState)) {
+    let w = ui.available_width();
+    egui::SidePanel::right(id.with("map"))
+        .resizable(true)
+        .default_width(w * 0.5)
+        .width_range(240.0..=(w - 240.0).max(240.0))
+        .frame(Frame::NONE)
+        .show_inside(ui, |ui| map(ui, state));
+    let before = state.selection.clone();
+    egui::CentralPanel::default().frame(Frame::NONE).show_inside(ui, |ui| grid(ui, state));
+    if state.selection != before {
+        ui.ctx().request_repaint();
+    }
 }
 
 fn muted(ui: &mut Ui, text: &str) {

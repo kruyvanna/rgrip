@@ -5,6 +5,12 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Linked map and grid: rows selected in the grid are highlighted on the map (accent color, drawn on top), and clicking a feature selects its row in the grid (⌘-click adds or removes; the grid scrolls to it). The feature popup still opens on click.
+- Zoom to selected: a button on the map next to Fit; opening the map with rows selected fits to them.
+- Split view: Grid / Map / Split in table tabs and console results, side by side with a resizable divider, live-linked.
+- Filter by area: draw a box on the map (button, or hold shift and drag) to set the table's WHERE filter to `ST_Intersects(geom, ST_Transform(ST_MakeEnvelope(…, 4326), srid))` and reload. The area stays on the map until cleared.
+
 ## [0.0.8-alpha] - 2026-10-14
 
 ### Added
