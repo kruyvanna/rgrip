@@ -1617,8 +1617,8 @@ impl App {
                         }
                         t.grid.demo_menu = Some(row);
                     }
-                    if env("RGRIP_DEMO_TABLE_VIEW").as_deref() == Some("map") {
-                        t.pane = Pane::Map;
+                    if let Some(v @ ("map" | "split")) = env("RGRIP_DEMO_TABLE_VIEW").as_deref() {
+                        t.pane = if v == "split" { Pane::Split } else { Pane::Map };
                         t.map.selected = env("RGRIP_DEMO_FEATURE").and_then(|v| v.parse().ok());
                     }
                     if let (Some(edits), true) = (env("RGRIP_DEMO_EDITS"), t.changes.is_empty()) {
@@ -1655,6 +1655,8 @@ impl App {
                 _ => false,
             },
         };
+        // A pending confirmation is a scene of its own (no results come).
+        let settled = settled || self.confirm.is_some();
         if let Some(a) = follow_action {
             self.tab_action(self.active, a);
         }
