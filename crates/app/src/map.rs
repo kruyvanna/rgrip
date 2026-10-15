@@ -932,25 +932,56 @@ impl Plugin for Features<'_> {
 /// A line or ring outline that egui can stroke safely. Repeated vertices
 /// (and a ring's closing point, which egui adds itself) make zero-length
 /// segments; two in a row give the stroke a NaN/infinite corner, drawn as a
-/// spike across the map. Collapsed paths become a dot.
+/// spike across the map. Where the outline doubles back (coastlines, slivers)
+/// egui's miter join reaches far past the corner, so the path is split
+/// there. Sub-pixel steps are dropped first: they turn every which way.
+/// Collapsed paths become a dot.
 fn path_shape(points: impl Iterator<Item = Pos2>, closed: bool, stroke: Stroke) -> Shape {
     let mut pts: Vec<Pos2> = Vec::new();
     for p in points.filter(|p| p.x.is_finite() && p.y.is_finite()) {
-        if pts.last().is_none_or(|q| q.distance_sq(p) > 1e-4) {
+        if pts.last().is_none_or(|q| q.distance_sq(p) > 0.25) {
             pts.push(p);
         }
     }
     if closed {
-        while pts.len() > 1 && pts[0].distance_sq(*pts.last().unwrap()) <= 1e-4 {
+        while pts.len() > 1 && pts[0].distance_sq(*pts.last().unwrap()) <= 0.25 {
             pts.pop();
         }
     }
-    match pts.len() {
+    let n = pts.len();
+    // Turning by more than ~110 degrees.
+    let sharp = |i: usize| {
+        let (a, b, c) = (pts[(i + n - 1) % n], pts[i], pts[(i + 1) % n]);
+        (b - a).normalized().dot((c - b).normalized()) < -0.35
+    };
+    match n {
         0 => Shape::Noop,
         1 => Shape::circle_filled(pts[0], stroke.width.max(1.5), stroke.color),
         2 => Shape::line_segment([pts[0], pts[1]], stroke),
-        _ if closed => Shape::closed_line(pts, stroke),
-        _ => Shape::line(pts, stroke),
+        _ => {
+            let corners: Vec<usize> = if closed { (0..n).filter(|&i| sharp(i)).collect() } else { (1..n - 1).filter(|&i| sharp(i)).collect() };
+            if corners.is_empty() {
+                return if closed { Shape::closed_line(pts, stroke) } else { Shape::line(pts, stroke) };
+            }
+            // Open pieces from corner to corner; a ring starts at its first
+            // corner and comes back to it.
+            let path: Vec<Pos2> = if closed { (0..=n).map(|i| pts[(corners[0] + i) % n]).collect() } else { pts.clone() };
+            let cut: Vec<bool> = if closed {
+                (0..=n).map(|i| corners.contains(&((corners[0] + i) % n))).collect()
+            } else {
+                (0..n).map(|i| corners.contains(&i)).collect()
+            };
+            let mut shapes = Vec::new();
+            let mut start = 0;
+            for i in 1..path.len() {
+                if cut[i] || i == path.len() - 1 {
+                    let piece = &path[start..=i];
+                    shapes.push(if piece.len() == 2 { Shape::line_segment([piece[0], piece[1]], stroke) } else { Shape::line(piece.to_vec(), stroke) });
+                    start = i;
+                }
+            }
+            Shape::Vec(shapes)
+        }
     }
 }
 
@@ -1000,6 +1031,23 @@ mod tests {
                         // Nothing strays past the ring plus the stroke.
                         assert!(v.pos.distance(origin) <= size + 10.0, "zoom {zoom}: spike to {:?}", v.pos);
                     }
+                }
+            }
+        }
+    }
+
+    /// A coastline that doubles back on itself: the miter join at the
+    /// hairpin used to reach far out to sea.
+    #[test]
+    fn hairpins_dont_spike() {
+        let ring = [Pos2::new(100.0, 100.0), Pos2::new(300.0, 101.0), Pos2::new(100.0, 102.5), Pos2::new(100.0, 200.0), Pos2::new(50.0, 150.0)];
+        for closed in [true, false] {
+            for width in [1.5, 2.5] {
+                let shape = path_shape(ring.iter().copied(), closed, Stroke::new(width, Color32::WHITE));
+                let mut mesh = Mesh::default();
+                Tessellator::new(2.0, TessellationOptions::default(), [1, 1], vec![]).tessellate_shape(shape, &mut mesh);
+                for v in &mesh.vertices {
+                    assert!(v.pos.x <= 300.0 + 5.0, "spike to {:?}", v.pos);
                 }
             }
         }

@@ -745,6 +745,9 @@ pub struct ImportRequest {
     pub srid: i32,
     /// With `create`: a GiST index on each geometry column.
     pub spatial_index: bool,
+    /// With `create`: the primary key. An imported column of that name, or
+    /// else a new identity column (without a key rows can't be edited).
+    pub key: Option<String>,
 }
 
 fn is_geometry(ty: &str) -> bool {
@@ -765,8 +768,18 @@ fn qualified(req: &ImportRequest) -> String {
 }
 
 pub fn create_table_sql(req: &ImportRequest) -> String {
-    let cols: Vec<String> =
-        req.columns.iter().map(|c| format!("  {} {}", crate::sql::quote_ident(&c.name), sql_type(&c.ty, req.srid))).collect();
+    let key = req.key.as_deref();
+    let mut cols: Vec<String> = req
+        .columns
+        .iter()
+        .map(|c| {
+            let pk = if key == Some(c.name.as_str()) { " primary key" } else { "" };
+            format!("  {} {}{pk}", crate::sql::quote_ident(&c.name), sql_type(&c.ty, req.srid))
+        })
+        .collect();
+    if let Some(k) = key.filter(|k| !req.columns.iter().any(|c| c.name == *k)) {
+        cols.insert(0, format!("  {} bigint generated always as identity primary key", crate::sql::quote_ident(k)));
+    }
     format!("create table {} (\n{}\n)", qualified(req), cols.join(",\n"))
 }
 
@@ -939,6 +952,7 @@ mod tests {
             columns,
             srid,
             spatial_index: true,
+            key: None,
         }
     }
 
@@ -983,6 +997,12 @@ mod tests {
         );
         assert_eq!(copy_sql(&r), "copy \"s\".\"t\" (\"id\", \"we\"\"ird\", \"geom\") from stdin");
         assert_eq!(index_sql(&r), ["create index \"t_geom_gix\" on \"s\".\"t\" using gist (\"geom\")"]);
+        // A new identity key goes first; an imported column becomes the key.
+        let mut k = req(vec![col("code", "text", Src::Field(0))], 0);
+        k.key = Some("id".into());
+        assert_eq!(create_table_sql(&k), "create table \"s\".\"t\" (\n  \"id\" bigint generated always as identity primary key,\n  \"code\" text\n)");
+        k.key = Some("code".into());
+        assert_eq!(create_table_sql(&k), "create table \"s\".\"t\" (\n  \"code\" text primary key\n)");
         assert_eq!(sql_type("geometry", 0), "geometry(Geometry)");
     }
 

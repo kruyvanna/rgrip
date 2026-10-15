@@ -24,6 +24,15 @@ pub enum Outcome {
     OpenTable(String),
 }
 
+/// The primary key of a new table.
+#[derive(Clone, PartialEq)]
+enum Key {
+    /// A new identity column `id` (or `gid`, … when taken).
+    New,
+    Column(String),
+    None,
+}
+
 #[derive(Clone, PartialEq)]
 enum Kind {
     Field(usize),
@@ -61,6 +70,7 @@ pub struct ImportDialog {
     lat: usize,
     srid: String,
     spatial_index: bool,
+    key: Key,
     /// Target table whose columns `cols` are currently mapped to.
     mapped_for: Option<String>,
     /// Columns of the target as (name, type), once mapped.
@@ -94,6 +104,7 @@ impl ImportDialog {
             lat: 1,
             srid: String::new(),
             spatial_index: true,
+            key: Key::New,
             mapped_for: None,
             target: Vec::new(),
             asked_columns: None,
@@ -256,6 +267,16 @@ impl ImportDialog {
         }
     }
 
+    /// The key column's name, a new one clear of the imported columns.
+    fn key_name(&self) -> Option<String> {
+        let taken = |n: &str| self.cols.iter().any(|c| c.include && c.name.trim() == n);
+        match &self.key {
+            Key::New => Some(["id", "gid", "fid", "row_id"].into_iter().find(|n| !taken(n)).unwrap_or("rgrip_id").to_string()),
+            Key::Column(c) if taken(c) => Some(c.clone()),
+            Key::Column(_) | Key::None => None,
+        }
+    }
+
     fn has_geometry(&self) -> bool {
         self.cols.iter().any(|c| c.include && c.ty == "geometry")
     }
@@ -319,6 +340,7 @@ impl ImportDialog {
             columns,
             srid: if self.has_geometry() { self.srid.trim().parse().unwrap_or(0) } else { 0 },
             spatial_index: self.spatial_index,
+            key: if self.create { self.key_name() } else { None },
         })
     }
 
@@ -495,6 +517,31 @@ impl ImportDialog {
                     ui.add_space(12.0);
                     ui.checkbox(&mut self.spatial_index, "Spatial index (GiST)");
                 }
+            });
+        }
+        if self.create {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Primary key").color(theme::MUTED()));
+                let new = format!("new column {}", self.key_name().filter(|_| self.key == Key::New).unwrap_or_else(|| "id".into()));
+                let text = match &self.key {
+                    Key::New => new.clone(),
+                    Key::Column(c) => c.clone(),
+                    Key::None => "none".into(),
+                };
+                egui::ComboBox::from_id_salt("import-key").selected_text(text).width(200.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.key, Key::New, new);
+                    for c in self.cols.iter().filter(|c| c.include && c.ty != "geometry") {
+                        ui.selectable_value(&mut self.key, Key::Column(c.name.trim().to_string()), c.name.trim());
+                    }
+                    ui.selectable_value(&mut self.key, Key::None, "none");
+                });
+                let hint = match self.key {
+                    Key::New => "numbered 1, 2, 3…: lets rows be edited",
+                    Key::Column(_) => "must be unique and not empty",
+                    Key::None => "rows can't be edited without a key",
+                };
+                ui.label(RichText::new(hint).size(12.0).color(theme::FAINT()));
             });
         }
         ui.add_space(10.0);

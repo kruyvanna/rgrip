@@ -34,7 +34,7 @@ fn request(path: PathBuf, schema: &str, table: &str, srid: i32, extra: Vec<PlanC
         })
         .collect();
     columns.extend(extra);
-    ImportRequest { path, format: o.format, delimiter: o.delimiter, schema: schema.into(), table: table.into(), create: true, columns, srid, spatial_index: true }
+    ImportRequest { path, format: o.format, delimiter: o.delimiter, schema: schema.into(), table: table.into(), create: true, columns, srid, spatial_index: true, key: Some("row_key".into()) }
 }
 
 async fn rows(conn: &PgConn, sql: &str) -> Vec<Vec<Option<String>>> {

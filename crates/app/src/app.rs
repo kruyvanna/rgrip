@@ -545,6 +545,7 @@ struct Confirm {
 enum ConfirmKind {
     Run { all: bool },
     Save,
+    AddKey,
 }
 
 const READ_ONLY_HINT: &str = "This connection is read-only: Postgres rejects writes. Untick it in the connection's settings to edit.";
@@ -576,6 +577,9 @@ enum TabAction {
     Run { all: bool },
     /// Write a table tab's pending inline edits.
     SaveEdits,
+    /// Give a table without any key an identity primary key, so it can be
+    /// edited (imports and shapefile loads often come without one).
+    AddKey,
     /// Open `schema.table` filtered with `filter` (following a foreign key).
     OpenFiltered { schema: String, table: String, filter: String },
     /// Show related rows in the tab's popup (stacking on an open one).
@@ -866,16 +870,27 @@ impl App {
                 }
                 Ev::EditsSaved { tab, result } => {
                     let Some(ti) = self.tabs.iter().position(|t| t.id == tab) else { continue };
-                    if let TabKind::Table(t) = &mut self.tabs[ti].kind {
-                        t.saving = false;
-                        match result {
-                            Ok(n) => {
-                                t.changes.clear();
-                                self.toast = Some((format!("Saved {}", plural(n, "row")), theme::OK(), Instant::now()));
-                                self.tab_action(ti, TabAction::Reload);
+                    let conn = self.tabs[ti].conn.clone();
+                    let TabKind::Table(t) = &mut self.tabs[ti].kind else { continue };
+                    t.saving = false;
+                    match result {
+                        Ok(_) if t.changes.is_empty() => {
+                            // No pending edits: this was AddKey. The explorer and
+                            // the catalog learn the new column and key.
+                            self.toast = Some((format!("Added a primary key to {}.{}", t.schema, t.table), theme::OK(), Instant::now()));
+                            let key = (t.schema.clone(), t.table.clone());
+                            if let Some(ci) = self.conn_index(&conn) {
+                                self.conns[ci].columns.remove(&key);
+                                self.worker.send(Cmd::Catalog(conn, None));
                             }
-                            Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
+                            self.tab_action(ti, TabAction::Reload);
                         }
+                        Ok(n) => {
+                            t.changes.clear();
+                            self.toast = Some((format!("Saved {}", plural(n, "row")), theme::OK(), Instant::now()));
+                            self.tab_action(ti, TabAction::Reload);
+                        }
+                        Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
                     }
                 }
                 Ev::ImportProgress { conn, rows } => {
@@ -1429,6 +1444,35 @@ impl App {
                     }
                     Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
                 }
+            }
+            (TabAction::AddKey, TabKind::Table(t)) => {
+                let confirmed = std::mem::take(&mut self.skip_confirm);
+                if self.conns[ci].cfg.read_only {
+                    self.toast = Some((READ_ONLY_HINT.into(), theme::WARN(), Instant::now()));
+                    return;
+                }
+                if t.saving || !connected || !t.changes.is_empty() {
+                    return;
+                }
+                let name = ["id", "gid", "fid", "row_id"]
+                    .into_iter()
+                    .find(|n| !t.columns.iter().any(|c| c.name == *n))
+                    .unwrap_or("rgrip_id");
+                let sql = format!(
+                    "alter table {}.{} add column {} bigint generated always as identity primary key",
+                    rgrip_core::sql::quote_ident(&t.schema),
+                    rgrip_core::sql::quote_ident(&t.table),
+                    rgrip_core::sql::quote_ident(name)
+                );
+                // Changes the table for everyone: always show the statement.
+                if !confirmed {
+                    let title = format!("Add a primary key to {}.{}?", t.schema, t.table);
+                    let why = format!("Adds column {name}, numbered 1, 2, 3… in the current row order; rewrites the table");
+                    self.confirm = Some(Confirm { tab: tab.id, kind: ConfirmKind::AddKey, title, items: vec![(sql, why, false)], focused: false });
+                    return;
+                }
+                t.saving = true;
+                self.worker.send(Cmd::SaveEdits { conn: tab.conn.clone(), tab: tab.id, statements: vec![sql] });
             }
             (TabAction::ShowRelated(target), TabKind::Table(t)) => {
                 match &mut t.related {
@@ -3760,6 +3804,9 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
             ui.add_space(8.0);
             ui.label(RichText::new("read-only").small().color(theme::FAINT()))
                 .on_hover_text("No primary key or unique column: rows can't be identified for editing");
+            if ui.add_enabled(!t.saving, Button::new(RichText::new("Add primary key").small())).on_hover_text("Add an id column numbered 1, 2, 3… as the primary key, so rows can be edited").clicked() {
+                action = Some(TabAction::AddKey);
+            }
         } else if !t.key.is_empty() && !t.columns.iter().any(|c| c.primary_key) && !locked {
             ui.add_space(8.0);
             ui.label(RichText::new(format!("keyed on {}", t.key.join(", "))).small().color(theme::FAINT()))
@@ -4215,6 +4262,7 @@ impl App {
         self.tab_action(ti, match c.kind {
             ConfirmKind::Run { all } => TabAction::Run { all },
             ConfirmKind::Save => TabAction::SaveEdits,
+            ConfirmKind::AddKey => TabAction::AddKey,
         });
         self.skip_confirm = false;
     }
