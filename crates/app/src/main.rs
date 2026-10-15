@@ -4,6 +4,7 @@ mod grid;
 mod highlight;
 mod icons;
 mod import;
+mod table_edit;
 mod map;
 mod shaping;
 mod snapshot;

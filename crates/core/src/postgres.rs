@@ -598,8 +598,24 @@ impl PgConn {
         Ok(counts.len())
     }
 
-    /// A schema change (one statement, its own transaction): unlike
-    /// `apply_updates`, no row count is expected.
+    /// Name of a table's primary key constraint, if it has one.
+    pub async fn primary_key_name(&self, schema: &str, table: &str) -> Result<Option<String>, String> {
+        let rows = self
+            .client
+            .query(
+                "select con.conname::text from pg_constraint con
+                 join pg_class c on c.oid = con.conrelid
+                 join pg_namespace n on n.oid = c.relnamespace
+                 where n.nspname = $1 and c.relname = $2 and con.contype = 'p'",
+                &[&schema, &table],
+            )
+            .await
+            .map_err(|e| format_error(&e, None))?;
+        Ok(rows.first().map(|r| r.get(0)))
+    }
+
+    /// A schema change: unlike `apply_updates`, no row count is expected.
+    /// Several statements run as one implicit transaction (all or nothing).
     pub async fn alter(&self, sql: &str) -> Result<(), String> {
         self.client.batch_execute(sql).await.map_err(|e| format_error(&e, None))
     }

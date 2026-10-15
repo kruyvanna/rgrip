@@ -33,6 +33,10 @@ pub enum Cmd {
     ProbeRelations { conn: ConnId, tab: TabId, modal: bool, key: Vec<usize>, probes: Vec<(String, String, String)> },
     /// Inline-edit UPDATEs, applied in one transaction.
     SaveEdits { conn: ConnId, tab: TabId, statements: Vec<String> },
+    /// Columns and primary key constraint name, for Edit table.
+    TableDef { conn: ConnId, schema: String, table: String },
+    /// Edit table: the statements, all or nothing.
+    AlterTable { conn: ConnId, schema: String, table: String, new_name: String, statements: Vec<String> },
     /// Add a primary key to a table tab's table.
     AddKey { conn: ConnId, tab: TabId, sql: String },
     Cancel(ConnId, Option<String>),
@@ -65,6 +69,8 @@ pub enum Ev {
     /// Rows updated, or why nothing was saved.
     EditsSaved { tab: TabId, result: Result<usize, String> },
     KeyAdded { tab: TabId, result: Result<(), String> },
+    TableDef { conn: ConnId, schema: String, table: String, result: Result<(Vec<ColumnInfo>, Option<String>), String> },
+    TableAltered { conn: ConnId, schema: String, table: String, new_name: String, result: Result<(), String> },
     TableCount { tab: TabId, modal: bool, result: Result<i64, String> },
     /// Path and row count, or an error.
     Exported(Result<(std::path::PathBuf, usize), String>),
@@ -276,6 +282,23 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                 counts.push(c.count_capped(schema, table, filter, PROBE_CAP).await.ok());
             }
             emit.send(Ev::RelationProbe { tab, modal, key, counts });
+        }
+        Cmd::TableDef { conn, schema, table } => {
+            let result = match get(&conns, &conn) {
+                Ok(c) => match c.columns(&schema, &table).await {
+                    Ok(cols) => c.primary_key_name(&schema, &table).await.map(|pk| (cols, pk)),
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::TableDef { conn, schema, table, result });
+        }
+        Cmd::AlterTable { conn, schema, table, new_name, statements } => {
+            let result = match get(&conns, &conn) {
+                Ok(c) => c.alter(&statements.join(";\n")).await,
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::TableAltered { conn, schema, table, new_name, result });
         }
         Cmd::AddKey { conn, tab, sql } => {
             let result = match get(&conns, &conn) {

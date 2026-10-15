@@ -431,6 +431,8 @@ enum Action {
     OpenTable(usize, String, String),
     /// Import a file into a schema, or into one of its tables.
     Import(usize, String, Option<String>),
+    /// Edit a table's structure (columns, types, key, name).
+    EditTable(usize, String, String),
     LoadSchemas(usize),
     LoadTables(usize, String),
     LoadColumns(usize, String, String),
@@ -623,6 +625,7 @@ pub struct App {
     commands_editor: Option<CommandsEditor>,
     /// The Import data dialog, while open.
     import: Option<crate::import::ImportDialog>,
+    table_editor: Option<crate::table_edit::TableEditor>,
     /// Debug demo recordings: the scripted steps being played.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     demo_play: Option<DemoPlay>,
@@ -686,6 +689,7 @@ impl App {
             demo_play: None,
             commands_editor: None,
             import: None,
+            table_editor: None,
         }
     }
 
@@ -899,6 +903,42 @@ impl App {
                             self.tab_action(ti, TabAction::Reload);
                         }
                         Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
+                    }
+                }
+                Ev::TableDef { conn, schema, table, result } => {
+                    if let Some(ed) = self.table_editor.as_mut().filter(|e| e.conn == conn && e.schema == schema && e.table == table) {
+                        ed.loaded(result);
+                    }
+                }
+                Ev::TableAltered { conn, schema, table, new_name, result } => {
+                    match result {
+                        Ok(()) => {
+                            self.table_editor = None;
+                            self.toast = Some((format!("Updated {schema}.{new_name}"), theme::OK(), Instant::now()));
+                            if let Some(ci) = self.conn_index(&conn) {
+                                self.conns[ci].columns.remove(&(schema.clone(), table.clone()));
+                                self.conns[ci].columns.remove(&(schema.clone(), new_name.clone()));
+                                self.worker.send(Cmd::Tables(conn.clone(), schema.clone()));
+                                self.worker.send(Cmd::Catalog(conn.clone(), None));
+                            }
+                            // Open tabs of the table follow a rename and reload.
+                            let open: Vec<usize> = (0..self.tabs.len())
+                                .filter(|&i| self.tabs[i].conn == conn && matches!(&self.tabs[i].kind, TabKind::Table(t) if t.schema == schema && t.table == table))
+                                .collect();
+                            for i in open {
+                                if let TabKind::Table(t) = &mut self.tabs[i].kind {
+                                    t.table = new_name.clone();
+                                    t.changes.clear();
+                                    t.editor = None;
+                                }
+                                self.tab_action(i, TabAction::Reload);
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(ed) = self.table_editor.as_mut() {
+                                ed.failed(e);
+                            }
+                        }
                     }
                 }
                 Ev::ImportProgress { conn, rows } => {
@@ -1178,6 +1218,16 @@ impl App {
                     self.apply(Action::LoadTables(ci, schema.clone()));
                 }
                 self.import = Some(crate::import::ImportDialog::new(self.conns[ci].cfg.id.clone(), schema, table));
+            }
+            Action::EditTable(ci, schema, table) => {
+                let cfg = &self.conns[ci].cfg;
+                if cfg.read_only {
+                    self.toast = Some((READ_ONLY_HINT.into(), theme::WARN(), Instant::now()));
+                    return;
+                }
+                let id = cfg.id.clone();
+                self.table_editor = Some(crate::table_edit::TableEditor::new(id.clone(), schema.clone(), table.clone(), cfg.color == ConnColor::Red));
+                self.worker.send(Cmd::TableDef { conn: id, schema, table });
             }
             Action::LoadSchemas(ci) => {
                 let c = &mut self.conns[ci];
@@ -1740,6 +1790,22 @@ impl App {
         // `RGRIP_DEMO_IMPORT=<file>`: the import dialog with that file picked,
         // into the first `RGRIP_DEMO_EXPAND` schema.
         static IMPORT_OPENED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        // `RGRIP_DEMO_EDIT_TABLE=demo.owners`: Edit table with a few edits.
+        static EDIT_OPENED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+        if let Some((schema, table)) = env("RGRIP_DEMO_EDIT_TABLE").as_deref().and_then(|v| v.split_once('.'))
+            && matches!(self.conns.first().map(|c| &c.status), Some(Status::Connected(_)))
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            if EDIT_OPENED.load(Relaxed) == 0 {
+                EDIT_OPENED.store(1, Relaxed);
+                self.apply(Action::EditTable(0, schema.into(), table.into()));
+            } else if EDIT_OPENED.load(Relaxed) == 1 && self.table_editor.as_mut().is_some_and(|e| e.demo_edits()) {
+                EDIT_OPENED.store(2, Relaxed);
+            }
+        }
+        if env("RGRIP_DEMO_EDIT_TABLE").is_some() && self.conns.first().is_some_and(|c| matches!(c.status, Status::Disconnected)) {
+            self.apply(Action::Connect(0));
+        }
         // Connects, then waits for the schema's tables, as when opened from
         // the explorer.
         if env("RGRIP_DEMO_IMPORT").is_some() && self.conns.first().is_some_and(|c| matches!(c.status, Status::Disconnected)) {
@@ -1758,7 +1824,10 @@ impl App {
         }
         // A pending confirmation or the import dialog is a scene of its own
         // (no results come).
-        let settled = settled || self.confirm.is_some() || self.import.as_ref().is_some_and(|d| d.demo_ready());
+        let settled = settled
+            || self.confirm.is_some()
+            || self.import.as_ref().is_some_and(|d| d.demo_ready())
+            || EDIT_OPENED.load(std::sync::atomic::Ordering::Relaxed) == 2;
         if let Some(a) = follow_action {
             self.tab_action(self.active, a);
         }
@@ -2131,6 +2200,7 @@ impl eframe::App for App {
         self.confirm_ui(ctx);
         self.commands_editor_ui(ctx);
         self.import_ui(ctx);
+        self.table_editor_ui(ctx);
 
         if let Some(a) = tab_action {
             self.tab_action(self.active, a);
@@ -2766,6 +2836,10 @@ impl Tree<'_> {
             }
             if matches!(t.kind, TableKind::Table | TableKind::Partitioned) && crate::icons::menu_item(ui, Svg::Upload, "Import into this table…", !conn.cfg.read_only).clicked() {
                 actions.push(Action::Import(ci, schema.to_string(), Some(t.name.clone())));
+                ui.close();
+            }
+            if matches!(t.kind, TableKind::Table | TableKind::Partitioned) && crate::icons::menu_item(ui, Svg::Pencil, "Edit table…", !conn.cfg.read_only).clicked() {
+                actions.push(Action::EditTable(ci, schema.to_string(), t.name.clone()));
                 ui.close();
             }
             if crate::icons::menu_item(ui, Svg::Copy, "Copy name", true).clicked() {
@@ -4091,6 +4165,19 @@ impl App {
             Outcome::OpenTable(table) => {
                 self.import = None;
                 self.open_table(ci, schema, table);
+            }
+        }
+    }
+
+    fn table_editor_ui(&mut self, ctx: &egui::Context) {
+        use crate::table_edit::Outcome;
+        let Some(ed) = &mut self.table_editor else { return };
+        match ed.ui(ctx) {
+            Outcome::Keep => {}
+            Outcome::Close => self.table_editor = None,
+            Outcome::Apply { statements, new_name } => {
+                let (conn, schema, table) = (ed.conn.clone(), ed.schema.clone(), ed.table.clone());
+                self.worker.send(Cmd::AlterTable { conn, schema, table, new_name, statements });
             }
         }
     }
