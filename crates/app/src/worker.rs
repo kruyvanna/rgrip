@@ -38,6 +38,8 @@ pub enum Cmd {
     CheckUpdate,
     /// Download, verify and install a release over `app`.
     InstallUpdate { release: rgrip_core::update::Release, app: std::path::PathBuf },
+    /// Load a file into a table (own connection, one transaction).
+    Import { conn: ConnId, request: rgrip_core::import::ImportRequest },
     /// Run `sql` uncapped and write it to `path`.
     ExportAll { conn: ConnId, database: Option<String>, schema: Option<String>, sql: String, format: rgrip_core::export::Format, table: String, path: std::path::PathBuf },
 }
@@ -63,6 +65,10 @@ pub enum Ev {
     TableCount { tab: TabId, modal: bool, result: Result<i64, String> },
     /// Path and row count, or an error.
     Exported(Result<(std::path::PathBuf, usize), String>),
+    /// Rows sent to the server so far by the running import.
+    ImportProgress { conn: ConnId, rows: usize },
+    /// Rows imported, or why nothing was (the import is rolled back).
+    ImportDone { conn: ConnId, schema: String, table: String, result: Result<usize, String> },
     UpdateChecked(Result<Option<rgrip_core::update::Release>, String>),
     /// The bundle that was updated (ready to relaunch), or an error.
     UpdateInstalled(Result<std::path::PathBuf, String>),
@@ -281,6 +287,19 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                 Err(e) => Err(e),
             };
             emit.send(Ev::Exported(result));
+        }
+        Cmd::Import { conn, request } => {
+            // A connection of its own: the import's transaction would
+            // otherwise swallow whatever else runs on the shared one.
+            let cfg = conns.cfgs.lock().unwrap().get(&conn).cloned();
+            let result = match cfg {
+                None => Err("Not connected".to_string()),
+                Some(cfg) => match PgConn::connect(&cfg).await {
+                    Ok(c) => c.import(&request, |rows| emit.send(Ev::ImportProgress { conn: conn.clone(), rows })).await,
+                    Err(e) => Err(e),
+                },
+            };
+            emit.send(Ev::ImportDone { conn, schema: request.schema, table: request.table, result });
         }
         Cmd::CheckUpdate => emit.send(Ev::UpdateChecked(rgrip_core::update::check().await)),
         Cmd::InstallUpdate { release, app } => {

@@ -1,0 +1,5 @@
+{"type":"FeatureCollection","features":[
+ {"type":"Feature","properties":{"name":"Pin","height":12,"open":true},"geometry":{"type":"Point","coordinates":[100.5,13.75]}},
+ {"type":"Feature","properties":{"name":"Plot\tA","height":null},"geometry":{"type":"Polygon","coordinates":[[[100,13],[101,13],[101,14],[100,13]]]}},
+ {"type":"Feature","properties":{"name":"Nowhere"},"geometry":null}
+]}

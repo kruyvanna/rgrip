@@ -12,6 +12,7 @@ All notable changes to rgrip are documented here. The format is based on
 - Zoom to selected: a button on the map next to Fit; opening the map with rows selected fits to them.
 - Split view: Grid / Map / Split in table tabs and console results, side by side with a resizable divider, live-linked.
 - Filter by area: draw a box on the map (button, or hold shift and drag) to set the table's WHERE filter to `ST_Intersects(geom, ST_Transform(ST_MakeEnvelope(…, 4326), srid))` and reload. The area stays on the map until cleared.
+- Import data: right-click a schema (Import data…) or a table (Import into this table…) to load a CSV / TSV, GeoJSON or Shapefile. Pick the file, check a 50-row preview, edit column names and inferred types (integer, bigint, numeric, text, boolean, date, timestamp, jsonb, geometry), set the SRID, then create a new table or append to an existing one. CSV delimiter is detected (UTF-8 and BOM, quoted fields), lon/lat columns can become a point column, and a Shapefile's `.prj` is read to guess the SRID (WGS 84, UTM zones, EPSG codes). Rows go in with COPY inside one transaction on a connection of its own, with live progress; any error rolls everything back and names the row.
 
 ### Changed
 - Passwords, SSH passwords and key passphrases are stored in the macOS Keychain instead of plain text in `connections.toml`. Existing plain-text secrets migrate automatically; if the Keychain is unavailable rgrip warns once and falls back to the file.
