@@ -5,6 +5,8 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.0.11-alpha] - 2026-10-16
+
 ### Fixed
 - Check for updates no longer fails with "HTTP 403" when GitHub's API limit is reached (60 requests an hour per address): it falls back to the public releases feed, and says so plainly if that fails too.
 
@@ -142,7 +144,8 @@ First alpha: a minimal DataGrip-style PostgreSQL client written in Rust.
 - Khmer typed into the SQL editor is not shaped yet.
 - Only macOS on Apple silicon is published; other platforms can build from source.
 
-[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.10-alpha...HEAD
+[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.11-alpha...HEAD
+[0.0.11-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.11-alpha
 [0.0.10-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.10-alpha
 [0.0.9-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.9-alpha
 [0.0.8-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.8-alpha
