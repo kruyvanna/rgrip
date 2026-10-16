@@ -5,6 +5,9 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- Check for updates no longer fails with "HTTP 403" when GitHub's API limit is reached (60 requests an hour per address): it falls back to the public releases feed, and says so plainly if that fails too.
+
 ## [0.0.10-alpha] - 2026-10-16
 
 ### Added

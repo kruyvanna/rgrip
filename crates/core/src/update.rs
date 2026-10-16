@@ -84,8 +84,57 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// GitHub's public releases feed: not under the API's rate limit
+/// (60 requests an hour per address without a login).
+fn feed_url() -> String {
+    std::env::var("RGRIP_UPDATE_FEED").unwrap_or_else(|_| format!("https://github.com/{REPO}/releases.atom"))
+}
+
 pub async fn check() -> Result<Option<Release>, String> {
-    check_at(&api_base(), CURRENT).await
+    match check_at(&api_base(), CURRENT).await {
+        // Rate-limited: the feed has the versions and checksums too.
+        Err(e) if e.contains("HTTP 403") || e.contains("HTTP 429") => check_feed(&feed_url(), CURRENT).await.map_err(|_| {
+            "GitHub is limiting update checks from your network right now. Try again in a few minutes.".to_string()
+        }),
+        other => other,
+    }
+}
+
+/// [`check`] from the releases Atom feed.
+pub async fn check_feed(url: &str, current: &str) -> Result<Option<Release>, String> {
+    let resp = client()?.get(url).send().await.map_err(|e| format!("Update check failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Update check failed: HTTP {}", resp.status()));
+    }
+    let text = resp.text().await.map_err(|e| format!("Update check failed: {e}"))?;
+    pick_update_from_feed(&text, current, arch())
+}
+
+/// Like [`pick_update`], from the Atom feed. The feed lists no assets, so the
+/// zip's URL follows GitHub's download pattern (a missing one fails the
+/// download, not the check).
+pub fn pick_update_from_feed(atom: &str, current: &str, arch: &str) -> Result<Option<Release>, String> {
+    let current = semver::Version::parse(current).map_err(|e| format!("bad current version: {e}"))?;
+    let mut best: Option<Release> = None;
+    for entry in atom.split("<entry>").skip(1) {
+        let Some(page) = entry.split("href=\"").nth(1).and_then(|s| s.split('"').next()) else { continue };
+        let Some(tag) = page.split("/releases/tag/").nth(1) else { continue };
+        let Ok(version) = semver::Version::parse(tag.trim_start_matches('v')) else { continue };
+        if version <= current || best.as_ref().is_some_and(|b| b.version >= version) {
+            continue;
+        }
+        let notes = entry.split("<content").nth(1).and_then(|s| s.split("</content>").next()).unwrap_or_default();
+        let base = page.split("/releases/tag/").next().unwrap_or_default();
+        let name = asset_name(&version.to_string(), arch);
+        best = Some(Release {
+            page_url: page.to_string(),
+            asset_url: format!("{base}/releases/download/{tag}/{name}"),
+            asset_name: name,
+            sha256: parse_sha256(notes),
+            version,
+        });
+    }
+    Ok(best)
 }
 
 /// [`check`] against a specific API base (`…/repos/owner/name`) and version.
@@ -233,4 +282,21 @@ mod tests {
         assert_eq!(parse_sha256(&format!("commit {SHA}")), None);
         assert_eq!(parse_sha256("SHA-256: abc"), None);
     }
+
+    #[test]
+    fn picks_from_the_feed() {
+        let atom = r#"<feed><entry>
+    <link rel="alternate" type="text/html" href="https://github.com/yoouTaro/rgrip/releases/tag/v0.0.10-alpha"/>
+    <content type="html">&lt;p&gt;SHA-256: &lt;code&gt;febff09636b011ca25b96c1639cadf7aefb6add164f1bbb5db09e0121224b7a6&lt;/code&gt;&lt;/p&gt;</content>
+  </entry><entry>
+    <link rel="alternate" type="text/html" href="https://github.com/yoouTaro/rgrip/releases/tag/v0.0.9-alpha"/>
+    <content type="html">&lt;p&gt;SHA-256: &lt;code&gt;aea408f46edf58e956127affbb129594fdfeab10671daf3000fbe26e8fd1471b&lt;/code&gt;</content>
+  </entry></feed>"#;
+        let r = pick_update_from_feed(atom, "0.0.9-alpha", "arm64").unwrap().unwrap();
+        assert_eq!(r.version.to_string(), "0.0.10-alpha");
+        assert_eq!(r.asset_url, "https://github.com/yoouTaro/rgrip/releases/download/v0.0.10-alpha/rgrip-0.0.10-alpha-macos-arm64.zip");
+        assert_eq!(r.sha256.as_deref(), Some("febff09636b011ca25b96c1639cadf7aefb6add164f1bbb5db09e0121224b7a6"));
+        assert_eq!(pick_update_from_feed(atom, "0.0.10-alpha", "arm64").unwrap(), None);
+    }
+
 }
