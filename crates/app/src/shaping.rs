@@ -182,9 +182,100 @@ pub fn label(ui: &mut egui::Ui, text: &str, size: f32, color: Color32) -> egui::
     }
 }
 
+/// Byte ranges of Khmer text: maximal runs of Khmer characters, with
+/// zero-width (non-)joiners and spaces inside a run kept in it.
+pub fn khmer_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut run: Option<std::ops::Range<usize>> = None;
+    for (i, c) in text.char_indices() {
+        let end = i + c.len_utf8();
+        if is_khmer(c) {
+            match &mut run {
+                Some(r) => r.end = end,
+                None => run = Some(i..end),
+            }
+        } else if matches!(c, '\u{200B}'..='\u{200D}') && run.is_some() {
+            // Joiners belong to the run; a run never ends on one (below).
+        } else if let Some(r) = run.take() {
+            out.push(r);
+        }
+    }
+    out.extend(run);
+    out
+}
+
+/// For an editable text: hide the Khmer runs in `job` (egui would draw them
+/// unshaped) and space their glyphs so each run is as wide as its shaped
+/// form, so the cursor and the text after it line up. Returns the runs and
+/// their colors, for [`paint_runs`] after the text is laid out.
+pub fn hide_runs(ui: &egui::Ui, job: &mut egui::text::LayoutJob) -> Vec<(std::ops::Range<usize>, Color32)> {
+    let ranges = khmer_ranges(&job.text);
+    if ranges.is_empty() || shaper().is_none() {
+        return Vec::new();
+    }
+    let ppp = ui.ctx().pixels_per_point();
+    let mut runs = Vec::new();
+    let mut spacing = Vec::new();
+    for r in &ranges {
+        let Some(section) = job.sections.iter().find(|s| s.byte_range.contains(&r.start)) else { continue };
+        let (font, color) = (section.format.font_id.clone(), section.format.color);
+        let run = &job.text[r.clone()];
+        let Some(shaped) = shape(ui.ctx(), run, font.size) else { continue };
+        let plain = ui.fonts_mut(|f| f.layout_no_wrap(run.to_string(), font.clone(), color)).size().x;
+        let wanted = shaped.size.x - 4.0 / ppp;
+        spacing.push((r.clone(), (wanted - plain) / run.chars().count() as f32));
+        runs.push((r.clone(), color));
+    }
+    // Split sections at run edges; the parts inside a run go invisible.
+    let mut sections = Vec::new();
+    for s in job.sections.drain(..) {
+        let mut at = s.byte_range.start;
+        while at < s.byte_range.end {
+            let inside = spacing.iter().find(|(r, _)| r.contains(&at));
+            let end = match inside {
+                Some((r, _)) => r.end.min(s.byte_range.end),
+                None => spacing.iter().map(|(r, _)| r.start).filter(|&x| x > at).min().unwrap_or(s.byte_range.end).min(s.byte_range.end),
+            };
+            let mut part = s.clone();
+            part.byte_range = at..end;
+            if let Some((_, extra)) = inside {
+                part.format.color = Color32::TRANSPARENT;
+                part.format.extra_letter_spacing = *extra;
+            }
+            sections.push(part);
+            at = end;
+        }
+    }
+    job.sections = sections;
+    runs
+}
+
+/// Draw the runs [`hide_runs`] hid, shaped, where the galley put them.
+pub fn paint_runs(ui: &egui::Ui, galley: &egui::Galley, galley_pos: Pos2, runs: &[(std::ops::Range<usize>, Color32)]) {
+    let ppp = ui.ctx().pixels_per_point();
+    let text = galley.text();
+    for (r, color) in runs {
+        let Some(run) = text.get(r.clone()) else { continue };
+        let size = galley.job.sections.iter().find(|s| s.byte_range.contains(&r.start)).map_or(14.0, |s| s.format.font_id.size);
+        let Some(shaped) = shape(ui.ctx(), run, size) else { continue };
+        let index = text[..r.start].chars().count();
+        let at = galley.pos_from_cursor(egui::text::CCursor::new(index));
+        let left = galley_pos.x + at.min.x - 2.0 / ppp;
+        shaped.paint(ui.painter(), left, galley_pos.y + at.center().y, *color, ui.clip_rect());
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{script_runs, shape_run};
+    use super::{khmer_ranges, script_runs, shape_run};
+
+    #[test]
+    fn finds_khmer_runs() {
+        let t = "select 1; -- កូនខ្ញុំ\u{200B}ស្រី ok";
+        let runs: Vec<&str> = khmer_ranges(t).into_iter().map(|r| &t[r]).collect();
+        assert_eq!(runs, ["កូនខ្ញុំ\u{200B}ស្រី"]);
+        assert!(khmer_ranges("plain").is_empty());
+    }
 
     #[test]
     fn no_missing_glyph_boxes() {

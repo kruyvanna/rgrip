@@ -1861,7 +1861,7 @@ impl App {
     /// Returns true to run the next step in the same frame.
     ///
     /// Steps: `wait:<ms>`, `type:<text>` (into the console, `\n` = newline),
-    /// `keys:<text>` (keystrokes to the focused field), `key:[cmd+]Enter|Escape|/|A`, `click:<x>,<y>`,
+    /// `keys:<text>` (keystrokes to the focused field), `key:[cmd+]Enter|Escape|/|A|Backspace`, `click:<x>,<y>`,
     /// `run` (and wait for results), `view:map|grid`, `open:<schema.table>`
     /// (and wait for data), `select:<rows>`, `menu:<row>`,
     /// `related:<table>` (and wait), `editor:<row>:<col>`,
@@ -1925,6 +1925,7 @@ impl App {
                     "Down" => Key::ArrowDown,
                     "/" => Key::Slash,
                     "A" => Key::A,
+                    "Backspace" => Key::Backspace,
                     _ => Key::Tab,
                 };
                 self.egui_ctx.input_mut(|i| i.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }));
@@ -3233,6 +3234,42 @@ fn console_ui(
             || i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Questionmark)
             || i.consume_key(Modifiers::COMMAND, Key::Questionmark)
     });
+    // Quotes and brackets close themselves; backspace in an empty pair takes both.
+    if c.running.is_none() && ui.memory(|m| m.has_focus(editor_id)) {
+        let sel = TextEdit::load_state(ui.ctx(), editor_id)
+            .and_then(|s| s.cursor.char_range())
+            .map_or(c.cursor.clone(), |r| r.as_sorted_char_range());
+        let sel = sql::char_to_byte(&c.sql, sel.start)..sql::char_to_byte(&c.sql, sel.end);
+        let edit = ui.input_mut(|i| {
+            let mut edit = None;
+            i.events.retain(|e| {
+                if edit.is_some() {
+                    return true;
+                }
+                match e {
+                    egui::Event::Text(t) if t.chars().count() == 1 => {
+                        let ch = t.chars().next().unwrap();
+                        edit = rgrip_core::pairs::type_char(&c.sql, sel.clone(), ch);
+                    }
+                    egui::Event::Key { key: Key::Backspace, pressed: true, modifiers, .. } if modifiers.is_none() && sel.start == sel.end => {
+                        edit = rgrip_core::pairs::backspace(&c.sql, sel.start).map(|(t, at)| (t, at..at));
+                    }
+                    _ => {}
+                }
+                edit.is_none()
+            });
+            edit
+        });
+        if let Some((text, sel)) = edit {
+            c.sql = text;
+            c.cursor = c.sql[..sel.start].chars().count()..c.sql[..sel.end].chars().count();
+            if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
+                let range = egui::text::CCursorRange::two(egui::text::CCursor::new(c.cursor.start), egui::text::CCursor::new(c.cursor.end));
+                state.cursor.set_char_range(Some(range));
+                state.store(ui.ctx(), editor_id);
+            }
+        }
+    }
     if comment && c.running.is_none() {
         let sel = sql::char_to_byte(&c.sql, c.cursor.start)..sql::char_to_byte(&c.sql, c.cursor.end);
         let (text, sel) = rgrip_core::format::toggle_comment(&c.sql, sel);
@@ -3324,9 +3361,12 @@ fn console_ui(
                 .id_salt(("editor-scroll", tab_id))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    // Khmer is drawn shaped over the laid-out text (egui doesn't shape it).
+                    let mut khmer = Vec::new();
                     let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
                         let mut job = highlight::sql(buf.as_str(), TextStyle::Monospace.resolve(ui.style()));
                         job.wrap.max_width = wrap;
+                        khmer = crate::shaping::hide_runs(ui, &mut job);
                         ui.fonts_mut(|f| f.layout_job(job))
                     };
                     let out = TextEdit::multiline(&mut c.sql)
@@ -3340,6 +3380,7 @@ fn console_ui(
                         .margin(Margin { left: 48, right: 0, top: 0, bottom: 0 })
                         .layouter(&mut layouter)
                         .show(ui);
+                    crate::shaping::paint_runs(ui, &out.galley, out.galley_pos, &khmer);
                     paint_line_numbers(ui, &out);
                     let previous = c.cursor.clone();
                     if let Some(r) = out.cursor_range {

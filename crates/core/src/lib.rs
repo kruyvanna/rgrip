@@ -10,6 +10,7 @@ pub mod geo;
 pub mod alter;
 pub mod import;
 pub mod model;
+pub mod pairs;
 pub mod postgres;
 pub mod relations;
 pub mod safety;

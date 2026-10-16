@@ -5,6 +5,12 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Quotes and brackets close themselves in the console: typing `'`, `"`, `(` or `[` adds the closing one, typing the closer steps over it, Backspace in an empty pair removes both, and a selection gets wrapped.
+
+### Fixed
+- Khmer in the console editor is drawn shaped: subscript consonants stack and vowels sit in the right place, like in the grid.
+
 ## [0.0.9-alpha] - 2026-10-16
 
 ### Added
