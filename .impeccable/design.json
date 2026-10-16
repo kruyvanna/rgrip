@@ -1,505 +1,381 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-16T02:46:34+00:00",
+  "generatedAt": "2026-10-16T03:10:54+00:00",
   "title": "Design System: rgrip",
   "extensions": {
-    "scope": "Landing site in site/ only; the native egui app has its own look.",
+    "scope": "Landing website in site/ only; the native egui app has its own look.",
     "colorMeta": {
-      "amber": {
+      "accent": {
         "role": "primary",
-        "displayName": "Platform Amber",
+        "displayName": "App Blue",
+        "canonical": "oklch(71.9% 0.132 264)",
         "tonalRamp": [
-          "oklch(15% 0.14 78)",
-          "oklch(25% 0.14 78)",
-          "oklch(37% 0.14 78)",
-          "oklch(50% 0.14 78)",
-          "oklch(62% 0.14 78)",
-          "oklch(74% 0.14 78)",
-          "oklch(85% 0.14 78)",
-          "oklch(95% 0.14 78)"
+          "oklch(15% 0.132 264)",
+          "oklch(25% 0.132 264)",
+          "oklch(37% 0.132 264)",
+          "oklch(50% 0.132 264)",
+          "oklch(62% 0.132 264)",
+          "oklch(74% 0.132 264)",
+          "oklch(85% 0.132 264)",
+          "oklch(95% 0.132 264)"
         ]
       },
-      "amber-hover": {
+      "on-accent": {
         "role": "primary",
-        "displayName": "Lit Amber",
+        "displayName": "Blue Ink",
+        "canonical": "oklch(17.7% 0.034 270)",
         "tonalRamp": [
-          "oklch(15% 0.15 80)",
-          "oklch(25% 0.15 80)",
-          "oklch(37% 0.15 80)",
-          "oklch(50% 0.15 80)",
-          "oklch(62% 0.15 80)",
-          "oklch(74% 0.15 80)",
-          "oklch(85% 0.15 80)",
-          "oklch(95% 0.15 80)"
+          "oklch(15% 0.034 270)",
+          "oklch(25% 0.034 270)",
+          "oklch(37% 0.034 270)",
+          "oklch(50% 0.034 270)",
+          "oklch(62% 0.034 270)",
+          "oklch(74% 0.034 270)",
+          "oklch(85% 0.034 270)",
+          "oklch(95% 0.034 270)"
         ]
       },
-      "amber-ink": {
-        "role": "primary",
-        "displayName": "Lamp Ink",
-        "tonalRamp": [
-          "oklch(15% 0.02 85)",
-          "oklch(25% 0.02 85)",
-          "oklch(37% 0.02 85)",
-          "oklch(50% 0.02 85)",
-          "oklch(62% 0.02 85)",
-          "oklch(74% 0.02 85)",
-          "oklch(85% 0.02 85)",
-          "oklch(95% 0.02 85)"
-        ]
-      },
-      "ground": {
+      "bg": {
         "role": "neutral",
-        "displayName": "Concourse Ground",
+        "displayName": "Night Ground",
+        "canonical": "oklch(15.9% 0.007 271)",
         "tonalRamp": [
-          "oklch(15% 0.006 265)",
-          "oklch(25% 0.006 265)",
-          "oklch(37% 0.006 265)",
-          "oklch(50% 0.006 265)",
-          "oklch(62% 0.006 265)",
-          "oklch(74% 0.006 265)",
-          "oklch(85% 0.006 265)",
-          "oklch(95% 0.006 265)"
+          "oklch(15% 0.007 271)",
+          "oklch(25% 0.007 271)",
+          "oklch(37% 0.007 271)",
+          "oklch(50% 0.007 271)",
+          "oklch(62% 0.007 271)",
+          "oklch(74% 0.007 271)",
+          "oklch(85% 0.007 271)",
+          "oklch(95% 0.007 271)"
         ]
       },
-      "board": {
+      "raise": {
         "role": "neutral",
-        "displayName": "Board Black",
+        "displayName": "Raised Slate",
+        "canonical": "oklch(20% 0.009 264)",
         "tonalRamp": [
-          "oklch(15% 0.006 265)",
-          "oklch(25% 0.006 265)",
-          "oklch(37% 0.006 265)",
-          "oklch(50% 0.006 265)",
-          "oklch(62% 0.006 265)",
-          "oklch(74% 0.006 265)",
-          "oklch(85% 0.006 265)",
-          "oklch(95% 0.006 265)"
+          "oklch(15% 0.009 264)",
+          "oklch(25% 0.009 264)",
+          "oklch(37% 0.009 264)",
+          "oklch(50% 0.009 264)",
+          "oklch(62% 0.009 264)",
+          "oklch(74% 0.009 264)",
+          "oklch(85% 0.009 264)",
+          "oklch(95% 0.009 264)"
         ]
       },
-      "cell": {
+      "raise-2": {
         "role": "neutral",
-        "displayName": "Flap Graphite",
+        "displayName": "Raised Slate Hi",
+        "canonical": "oklch(23.1% 0.01 268)",
         "tonalRamp": [
-          "oklch(15% 0.006 265)",
-          "oklch(25% 0.006 265)",
-          "oklch(37% 0.006 265)",
-          "oklch(50% 0.006 265)",
-          "oklch(62% 0.006 265)",
-          "oklch(74% 0.006 265)",
-          "oklch(85% 0.006 265)",
-          "oklch(95% 0.006 265)"
-        ]
-      },
-      "cell-lo": {
-        "role": "neutral",
-        "displayName": "Lower Flap",
-        "tonalRamp": [
-          "oklch(15% 0.006 265)",
-          "oklch(25% 0.006 265)",
-          "oklch(37% 0.006 265)",
-          "oklch(50% 0.006 265)",
-          "oklch(62% 0.006 265)",
-          "oklch(74% 0.006 265)",
-          "oklch(85% 0.006 265)",
-          "oklch(95% 0.006 265)"
-        ]
-      },
-      "seam": {
-        "role": "neutral",
-        "displayName": "Seam",
-        "tonalRamp": [
-          "oklch(15% 0.003 265)",
-          "oklch(25% 0.003 265)",
-          "oklch(37% 0.003 265)",
-          "oklch(50% 0.003 265)",
-          "oklch(62% 0.003 265)",
-          "oklch(74% 0.003 265)",
-          "oklch(85% 0.003 265)",
-          "oklch(95% 0.003 265)"
-        ]
-      },
-      "frame": {
-        "role": "neutral",
-        "displayName": "Brushed Steel",
-        "tonalRamp": [
-          "oklch(15% 0.01 265)",
-          "oklch(25% 0.01 265)",
-          "oklch(37% 0.01 265)",
-          "oklch(50% 0.01 265)",
-          "oklch(62% 0.01 265)",
-          "oklch(74% 0.01 265)",
-          "oklch(85% 0.01 265)",
-          "oklch(95% 0.01 265)"
-        ]
-      },
-      "steel-edge": {
-        "role": "neutral",
-        "displayName": "Steel Edge",
-        "tonalRamp": [
-          "oklch(15% 0.012 265)",
-          "oklch(25% 0.012 265)",
-          "oklch(37% 0.012 265)",
-          "oklch(50% 0.012 265)",
-          "oklch(62% 0.012 265)",
-          "oklch(74% 0.012 265)",
-          "oklch(85% 0.012 265)",
-          "oklch(95% 0.012 265)"
-        ]
-      },
-      "steel-face": {
-        "role": "neutral",
-        "displayName": "Steel Face",
-        "tonalRamp": [
-          "oklch(15% 0.006 265)",
-          "oklch(25% 0.006 265)",
-          "oklch(37% 0.006 265)",
-          "oklch(50% 0.006 265)",
-          "oklch(62% 0.006 265)",
-          "oklch(74% 0.006 265)",
-          "oklch(85% 0.006 265)",
-          "oklch(95% 0.006 265)"
-        ]
-      },
-      "well": {
-        "role": "neutral",
-        "displayName": "Well",
-        "tonalRamp": [
-          "oklch(15% 0.003 265)",
-          "oklch(25% 0.003 265)",
-          "oklch(37% 0.003 265)",
-          "oklch(50% 0.003 265)",
-          "oklch(62% 0.003 265)",
-          "oklch(74% 0.003 265)",
-          "oklch(85% 0.003 265)",
-          "oklch(95% 0.003 265)"
+          "oklch(15% 0.01 268)",
+          "oklch(25% 0.01 268)",
+          "oklch(37% 0.01 268)",
+          "oklch(50% 0.01 268)",
+          "oklch(62% 0.01 268)",
+          "oklch(74% 0.01 268)",
+          "oklch(85% 0.01 268)",
+          "oklch(95% 0.01 268)"
         ]
       },
       "line": {
         "role": "neutral",
-        "displayName": "Rule",
+        "displayName": "Hairline",
+        "canonical": "rgba(255,255,255,.08)",
         "tonalRamp": [
-          "oklch(15% 0.01 265)",
-          "oklch(25% 0.01 265)",
-          "oklch(37% 0.01 265)",
-          "oklch(50% 0.01 265)",
-          "oklch(62% 0.01 265)",
-          "oklch(74% 0.01 265)",
-          "oklch(85% 0.01 265)",
-          "oklch(95% 0.01 265)"
+          "rgba(255,255,255,.04)",
+          "rgba(255,255,255,.06)",
+          "rgba(255,255,255,.08)",
+          "rgba(255,255,255,.10)",
+          "rgba(255,255,255,.14)",
+          "rgba(255,255,255,.18)",
+          "rgba(255,255,255,.24)",
+          "rgba(255,255,255,.32)"
         ]
       },
-      "ink": {
+      "line-2": {
         "role": "neutral",
-        "displayName": "Board White",
+        "displayName": "Hairline Strong",
+        "canonical": "rgba(255,255,255,.14)",
         "tonalRamp": [
-          "oklch(15% 0.006 110)",
-          "oklch(25% 0.006 110)",
-          "oklch(37% 0.006 110)",
-          "oklch(50% 0.006 110)",
-          "oklch(62% 0.006 110)",
-          "oklch(74% 0.006 110)",
-          "oklch(85% 0.006 110)",
-          "oklch(95% 0.006 110)"
+          "rgba(255,255,255,.04)",
+          "rgba(255,255,255,.06)",
+          "rgba(255,255,255,.08)",
+          "rgba(255,255,255,.10)",
+          "rgba(255,255,255,.14)",
+          "rgba(255,255,255,.18)",
+          "rgba(255,255,255,.24)",
+          "rgba(255,255,255,.32)"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Paper White",
+        "canonical": "oklch(97% 0.003 265)",
+        "tonalRamp": [
+          "oklch(15% 0.003 265)",
+          "oklch(25% 0.003 265)",
+          "oklch(37% 0.003 265)",
+          "oklch(50% 0.003 265)",
+          "oklch(62% 0.003 265)",
+          "oklch(74% 0.003 265)",
+          "oklch(85% 0.003 265)",
+          "oklch(95% 0.003 265)"
         ]
       },
       "muted": {
         "role": "neutral",
-        "displayName": "Dim Grey",
+        "displayName": "Quiet Grey",
+        "canonical": "oklch(71.2% 0.017 266)",
         "tonalRamp": [
-          "oklch(15% 0.01 265)",
-          "oklch(25% 0.01 265)",
-          "oklch(37% 0.01 265)",
-          "oklch(50% 0.01 265)",
-          "oklch(62% 0.01 265)",
-          "oklch(74% 0.01 265)",
-          "oklch(85% 0.01 265)",
-          "oklch(95% 0.01 265)"
+          "oklch(15% 0.017 266)",
+          "oklch(25% 0.017 266)",
+          "oklch(37% 0.017 266)",
+          "oklch(50% 0.017 266)",
+          "oklch(62% 0.017 266)",
+          "oklch(74% 0.017 266)",
+          "oklch(85% 0.017 266)",
+          "oklch(95% 0.017 266)"
         ]
       },
       "faint": {
         "role": "neutral",
         "displayName": "Faint Grey",
+        "canonical": "oklch(59.9% 0.018 266)",
         "tonalRamp": [
-          "oklch(15% 0.012 265)",
-          "oklch(25% 0.012 265)",
-          "oklch(37% 0.012 265)",
-          "oklch(50% 0.012 265)",
-          "oklch(62% 0.012 265)",
-          "oklch(74% 0.012 265)",
-          "oklch(85% 0.012 265)",
-          "oklch(95% 0.012 265)"
+          "oklch(15% 0.018 266)",
+          "oklch(25% 0.018 266)",
+          "oklch(37% 0.018 266)",
+          "oklch(50% 0.018 266)",
+          "oklch(62% 0.018 266)",
+          "oklch(74% 0.018 266)",
+          "oklch(85% 0.018 266)",
+          "oklch(95% 0.018 266)"
+        ]
+      },
+      "white": {
+        "role": "neutral",
+        "displayName": "Pure White",
+        "canonical": "oklch(100% 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(25% 0 0)",
+          "oklch(37% 0 0)",
+          "oklch(50% 0 0)",
+          "oklch(62% 0 0)",
+          "oklch(74% 0 0)",
+          "oklch(85% 0 0)",
+          "oklch(95% 0 0)"
         ]
       }
     },
     "typographyMeta": {
       "display": {
-        "displayName": "Flap Display",
-        "purpose": "Characters inside flap cells only; size follows the cell (0.8 of its height)."
+        "displayName": "Display",
+        "purpose": "Hero headline only, two lines."
       },
       "headline": {
         "displayName": "Headline",
-        "purpose": "Section headings beside platforms and on Download, uppercase."
-      },
-      "title": {
-        "displayName": "Row Title",
-        "purpose": "Departure row names on boards."
-      },
-      "title-sm": {
-        "displayName": "Row Title Small",
-        "purpose": "Row heads in feature spec tables."
-      },
-      "figure": {
-        "displayName": "Figure",
-        "purpose": "Facts strip values and numbers; tabular figures."
-      },
-      "button": {
-        "displayName": "Button",
-        "purpose": "Button labels, uppercase."
-      },
-      "nav": {
-        "displayName": "Nav",
-        "purpose": "Top bar links, uppercase."
-      },
-      "label": {
-        "displayName": "Label",
-        "purpose": "Column headers, fact labels; board titles at 15px."
+        "purpose": "Section headings."
       },
       "lead": {
         "displayName": "Lead",
-        "purpose": "The one-line plain lead under the hero board."
+        "purpose": "Hero paragraph; section copy uses 17px in Quiet Grey."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Feature point names and list terms."
       },
       "body": {
         "displayName": "Body",
-        "purpose": "All prose, sentence case."
+        "purpose": "Base running text."
       },
-      "mono": {
-        "displayName": "Mono",
-        "purpose": "SQL, shell commands, inline code and kbd."
+      "body-sm": {
+        "displayName": "Body Sm",
+        "purpose": "Feature descriptions and list definitions, in Quiet Grey."
+      },
+      "button": {
+        "displayName": "Button",
+        "purpose": "Button labels."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Release pill, facts line, footer, small button."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "Inline code and kbd chips (Geist Mono)."
       }
     },
-    "fonts": [
-      {
-        "family": "Big Shoulders",
-        "source": "site/fonts/big-shoulders.woff",
-        "weights": "100 900",
-        "display": "swap",
-        "license": "site/fonts/OFL-BigShoulders.txt",
-        "preload": true
-      }
-    ],
     "shadows": [
       {
-        "name": "board-mount",
-        "value": "inset 0 0 0 1px #000, 0 1px 0 #3a3d43 inset, 0 34px 70px -34px #000",
-        "purpose": "Every steel-framed board."
+        "name": "none",
+        "value": "none",
+        "purpose": "The system has no box-shadows; depth is tone steps plus white-alpha hairlines."
       },
       {
-        "name": "bezel-drop",
-        "value": "0 30px 60px -30px #000",
-        "purpose": "Screenshot platforms."
+        "name": "hero-glow",
+        "value": "radial-gradient(closest-side, rgba(122,162,247,.13), transparent) 1100x640px, top -240px",
+        "purpose": "The single ambient App Blue glow behind the hero headline."
       },
       {
-        "name": "flap-bevel",
-        "value": "inset 0 1px 0 rgba(255,255,255,.06), 0 1px 1px rgba(0,0,0,.7)",
-        "purpose": "Every flap cell."
-      },
-      {
-        "name": "button-weight",
-        "value": "0 8px 20px -10px rgba(0,0,0,.9)",
-        "purpose": "Amber primary button only."
+        "name": "top-bar-blur",
+        "value": "backdrop-filter: saturate(1.4) blur(14px) over 80% Night Ground",
+        "purpose": "Sticky top bar translucency."
       }
     ],
-    "cellGeometry": {
-      "height": "var(--c)",
-      "width": "calc(var(--c) * .66)",
-      "gap": "calc(var(--c) * .07)",
-      "radius": "calc(var(--c) * .07)",
-      "glyph": "600 calc(var(--c) * .8)/1 Big Shoulders, opsz 72",
-      "seam": "#060607 band from 49.4% to 50.6%",
-      "heroRowGap": "calc(var(--c) * .12)",
-      "sizes": {
-        "hero": "min(74px, (min(100vw,1200px) - 140px) / 15.3)",
-        "heroMobile": "(100vw - 92px) / 10.2",
-        "boardRow": "30px",
-        "boardRowMobile": "24px"
-      }
-    },
-    "frames": {
-      "board": "7px solid #2b2d32, radius 8px",
-      "bezel": "5px solid #2b2d32, radius 8px, aspect 1600/950"
-    },
     "motion": [
       {
-        "name": "flap-fold",
-        "value": "rotateX(0 -> -90deg), 110ms, cubic-bezier(.5,0,.9,.4), origin 50% 100%",
-        "purpose": "Top half folds down on every flap tick."
+        "name": "ease",
+        "value": "cubic-bezier(.16,1,.3,1)",
+        "purpose": "Single easing for the rise and the button press."
       },
       {
-        "name": "flap-tick",
-        "value": "70ms",
-        "purpose": "Interval between glyph changes in a cell."
+        "name": "state",
+        "value": ".2s",
+        "purpose": "Color, background and border transitions on hover."
       },
       {
-        "name": "flap-count",
-        "value": "3-7 flips per cell, 3 + ((i*7 + r*3) % 5)",
-        "purpose": "Random glyphs from A-Z 0-9 . · - before the real character lands."
+        "name": "press",
+        "value": "translateY(1px), .2s ease",
+        "purpose": "Button active state."
       },
       {
-        "name": "cascade-stagger",
-        "value": "32ms per cell, 140ms per row; 18ms on hover replay",
-        "purpose": "Left-to-right, top-to-bottom cascade."
+        "name": "rise",
+        "value": "opacity 0 to 1, translateY(14px) to 0, blur(6px) to 0, .9s ease, 60ms stagger per sibling (max 6), once at 15% visibility",
+        "purpose": "Hero text and section copy entering. Content stays visible without JS or with reduced motion."
       },
       {
-        "name": "cascade-trigger",
-        "value": "IntersectionObserver threshold 0.6, once per board; row pointerenter, 900ms cooldown",
-        "purpose": "One cascade on entry; replay on a pointed departure row."
-      },
-      {
-        "name": "ease-control",
-        "value": "0.2s cubic-bezier(.2,.7,.2,1)",
-        "purpose": "Button background, border and shadow."
-      },
-      {
-        "name": "row-hover",
-        "value": "background-color .25s",
-        "purpose": "Departure row hover fill."
-      },
-      {
-        "name": "reduced-motion",
-        "value": "prefers-reduced-motion: reduce",
-        "purpose": "No cascade, no fold, no smooth scroll; clips play with controls."
+        "name": "hero-tilt",
+        "value": "perspective(1600px) rotateX(t*14deg) scale(1 - t*.04), t from 1 to 0 over the first 420px of scroll, rAF-throttled",
+        "purpose": "Hero clip tilts back and lies flat on scroll; disabled under reduced motion."
       }
     ],
     "breakpoints": [
       {
-        "name": "stack",
-        "value": "960px",
-        "purpose": "Two-column layouts stack; facts strip 2x2."
+        "name": "phone",
+        "value": "640px"
       },
       {
-        "name": "compact",
-        "value": "700px",
-        "purpose": "Nav shows GitHub only; hero cells resize and wrap by word; departure rows stack."
+        "name": "tablet",
+        "value": "900px"
       }
     ]
   },
   "components": [
     {
-      "name": "Primary Button (Go)",
+      "name": "Primary Button",
       "kind": "button",
-      "refersTo": "button-go",
-      "description": "Amber Download button; the only amber fill on the page.",
-      "html": "<a class=\"ds-btn ds-btn-go\" href=\"#\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12 15V3\"/><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><path d=\"m7 10 5 5 5-5\"/></svg><span>Download for macOS</span></a>",
-      "css": ".ds-btn{display:inline-flex;align-items:center;gap:9px;padding:14px 22px;border-radius:7px;text-decoration:none;font:700 19px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.06em;text-transform:uppercase;border:1px solid transparent;cursor:pointer;transition:background-color .2s cubic-bezier(.2,.7,.2,1),border-color .2s,box-shadow .2s}.ds-btn:focus-visible{outline:2px solid #f2b33d;outline-offset:3px}.ds-btn-go{background:#f2b33d;color:#17130a;box-shadow:0 8px 20px -10px rgba(0,0,0,.9)}.ds-btn-go:hover{background:#ffc552}"
+      "refersTo": "button-primary",
+      "description": "White primary action: Download for macOS.",
+      "html": "<a class=\"ds-btn ds-btn-primary\" href=\"#\"><svg class=\"ds-ico\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 15V3\"/><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><path d=\"m7 10 5 5 5-5\"/></svg><span>Download for macOS</span></a>",
+      "css": ":host{--bg:#0c0d10;--raise:#14161a;--raise-2:#1b1d22;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.14);--text:#f4f5f7;--muted:#9da2ad;--faint:#7b808b;--accent:#7aa2f7;--on-accent:#0b1020;--sans:\"Geist\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",system-ui,sans-serif;--mono:\"Geist Mono\",ui-monospace,\"SF Mono\",Menlo,monospace;--ease:cubic-bezier(.16,1,.3,1)} .ds-ico{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:44px;padding:0 20px;border-radius:10px;font:550 15px/1 var(--sans);text-decoration:none;border:1px solid transparent;cursor:pointer;transition:background-color .2s,border-color .2s,transform .2s var(--ease)} .ds-btn:active{transform:translateY(1px)} .ds-btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px} .ds-btn-primary{background:var(--text);color:#0c0d10} .ds-btn-primary:hover{background:#fff}"
     },
     {
-      "name": "Secondary Button (Steel)",
+      "name": "Ghost Button",
       "kind": "button",
-      "refersTo": "button-steel",
-      "description": "Steel plate for GitHub and Sponsors links.",
-      "html": "<a class=\"ds-btn ds-btn-steel\" href=\"#\">View on GitHub</a>",
-      "css": ".ds-btn{display:inline-flex;align-items:center;gap:9px;padding:14px 22px;border-radius:7px;text-decoration:none;font:700 19px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.06em;text-transform:uppercase;border:1px solid transparent;cursor:pointer;transition:background-color .2s cubic-bezier(.2,.7,.2,1),border-color .2s,box-shadow .2s}.ds-btn:focus-visible{outline:2px solid #f2b33d;outline-offset:3px}.ds-btn-steel{background:#1b1c1f;color:#f2f2ee;border-color:#3a3d43}.ds-btn-steel:hover{border-color:#6b7077}"
+      "refersTo": "button-ghost",
+      "description": "Secondary action on a raised surface with a strong hairline.",
+      "html": "<a class=\"ds-btn ds-btn-ghost\" href=\"#\">View on GitHub</a>",
+      "css": ":host{--bg:#0c0d10;--raise:#14161a;--raise-2:#1b1d22;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.14);--text:#f4f5f7;--muted:#9da2ad;--faint:#7b808b;--accent:#7aa2f7;--on-accent:#0b1020;--sans:\"Geist\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",system-ui,sans-serif;--mono:\"Geist Mono\",ui-monospace,\"SF Mono\",Menlo,monospace;--ease:cubic-bezier(.16,1,.3,1)} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:44px;padding:0 20px;border-radius:10px;font:550 15px/1 var(--sans);text-decoration:none;border:1px solid transparent;cursor:pointer;transition:background-color .2s,border-color .2s,transform .2s var(--ease)} .ds-btn:active{transform:translateY(1px)} .ds-btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px} .ds-btn-ghost{background:var(--raise);color:var(--text);border-color:var(--line-2)} .ds-btn-ghost:hover{background:var(--raise-2)}"
     },
     {
-      "name": "Flap Row",
-      "kind": "custom",
-      "refersTo": "flap-cell",
-      "description": "A framed row of split-flap cells; one character per cell, hover lamps amber.",
-      "html": "<div class=\"ds-flaps\" aria-label=\"With a map\"><span class=\"ds-cell\">W</span><span class=\"ds-cell\">I</span><span class=\"ds-cell\">T</span><span class=\"ds-cell\">H</span><span class=\"ds-cell ds-blank\"> </span><span class=\"ds-cell\">A</span><span class=\"ds-cell ds-blank\"> </span><span class=\"ds-cell\">M</span><span class=\"ds-cell\">A</span><span class=\"ds-cell\">P</span></div>",
-      "css": ".ds-flaps{--c:48px;display:flex;gap:calc(var(--c)*.07);padding:20px;background:#141518;border:7px solid #2b2d32;border-radius:8px}.ds-cell{display:inline-grid;place-items:center;width:calc(var(--c)*.66);height:var(--c);border-radius:calc(var(--c)*.07);color:#f2f2ee;font:600 calc(var(--c)*.8)/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;background:linear-gradient(180deg,#1d1e21 0 49.4%,#060607 49.4% 50.6%,#17181b 50.6%);box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 1px 1px rgba(0,0,0,.7)}.ds-cell.ds-blank{color:transparent}.ds-flaps:hover .ds-cell{color:#f2b33d}"
+      "name": "Small Button",
+      "kind": "button",
+      "refersTo": "button-sm",
+      "description": "Compact primary used for Download in the top bar.",
+      "html": "<a class=\"ds-btn ds-btn-primary ds-btn-sm\" href=\"#\">Download</a>",
+      "css": ":host{--bg:#0c0d10;--raise:#14161a;--raise-2:#1b1d22;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.14);--text:#f4f5f7;--muted:#9da2ad;--faint:#7b808b;--accent:#7aa2f7;--on-accent:#0b1020;--sans:\"Geist\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",system-ui,sans-serif;--mono:\"Geist Mono\",ui-monospace,\"SF Mono\",Menlo,monospace;--ease:cubic-bezier(.16,1,.3,1)} .ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:44px;padding:0 20px;border-radius:10px;font:550 15px/1 var(--sans);text-decoration:none;border:1px solid transparent;cursor:pointer;transition:background-color .2s,border-color .2s,transform .2s var(--ease)} .ds-btn:active{transform:translateY(1px)} .ds-btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px} .ds-btn-primary{background:var(--text);color:#0c0d10} .ds-btn-primary:hover{background:#fff} .ds-btn-sm{height:32px;padding:0 13px;font-size:13.5px;border-radius:8px}"
     },
     {
-      "name": "Departures Board",
-      "kind": "card",
-      "refersTo": "board",
-      "description": "Steel-framed table of departure rows; hovered row turns amber.",
-      "html": "<div class=\"ds-board\"><h3 class=\"ds-board-title\">Also aboard</h3><table class=\"ds-dep\"><tbody><tr><th>SQL CONSOLE</th><td>Autocomplete, formatter, slash commands</td></tr><tr><th>EXPORT</th><td>CSV, JSON, GeoJSON, Markdown, SQL, SVG</td></tr><tr class=\"ds-past\"><th>0.0.8</th><td>Notes</td></tr></tbody></table></div>",
-      "css": ".ds-board{border:7px solid #2b2d32;border-radius:8px;background:#141518;box-shadow:inset 0 0 0 1px #000,0 1px 0 #3a3d43 inset,0 34px 70px -34px #000;color:#f2f2ee}.ds-board-title{margin:0;padding:18px 24px 14px;font:700 15px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#a6a9b0;border-bottom:1px solid #2a2c31}.ds-dep{width:100%;border-collapse:collapse}.ds-dep tr{border-bottom:1px solid #202125;transition:background-color .25s}.ds-dep tr:last-child{border-bottom:0}.ds-dep th{padding:12px 24px;text-align:left;white-space:nowrap;width:1%;font:600 26px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.08em}.ds-dep td{padding:12px 24px;color:#a6a9b0;font:16px/1.6 -apple-system,BlinkMacSystemFont,\"SF Pro Text\",\"Segoe UI\",Roboto,system-ui,sans-serif}.ds-dep tr:hover{background:#18191c}.ds-dep tr:hover th{color:#f2b33d}.ds-dep tr.ds-past th,.ds-dep tr.ds-past td{color:#7c8088}"
-    },
-    {
-      "name": "Screenshot Bezel",
-      "kind": "card",
-      "refersTo": "board",
-      "description": "5px steel frame around a product screenshot or clip.",
-      "html": "<figure class=\"ds-bezel\"><div class=\"ds-shot\"></div></figure>",
-      "css": ".ds-bezel{margin:0;border:5px solid #2b2d32;border-radius:8px;overflow:hidden;aspect-ratio:1600/950;background:#0c0c0d;box-shadow:0 30px 60px -30px #000}.ds-shot{width:100%;height:100%;background:linear-gradient(90deg,#1d1e21 0 55%,#17181b 55%)}"
-    },
-    {
-      "name": "Facts Strip",
-      "kind": "custom",
-      "refersTo": null,
-      "description": "Ruled row of label/value facts under the hero; tabular figures.",
-      "html": "<dl class=\"ds-facts\"><div><dt>Version</dt><dd>0.0.9</dd></div><div><dt>Download</dt><dd>~10 MB</dd></div><div><dt>Runs on</dt><dd>Apple silicon</dd></div></dl>",
-      "css": ".ds-facts{display:grid;grid-template-columns:repeat(3,1fr);margin:0;border-top:1px solid #2a2c31;border-bottom:1px solid #2a2c31;color:#f2f2ee}.ds-facts div{padding:16px 20px}.ds-facts div+div{border-left:1px solid #2a2c31}.ds-facts dt{font:700 13px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#7c8088}.ds-facts dd{margin:8px 0 0;font:600 21px/1.2 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.03em;font-variant-numeric:tabular-nums}"
-    },
-    {
-      "name": "Code Well",
-      "kind": "custom",
-      "refersTo": "code-well",
-      "description": "Dark well for shell commands and SQL.",
-      "html": "<pre class=\"ds-code\" tabindex=\"0\"><code>git clone https://github.com/yoouTaro/rgrip\ncd rgrip &amp;&amp; cargo run -p rgrip</code></pre>",
-      "css": ".ds-code{margin:0;padding:16px 18px;background:#0b0b0c;border:1px solid #2a2c31;border-radius:8px;overflow-x:auto;font:14px/1.6 ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;color:#d9dade}.ds-code:focus-visible{outline:2px solid #f2b33d;outline-offset:3px}"
+      "name": "Release Pill",
+      "kind": "chip",
+      "refersTo": "release-pill",
+      "description": "Link to the current release above the headline, with a blue New tag.",
+      "html": "<a class=\"ds-pill\" href=\"#\"><span class=\"ds-pill-tag\">New</span><span>0.0.9: linked map and grid, import</span><svg class=\"ds-ico\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m9 18 6-6-6-6\"/></svg></a>",
+      "css": ":host{--bg:#0c0d10;--raise:#14161a;--raise-2:#1b1d22;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.14);--text:#f4f5f7;--muted:#9da2ad;--faint:#7b808b;--accent:#7aa2f7;--on-accent:#0b1020;--sans:\"Geist\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",system-ui,sans-serif;--mono:\"Geist Mono\",ui-monospace,\"SF Mono\",Menlo,monospace;--ease:cubic-bezier(.16,1,.3,1)} .ds-ico{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none} .ds-pill{display:inline-flex;align-items:center;gap:10px;padding:5px 10px 5px 5px;border:1px solid var(--line-2);border-radius:99px;background:var(--raise);color:var(--muted);font:13.5px/1.5 var(--sans);text-decoration:none;transition:border-color .2s,color .2s} .ds-pill:hover{color:var(--text);border-color:rgba(255,255,255,.24)} .ds-pill:focus-visible{outline:2px solid var(--accent);outline-offset:3px} .ds-pill .ds-ico{width:14px;height:14px} .ds-pill-tag{padding:2px 8px;border-radius:99px;background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent);font-weight:550;font-size:12.5px}"
     },
     {
       "name": "Top Navigation",
       "kind": "nav",
-      "refersTo": "nav-link",
-      "description": "Sticky translucent bar with wordmark and uppercase links.",
-      "html": "<header class=\"ds-top\"><a class=\"ds-mark\" href=\"#\">rgrip</a><nav class=\"ds-nav\"><a href=\"#\">Map</a><a href=\"#\">Import</a><a href=\"#\">Also aboard</a><a href=\"#\">Download</a></nav></header>",
-      "css": ".ds-top{display:flex;align-items:center;justify-content:space-between;height:60px;padding:0 28px;background:color-mix(in srgb,#101113 88%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid #2a2c31}.ds-mark{color:#f2f2ee;text-decoration:none;font:700 24px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.02em}.ds-nav{display:flex;gap:26px}.ds-nav a{color:#a6a9b0;text-decoration:none;font:600 17px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;text-transform:uppercase;letter-spacing:.07em}.ds-nav a:hover{color:#f2f2ee}.ds-nav a:focus-visible{outline:2px solid #f2b33d;outline-offset:3px;border-radius:4px}"
+      "refersTo": null,
+      "description": "Sticky translucent bar with wordmark, quiet links and the small Download button.",
+      "html": "<header class=\"ds-top\"><a class=\"ds-mark\" href=\"#\"><span class=\"ds-mark-icon\"></span>rgrip</a><nav class=\"ds-nav\"><a href=\"#\">Map</a><a href=\"#\">Import</a><a href=\"#\">Features</a><a href=\"#\">Changelog</a><a class=\"ds-btn-sm\" href=\"#\">Download</a></nav></header>",
+      "css": ":host{--bg:#0c0d10;--raise:#14161a;--raise-2:#1b1d22;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.14);--text:#f4f5f7;--muted:#9da2ad;--faint:#7b808b;--accent:#7aa2f7;--on-accent:#0b1020;--sans:\"Geist\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",system-ui,sans-serif;--mono:\"Geist Mono\",ui-monospace,\"SF Mono\",Menlo,monospace;--ease:cubic-bezier(.16,1,.3,1)} .ds-top{display:flex;align-items:center;justify-content:space-between;height:60px;padding:0 28px;gap:16px;background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:saturate(1.4) blur(14px);border-bottom:1px solid var(--line);font-family:var(--sans)} .ds-mark{display:flex;align-items:center;gap:10px;color:var(--text);text-decoration:none;font-weight:600;font-size:17px;letter-spacing:-.01em} .ds-mark-icon{width:24px;height:24px;border-radius:6px;background:var(--accent)} .ds-nav{display:flex;align-items:center;gap:24px} .ds-nav a{color:var(--muted);text-decoration:none;font-size:14.5px;transition:color .2s} .ds-nav a:hover{color:var(--text)} .ds-nav a:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px} .ds-nav .ds-btn-sm{display:inline-flex;align-items:center;height:32px;padding:0 13px;border-radius:8px;background:var(--text);color:#0c0d10;font-weight:550;font-size:13.5px} .ds-nav .ds-btn-sm:hover{background:#fff;color:#0c0d10}"
+    },
+    {
+      "name": "Feature Point",
+      "kind": "custom",
+      "refersTo": "feature-icon-tile",
+      "description": "Icon tile with App Blue line icon, title and one line of description.",
+      "html": "<div class=\"ds-point\"><svg class=\"ds-tile\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/><path d=\"M12 3v18\"/></svg><div><b>Split view</b><span>Grid and map side by side, resizable.</span></div></div>",
+      "css": ":host{--bg:#0c0d10;--raise:#14161a;--raise-2:#1b1d22;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.14);--text:#f4f5f7;--muted:#9da2ad;--faint:#7b808b;--accent:#7aa2f7;--on-accent:#0b1020;--sans:\"Geist\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",system-ui,sans-serif;--mono:\"Geist Mono\",ui-monospace,\"SF Mono\",Menlo,monospace;--ease:cubic-bezier(.16,1,.3,1)} .ds-point{display:flex;gap:14px;align-items:flex-start;font-family:var(--sans);max-width:320px} .ds-tile{width:34px;height:34px;padding:8px;box-sizing:border-box;border-radius:9px;background:var(--raise);border:1px solid var(--line);color:var(--accent);fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none} .ds-point b{display:block;color:var(--text);font-weight:580;font-size:15.5px;letter-spacing:-.005em} .ds-point span{display:block;color:var(--muted);font-size:14.5px;line-height:1.5;margin-top:2px}"
+    },
+    {
+      "name": "Everyday List Row",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Hairline-ruled definition row: term and a one-line definition.",
+      "html": "<dl class=\"ds-list\"><div><dt>SQL console</dt><dd>Autocomplete, a formatter, and <kbd class=\"ds-code\">⌘/</kbd> to comment.</dd></div><div><dt>Edit in place</dt><dd>Double-click a cell. Changes save in one transaction.</dd></div></dl>",
+      "css": ":host{--bg:#0c0d10;--raise:#14161a;--raise-2:#1b1d22;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.14);--text:#f4f5f7;--muted:#9da2ad;--faint:#7b808b;--accent:#7aa2f7;--on-accent:#0b1020;--sans:\"Geist\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",system-ui,sans-serif;--mono:\"Geist Mono\",ui-monospace,\"SF Mono\",Menlo,monospace;--ease:cubic-bezier(.16,1,.3,1)} .ds-list{margin:0;font-family:var(--sans);max-width:520px} .ds-list div{display:grid;grid-template-columns:170px minmax(0,1fr);gap:16px;padding:18px 0;border-top:1px solid var(--line)} .ds-list div:last-child{border-bottom:1px solid var(--line)} .ds-list dt{color:var(--text);font-weight:580;font-size:15px} .ds-list dd{margin:0;color:var(--muted);font-size:15px;line-height:1.55} .ds-code{font:500 .86em var(--mono);background:var(--raise-2);border:1px solid var(--line);border-radius:5px;padding:.08em .38em;color:var(--text)}"
+    },
+    {
+      "name": "Screenshot Frame",
+      "kind": "card",
+      "refersTo": "screenshot-frame",
+      "description": "Thin bordered frame for real app captures; no shadow.",
+      "html": "<figure class=\"ds-shot\"><div class=\"ds-shot-fill\"></div></figure>",
+      "css": ":host{--bg:#0c0d10;--raise:#14161a;--raise-2:#1b1d22;--line:rgba(255,255,255,.08);--line-2:rgba(255,255,255,.14);--text:#f4f5f7;--muted:#9da2ad;--faint:#7b808b;--accent:#7aa2f7;--on-accent:#0b1020;--sans:\"Geist\",-apple-system,BlinkMacSystemFont,\"Segoe UI\",system-ui,sans-serif;--mono:\"Geist Mono\",ui-monospace,\"SF Mono\",Menlo,monospace;--ease:cubic-bezier(.16,1,.3,1)} .ds-shot{margin:0;max-width:480px;border-radius:14px;overflow:hidden;background:#0a0a0c;border:1px solid var(--line-2)} .ds-shot-fill{aspect-ratio:1600/950;background:linear-gradient(90deg,var(--raise) 0 45%,#0a0a0c 45%)}"
     }
   ],
   "narrative": {
-    "northStar": "The Solari Board",
-    "overview": "A departure board is a results grid, so the page is one. The site reads as a concourse split-flap board for rgrip: steel-framed boards of graphite flap cells carrying white condensed capitals, a single amber lamp marking what to act on, and everything else set in quiet greys on a near-black ground. Real product screenshots sit in the same steel frame as \"platforms\" beside the board rows that describe them.\n\nThe voice is plain and the density is moderate: big flap capitals do the shouting once, at the top, and the rest of the page is short system-sans prose and ruled tables. The board is mechanical, not glowing; depth comes from the frame, the cell seam and soft drop shadows, never from gradients of light or neon. It rejects the centered-glow developer-tool hero with a grid of feature cards.\n\nMotion has one grammar: a flap cascade. Each board flips its characters through a few random glyphs and settles, once as it enters view, and again on a departure row you point at.",
+    "northStar": "The Quiet Standard",
+    "overview": "The page is the category standard for developer tools, played straight and finished carefully, at the level of Zed and Linear. A centered headline, the real app as the hero, two feature sections, a short list, a download. Nothing is themed: the earlier split-flap board world was dropped because it was hard to read, and familiarity is now the point. The product's screenshots and the one linked map-and-grid clip carry the weight; the page around them stays near-black, quiet and legible.\n\nDensity is calm: a 1080px column with generous section spacing (120px), one accent color used sparingly, and depth from tone and hairlines rather than shadow. Motion is limited to two gestures: the hero clip tilts back and lies flat as you scroll, and text rises softly once as it enters. With reduced motion, everything is simply there, flat and still.",
     "keyCharacteristics": [
-      "Graphite flap cells with a dark centre seam, white condensed capitals, fixed cell widths.",
-      "Brushed-steel frame (7px on boards, 5px on screenshot bezels) around every board and platform.",
-      "Amber is the only accent: the primary action, the active or latest row, focus, selection.",
-      "Big Shoulders for everything on the board; system sans for prose; mono for SQL and commands.",
-      "Tables, not cards: features and releases are ruled departure rows."
+      "Near-black ground with slightly raised surfaces; white-alpha hairlines do the structural work.",
+      "Geist for everything, Geist Mono only for code and keys; tight negative tracking on headings.",
+      "White primary button; the app's blue is the only accent.",
+      "Real app captures in thin bordered frames, no big shadows.",
+      "Lucide-style line icons, no emoji."
     ],
     "rules": [
       {
-        "name": "The One Lamp Rule",
-        "body": "Amber marks exactly what is live or actionable: the primary button, the current row, the hovered row, focus. Never use it for decoration, headings or large fills beyond the primary button.",
+        "name": "The One Blue Rule",
+        "body": "App Blue is the only hue on the page. It marks small things (a tag, an icon stroke, focus) and never fills a button or a large area; the hero glow is its only ambient use.",
         "section": "colors"
       },
       {
-        "name": "The No Second Accent Rule",
-        "body": "There is no secondary hue. Retired rows step down to Faint Grey; the dim red the direction proposed for retired rows was not built and is not part of the palette.",
+        "name": "The White Button Rule",
+        "body": "The primary action is Paper White on Night Ground, brightening to pure white on hover. Emphasis comes from value, not hue.",
         "section": "colors"
       },
       {
-        "name": "The Board Speaks Caps Rule",
-        "body": "Everything that sits on the board (cells, row names, labels, buttons, nav) is Big Shoulders in uppercase with positive tracking. Sentences are never set in Big Shoulders; prose is always system sans in sentence case.",
+        "name": "The Negative Tracking Rule",
+        "body": "Tracking tightens as size grows: -0.035em on display, -0.03em on headlines, -0.01em on the wordmark, about zero for body. Never letter-space small text or set it in uppercase.",
         "section": "typography"
       },
       {
-        "name": "The Fixed Cell Rule",
-        "body": "Flap text is set one character per cell; cells never stretch to fit text. Width is 0.66 of the cell height, the gap 0.07, so every row lines up on one character grid.",
-        "section": "typography"
-      },
-      {
-        "name": "The Mounted, Not Floating Rule",
-        "body": "Shadows fall straight down and are soft; nothing moves up on hover. State is shown by colour (amber, lighter steel border), never by elevation.",
+        "name": "The Hairline, Not Shadow, Rule",
+        "body": "Separate and frame with a 1px white-alpha border (8% for dividers, 14% for objects). If something seems to need a shadow, it needs a stronger hairline or a tone step instead.",
         "section": "elevation"
       }
     ],
     "dos": [
-      "**Do** put anything that is a feature, a release or a fact on a board row or a ruled table, set in uppercase Big Shoulders.",
-      "**Do** keep amber for the one primary action and the current or hovered row; text on amber is always Lamp Ink.",
-      "**Do** frame screenshots and boards in steel (5px or 7px Brushed Steel, 8px radius).",
-      "**Do** size flap text in whole cells (width 0.66c, gap 0.07c) and pad multi-row boards with blank cells to the longest row.",
-      "**Do** run the cascade once per board on entry and honour reduced motion with the final text.",
-      "**Do** use tabular figures for every number."
+      "Do keep App Blue to small marks: tags, icon strokes, focus, selection.",
+      "Do make the primary action the white button and everything secondary a ghost button.",
+      "Do frame every app capture with a 1px Hairline Strong border at 14px radius and nothing else.",
+      "Do use the single soft rise (14px up, 6px blur, 0.9s, ease cubic-bezier(.16,1,.3,1), 60ms sibling stagger) for entering text, and nothing more; leave content visible without JS and under reduced motion.",
+      "Do use Lucide-style line icons (stroke 1.75, round caps) at 14-18px.",
+      "Do tighten heading tracking as size grows and balance heading wraps."
     ],
     "donts": [
-      "**Don't** add a second accent colour or a red for retired rows; past items go Faint Grey.",
-      "**Don't** use feature card grids, centered glows or gradient light: the board is mechanical and lit by one lamp.",
-      "**Don't** set prose in Big Shoulders or uppercase; sentences stay in system sans.",
-      "**Don't** lift elements on hover or add glow shadows; state changes are colour only.",
-      "**Don't** let flap text reflow inside a cell or stretch cells to fit; on narrow screens rows wrap by word.",
-      "**Don't** animate cells continuously or on scroll beyond the one entry cascade and the row hover replay."
+      "Don't add box-shadows, glows on cards, or gradient fills; the hero's radial glow is the only ambient light.",
+      "Don't introduce a second accent hue or fill a button with App Blue.",
+      "Don't bring back themed devices (split-flap cells, display faces, board frames); the page must read as a familiar developer-tool site.",
+      "Don't use emoji, mockup devices or invented screenshots.",
+      "Don't set Faint Grey on surfaces lighter than Raised Slate, or use it for anything but fine print."
     ]
   }
 }

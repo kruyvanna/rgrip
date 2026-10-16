@@ -48,6 +48,7 @@ scene connmenu RGRIP_DEMO_SQL="select 1;" RGRIP_DEMO_CONN_MENU=0
 scene sticky RGRIP_DEMO_EXPAND=public,tiger RGRIP_DEMO_EXPLORER_SCROLL=420 RGRIP_DEMO_SQL="select 1;"
 scene split RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_TABLE_VIEW=split RGRIP_DEMO_SELECT=2,7,9,15
 scene import RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_IMPORT="$PWD/crates/core/tests/fixtures/places.csv"
+scene map-select RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_TABLE_VIEW=map RGRIP_DEMO_SELECT=2,7,9,15,21,30
 scene import-markets RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_IMPORT="$PWD/dev/sample/markets.csv"
 scene import-geojson RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_IMPORT="$PWD/crates/core/tests/fixtures/places.geojson"
 scene edit-table RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_EDIT_TABLE=demo.owners

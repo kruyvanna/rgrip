@@ -2,15 +2,12 @@
 
 <h1 align="center">rgrip</h1>
 
-<p align="center"><b>A small Postgres client, with a map.</b><br>Native, written in Rust, and free. Run a query and see your PostGIS data on a map.</p>
+<p align="center">A small Postgres client, with a map.</p>
 
 <p align="center">
   <a href="https://github.com/yoouTaro/rgrip/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/yoouTaro/rgrip?include_prereleases&label=release"></a>
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
-  <img alt="Rust 1.88+" src="https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust">
   <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple">
-  <img alt="vibe coded" src="https://img.shields.io/badge/vibe%20coded-%E2%9C%A8-ff69b4">
-  <a href="https://github.com/sponsors/yoouTaro"><img alt="Sponsor: buy me a coffee" src="https://img.shields.io/badge/Sponsor-%E2%98%95%20buy%20me%20a%20coffee-ea4aaa?logo=githubsponsors&logoColor=white"></a>
 </p>
 
 <p align="center">
@@ -19,106 +16,59 @@
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-<p align="center"><img src="docs/screenshots/hero.png" alt="rgrip screenshot" width="900"></p>
+<p align="center"><img src="docs/clips/linked.gif" alt="Split view: rows selected in the grid light up on the map" width="900"></p>
 
-## What's in it
+A native PostgreSQL client for macOS, with a map for PostGIS data built in. For everyday Postgres work, and for checking and loading spatial data without opening a desktop GIS. One Rust binary, about a 10 MB download.
 
-- **Small and native.** About a 9 MB download and around 75 MB of memory at idle (measured on 0.0.7, Apple silicon). One Rust binary, no JVM or Electron.
-- **Maps for PostGIS.** Geometry is readable in the grid and can go on a map from any query. UTM and Web Mercator are reprojected for you, ArcGIS `st_geometry` has a slash command, and swapped lat/lon gets flagged.
-- **Easy to share.** Copy rows as an image for a chat, or as markdown for an AI agent.
-- **Free and open source.** Built in the open with an AI pair programmer.
+## Highlights
 
-## Features
+### Map and grid, linked
 
-**Connections**
-- SSL modes from `disable` to `verify-full`, custom CA and client certificates
-- SSH tunnels (password or key)
-- Paste connection strings (`postgres://` URLs, `key=value`, `jdbc:postgresql://`) and copy a connection URL
+Show any query or table on a map, or put the grid and the map side by side. Rows selected in the grid are highlighted on the map, and clicking a feature selects its row. You can zoom to the selected rows, or draw a box on the map to filter the table by area. Data is reprojected in the client (WGS84, Web Mercator, UTM), and the basemap can be dark, light, streets or satellite.
 
-**Explorer**
-- Schemas, tables, views and columns, loaded on demand
+### Import data
 
-**SQL console**
-- Syntax highlighting, line numbers, context-aware autocomplete including PostGIS functions
-- Run statement (⌘↩) or script (⇧⌘↩), saved queries (⌘S), query formatter (⇧⌘F), toggle comments (⌘/)
-- Slash commands that expand to complete queries (Tab, or run directly):
-  `/con_4326`, `/con_4326_2` (ArcGIS `st_geometry` via text), `/con_merc` (default source SRID 32648, override with a number), `/srid`, `/top`, `/count`
+Load a CSV, TSV, GeoJSON or Shapefile into a new or existing table. You get a preview, editable column names and types, and an SRID (guessed from the `.prj` for shapefiles). Rows go in inside one transaction, so an error rolls everything back. New tables get a primary key by default, so the rows are editable right away.
 
-**Results grid**
-- Virtualized, with 1,000-row server-side paging, multi-row selection and frozen (pinned) columns
-- Export to CSV, TSV, JSON, GeoJSON, Markdown, SQL INSERT and SVG table
-- Copy as image (PNG, ready for Telegram or Slack) and Copy for AI agent
+<p align="center"><img src="docs/screenshots/import-markets.png" alt="Import data dialog" width="700"></p>
 
-**Inline editing** (table tabs)
-- Double-click a cell, with a date/time picker per column type and Set NULL
-- Pending changes are highlighted; Save (⌘S) runs in one transaction matched on the primary key, all or nothing
-- Tables without a primary key are read-only
+## Also included
 
-**Relations**
-- Right-click rows, then Related, to follow foreign keys in both directions in a popup; chain further, go Back, or open as a tab
-
-**PostGIS**
-- Readable geometry cells and a built-in map (dark, light, streets, satellite)
-- Client-side reprojection of WGS84, Web Mercator and UTM
-- Flags far-off features (e.g. swapped lat/lon) and has a feature popup
-
-**And**: themes (dark, light, system) and over-the-air updates.
-
-## Screenshots
+- SQL console with autocomplete, a formatter and slash commands (editable, with your own templates)
+- Inline editing of table cells, saved in one transaction
+- Edit table: rename, add, retype and drop columns, defaults and the primary key, with the SQL shown first
+- Add primary key to tables that have none
+- Related rows across foreign keys, including relations inferred from column names
+- Production safety: colored connections, read-only connections, confirmation before risky statements
+- SSL up to `verify-full`, SSH tunnels, passwords in the macOS Keychain
+- Export to CSV, TSV, JSON, GeoJSON, Markdown, SQL INSERT and SVG; copy rows as an image or for an AI agent
+- Dark, light and system themes, and in-app updates
 
 <table>
   <tr>
-    <td><img src="docs/clips/linked.gif" alt="Linked map and grid"><br><sub>Split view: rows selected in the grid light up on the map</sub></td>
-    <td><img src="docs/screenshots/import-markets.png" alt="Import data"><br><sub>Import a CSV, GeoJSON or Shapefile into a table</sub></td>
+    <td><img src="docs/clips/edit.gif" alt="Inline editing"><br><sub>Inline editing with pending changes</sub></td>
+    <td><img src="docs/clips/relations.gif" alt="Inferred relation"><br><sub>Related rows through an inferred relation</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/clips/map.gif" alt="PostGIS map"><br><sub>PostGIS map: districts, parcels and landmarks</sub></td>
-    <td><img src="docs/clips/edit.gif" alt="Inline editing"><br><sub>Inline editing with a date picker and pending changes</sub></td>
-  </tr>
-  <tr>
-    <td><img src="docs/clips/relations.gif" alt="Inferred relation"><br><sub>Related rows through an inferred relation (no FK)</sub></td>
-    <td><img src="docs/clips/wide.gif" alt="Go to column"><br><sub>Sort, freeze a column, and jump with Go to column (⌘J)</sub></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/tabs.png" alt="Connection colors"><br><sub>Color-coded connection tabs and the console schema picker</sub></td>
-    <td><img src="docs/clips/commands.gif" alt="Slash commands"><br><sub>Your own slash commands, with a live preview</sub></td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/freeze.png" alt="Frozen columns"><br><sub>Freeze columns while scrolling</sub></td>
-    <td><img src="docs/screenshots/copy-image.png" alt="Copy as image"><br><sub>Copy rows as an image</sub></td>
+    <td><img src="docs/screenshots/tabs.png" alt="Connection colors"><br><sub>Color-coded connection tabs</sub></td>
+    <td><img src="docs/clips/commands.gif" alt="Slash commands"><br><sub>Slash commands with a live preview</sub></td>
   </tr>
 </table>
 
 ## Install
 
-Download the macOS app (Apple silicon) from [Releases](https://github.com/yoouTaro/rgrip/releases) and unzip it.
+Download the zip from [Releases](https://github.com/yoouTaro/rgrip/releases) and unzip it. The app is for Apple silicon; for other platforms, build from source.
 
-The app is ad-hoc signed but not notarized, so macOS blocks the first launch. Right-click **rgrip.app → Open**, or run:
+It is ad-hoc signed but not notarized, so macOS blocks the first launch. Right-click **rgrip.app** and choose **Open**, or run:
 
 ```sh
 xattr -dr com.apple.quarantine rgrip.app
 ```
 
-**Updates:** since 0.0.2, rgrip updates itself. Use ⚙ → **Check for updates…** → **Install & restart**.
+After that, rgrip updates itself: ⚙ → **Check for updates…** → **Install & restart**.
 
-Intel, Windows and Linux builds are not published; build from source instead.
-
-## Build from source
-
-Requires Rust 1.88+.
-
-```sh
-cargo run -p rgrip
-```
-
-To build the app bundle yourself:
-
-```sh
-./scripts/bundle-macos.sh   # → dist/rgrip.app and dist/rgrip-<version>-macos-<arch>.zip
-./scripts/build-icon.sh     # regenerate assets/rgrip.icns from assets/logo.svg
-```
-
-## Keyboard shortcuts
+<details>
+<summary>Keyboard shortcuts</summary>
 
 | Shortcut | Action |
 |---|---|
@@ -134,30 +84,31 @@ To build the app bundle yourself:
 | Tab | Expand slash command |
 | Esc | Close popups / cancel cell edit |
 
-## Configuration
+</details>
 
-Connections and saved queries are stored in `~/Library/Application Support/dev.rgrip.rgrip/` (`connections.toml`, and `.sql` files under `queries/`).
+## Build from source
 
-Passwords (database, SSH password and key passphrase) are stored in the macOS Keychain (service `dev.rgrip.rgrip`), not in `connections.toml`. Older plain-text passwords are moved to the Keychain automatically on first launch. If the Keychain is unavailable, rgrip shows a notice and keeps them in the file (mode 0600) as before.
+Requires Rust 1.88+.
 
-## Project layout
+```sh
+cargo run -p rgrip
+```
 
-| Path | Contents |
-|---|---|
-| `crates/core` | Postgres driver (tokio-postgres + rustls), SSH tunnel, SQL splitting, autocomplete, export, PostGIS decoding, inline-edit SQL, date/time |
-| `crates/app` | egui UI: explorer, console, grid, map, dialogs |
-| `dev/` | Docker environment for integration tests (PostGIS with SSL, SSH bastion) |
-| `scripts/` | macOS bundling and icon scripts |
-| `site/` | Landing page (GitHub Pages) |
+To build the app bundle yourself:
 
-## Development and tests
+```sh
+./scripts/bundle-macos.sh   # dist/rgrip.app and dist/rgrip-<version>-macos-<arch>.zip
+./scripts/build-icon.sh     # regenerate assets/rgrip.icns from assets/logo.svg
+```
+
+<details>
+<summary>Development and tests</summary>
 
 ```sh
 cargo test
 ```
 
-`crates/core/tests/pg.rs` runs against a local Postgres on `localhost:5432` (skipped if unreachable).
-`crates/core/tests/remote.rs` needs the dev environment: PostGIS with SSL and an SSH bastion.
+`crates/core/tests/pg.rs` runs against a local Postgres on `localhost:5432` (skipped if unreachable). `crates/core/tests/remote.rs` needs the dev environment, PostGIS with SSL and an SSH bastion:
 
 ```sh
 ./dev/gen-certs.sh
@@ -165,11 +116,28 @@ docker compose -f dev/docker-compose.yml up -d --build
 cargo test
 ```
 
-## Vibe-coded
+| Path | Contents |
+|---|---|
+| `crates/core` | Postgres driver (tokio-postgres + rustls), SSH tunnel, SQL splitting, autocomplete, export, PostGIS decoding, inline-edit SQL, date/time |
+| `crates/app` | egui UI: explorer, console, grid, map, dialogs |
+| `dev/` | Docker environment for integration tests |
+| `scripts/` | macOS bundling and icon scripts |
+| `site/` | Landing page (GitHub Pages) |
 
-rgrip was built in conversation with an AI coding agent ([Claude Code](https://claude.com/claude-code)): the human steers and tests, the agent writes a lot of the code. That is not a secret, and it is not an excuse for sloppiness. The project has 80+ tests, including live Postgres/PostGIS integration tests, and changes are reviewed and run before they ship. It is still alpha software, so please keep backups and be careful with write access to production databases.
+</details>
 
-Contributions from humans and agents are both welcome, as long as the author has read and tested what they submit.
+<details>
+<summary>Configuration</summary>
+
+Connections and saved queries are stored in `~/Library/Application Support/dev.rgrip.rgrip/` (`connections.toml`, and `.sql` files under `queries/`).
+
+Passwords (database, SSH password and key passphrase) are stored in the macOS Keychain under the service `dev.rgrip.rgrip`, not in `connections.toml`. Older plain-text passwords are moved to the Keychain on first launch. If the Keychain is unavailable, rgrip shows a notice and keeps them in the file (mode 0600).
+
+</details>
+
+## How it's made
+
+rgrip is built with an AI coding agent ([Claude Code](https://claude.com/claude-code)), and a human reviews and tests the changes. It is alpha software, so please keep backups.
 
 ## Contributing
 
@@ -177,11 +145,7 @@ Bug reports, ideas and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBU
 
 ## Support
 
-If rgrip saves you time, you can help keep it going:
-
-[![Sponsor: buy me a coffee](https://img.shields.io/badge/Sponsor-%E2%98%95%20buy%20me%20a%20coffee-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/yoouTaro)
-
-Sponsorships go through [GitHub Sponsors](https://github.com/sponsors/yoouTaro), which passes on 100% to the maintainer.
+If rgrip is useful to you, you can support it through [GitHub Sponsors](https://github.com/sponsors/yoouTaro).
 
 ## License
 

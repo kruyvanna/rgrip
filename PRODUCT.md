@@ -37,6 +37,7 @@ Constraints: macOS, Apple silicon only for now; not notarized. Licensed MIT OR A
 - Voice: modest and plain. Don't sound proud or salesy. No Khmer showcase on the site.
 - Icons: line icons (Lucide style), no emoji.
 - Donations go through GitHub Sponsors.
+- The site stays familiar and easy to read: a standard developer-tool page at the craft level of Zed and Linear. A themed concept (a split-flap board, 2026-10-16) was tried and dropped as too hard to read.
 
 ## Evidence on Hand
 
