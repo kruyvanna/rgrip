@@ -16,8 +16,10 @@ All notable changes to rgrip are documented here. The format is based on
 - Add primary key: a table with no key (often an import or a shapefile load) shows "Add primary key" next to read-only; it adds an identity `id` column after showing the statement, and the rows become editable. Import data adds one by default too (or makes an imported column the key, or none).
 - Edit table: right-click a table → Edit table… to rename it, add, rename, retype or drop columns, set not null and defaults, and pick the primary key. The dialog shows the SQL it will run; it applies all or nothing. Dropping columns or working on a red connection is spelled out on the Apply button; read-only connections can't open it.
 - ⌘R reloads a table tab (not while edits are pending).
+- ⌘/ comments or uncomments the selected lines (or the cursor's line) with `--` in the console.
 
 ### Changed
+- The console's schema list stays open while you tick several schemas; click outside to close it.
 - Passwords, SSH passwords and key passphrases are stored in the macOS Keychain instead of plain text in `connections.toml`. Existing plain-text secrets migrate automatically; if the Keychain is unavailable rgrip warns once and falls back to the file.
 
 ### Fixed

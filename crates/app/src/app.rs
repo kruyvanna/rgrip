@@ -629,6 +629,9 @@ pub struct App {
     /// Debug demo recordings: the scripted steps being played.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     demo_play: Option<DemoPlay>,
+    /// Debug demo recordings: pointer events for the next frame's input.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    demo_input: Vec<egui::Event>,
     /// Debug screenshot scenes: when the scene first looked settled.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     demo_settled: Option<Instant>,
@@ -687,6 +690,7 @@ impl App {
             selected: None,
             demo_settled: None,
             demo_play: None,
+            demo_input: Vec::new(),
             commands_editor: None,
             import: None,
             table_editor: None,
@@ -1857,7 +1861,7 @@ impl App {
     /// Returns true to run the next step in the same frame.
     ///
     /// Steps: `wait:<ms>`, `type:<text>` (into the console, `\n` = newline),
-    /// `keys:<text>` (keystrokes to the focused field), `key:Enter|Escape`,
+    /// `keys:<text>` (keystrokes to the focused field), `key:[cmd+]Enter|Escape|/|A`, `click:<x>,<y>`,
     /// `run` (and wait for results), `view:map|grid`, `open:<schema.table>`
     /// (and wait for data), `select:<rows>`, `menu:<row>`,
     /// `related:<table>` (and wait), `editor:<row>:<col>`,
@@ -1913,14 +1917,32 @@ impl App {
                 }
             }
             "key" => {
-                let key = match arg {
+                // `cmd+` in front for ⌘.
+                let (modifiers, name) = arg.strip_prefix("cmd+").map_or((Modifiers::NONE, arg), |k| (Modifiers::COMMAND, k));
+                let key = match name {
                     "Enter" => Key::Enter,
                     "Escape" => Key::Escape,
                     "Down" => Key::ArrowDown,
+                    "/" => Key::Slash,
+                    "A" => Key::A,
                     _ => Key::Tab,
                 };
-                self.egui_ctx.input_mut(|i| i.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }));
+                self.egui_ctx.input_mut(|i| i.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }));
                 return advance(self);
+            }
+            "click" => {
+                // Press this frame, release the next.
+                let (x, y) = arg.split_once(',').unwrap_or(("0", "0"));
+                let pos = egui::pos2(x.trim().parse().unwrap_or(0.0), y.trim().parse().unwrap_or(0.0));
+                let pressed = play.typed == 0;
+                play.typed = 1;
+                // Pointer state is read before `update`; these go in with the next frame's input.
+                self.demo_input.push(egui::Event::PointerMoved(pos));
+                self.demo_input.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+                self.egui_ctx.request_repaint();
+                if !pressed {
+                    return advance(self);
+                }
             }
             "run" => {
                 let state = match self.tabs.get(active).map(|t| &t.kind) {
@@ -2140,6 +2162,11 @@ impl App {
 }
 
 impl eframe::App for App {
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        raw_input.events.append(&mut self.demo_input);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         theme::sync(ctx);
         // Pick up query files edited in another app when we come back.
@@ -3199,6 +3226,26 @@ fn console_ui(
         }
     }
     let mut format = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F));
+    // ⌘/ (and ⌘?, the same key with shift) toggles `--` on the selected lines.
+    let comment = ui.input_mut(|i| {
+        i.consume_key(Modifiers::COMMAND, Key::Slash)
+            || i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Slash)
+            || i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Questionmark)
+            || i.consume_key(Modifiers::COMMAND, Key::Questionmark)
+    });
+    if comment && c.running.is_none() {
+        let sel = sql::char_to_byte(&c.sql, c.cursor.start)..sql::char_to_byte(&c.sql, c.cursor.end);
+        let (text, sel) = rgrip_core::format::toggle_comment(&c.sql, sel);
+        c.sql = text;
+        c.cursor = c.sql[..sel.start].chars().count()..c.sql[..sel.end].chars().count();
+        if let Some(mut state) = TextEdit::load_state(ui.ctx(), editor_id) {
+            let range = egui::text::CCursorRange::two(egui::text::CCursor::new(c.cursor.start), egui::text::CCursor::new(c.cursor.end));
+            state.cursor.set_char_range(Some(range));
+            state.store(ui.ctx(), editor_id);
+        }
+        c.popup = None;
+        ui.memory_mut(|m| m.request_focus(editor_id));
+    }
     if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter)) {
         action = Some(TabAction::Run { all: true });
     } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
@@ -3510,6 +3557,8 @@ fn schema_picker(ui: &mut Ui, tab_id: TabId, c: &mut Console, schemas: &[String]
     egui::ComboBox::from_id_salt(("schema", tab_id))
         .selected_text(title)
         .width(110.0)
+        // Ticking several in a row: stay open until a click outside.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show_ui(ui, |ui| {
             menu_layout(ui);
             let mut filter = String::new();

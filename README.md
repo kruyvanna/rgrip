@@ -40,7 +40,7 @@
 
 **SQL console**
 - Syntax highlighting, line numbers, context-aware autocomplete including PostGIS functions
-- Run statement (⌘↩) or script (⇧⌘↩), saved queries (⌘S), query formatter (⇧⌘F)
+- Run statement (⌘↩) or script (⇧⌘↩), saved queries (⌘S), query formatter (⇧⌘F), toggle comments (⌘/)
 - Slash commands that expand to complete queries (Tab, or run directly):
   `/con_4326`, `/con_4326_2` (ArcGIS `st_geometry` via text), `/con_merc` (default source SRID 32648, override with a number), `/srid`, `/top`, `/count`
 
@@ -122,6 +122,7 @@ To build the app bundle yourself:
 | ⇧⌘↩ | Run all (script) |
 | ⌘S | Save query / save inline edits |
 | ⇧⌘F | Format query |
+| ⌘/ | Comment or uncomment lines |
 | ⌘N | New query |
 | ⌘W | Close tab |
 | ⌘J | Go to column (in a results grid) |
