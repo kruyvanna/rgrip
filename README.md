@@ -57,12 +57,12 @@ Load a CSV, TSV, GeoJSON or Shapefile into a new or existing table. You get a pr
 
 ## Install
 
-Download the zip from [Releases](https://github.com/yoouTaro/rgrip/releases) and unzip it. The app is for Apple silicon; for other platforms, build from source.
+Download the zip from [Releases](https://github.com/yoouTaro/rgrip/releases), unzip it, and move **rgrip.app** to your Applications folder. The app is for Apple silicon; for other platforms, build from source.
 
 It is ad-hoc signed but not notarized, so macOS blocks the first launch. Right-click **rgrip.app** and choose **Open**, or run:
 
 ```sh
-xattr -dr com.apple.quarantine rgrip.app
+xattr -dr com.apple.quarantine /Applications/rgrip.app
 ```
 
 After that, rgrip updates itself: ⚙ → **Check for updates…** → **Install & restart**.
