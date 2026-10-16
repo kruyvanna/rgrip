@@ -44,3 +44,5 @@ clip wide 10 RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels \
   RGRIP_DEMO_STEPS="wait:600;sort:price_usd:desc;wait:700;freeze:parcel_code;wait:600;goto;wait:300;keys:surv;wait:600;key:Enter;wait:2600;done"
 clip commands 7 RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels \
   RGRIP_DEMO_STEPS="wait:500;commands:parcels 3857;wait:2600;done"
+clip linked 9 RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_TABLE_VIEW=split \
+  RGRIP_DEMO_STEPS="wait:900;select:2;wait:1100;select:2,7;wait:1100;select:2,7,9,15;wait:1400;select:21;wait:1800;done"

@@ -1,0 +1,505 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-16T02:46:34+00:00",
+  "title": "Design System: rgrip",
+  "extensions": {
+    "scope": "Landing site in site/ only; the native egui app has its own look.",
+    "colorMeta": {
+      "amber": {
+        "role": "primary",
+        "displayName": "Platform Amber",
+        "tonalRamp": [
+          "oklch(15% 0.14 78)",
+          "oklch(25% 0.14 78)",
+          "oklch(37% 0.14 78)",
+          "oklch(50% 0.14 78)",
+          "oklch(62% 0.14 78)",
+          "oklch(74% 0.14 78)",
+          "oklch(85% 0.14 78)",
+          "oklch(95% 0.14 78)"
+        ]
+      },
+      "amber-hover": {
+        "role": "primary",
+        "displayName": "Lit Amber",
+        "tonalRamp": [
+          "oklch(15% 0.15 80)",
+          "oklch(25% 0.15 80)",
+          "oklch(37% 0.15 80)",
+          "oklch(50% 0.15 80)",
+          "oklch(62% 0.15 80)",
+          "oklch(74% 0.15 80)",
+          "oklch(85% 0.15 80)",
+          "oklch(95% 0.15 80)"
+        ]
+      },
+      "amber-ink": {
+        "role": "primary",
+        "displayName": "Lamp Ink",
+        "tonalRamp": [
+          "oklch(15% 0.02 85)",
+          "oklch(25% 0.02 85)",
+          "oklch(37% 0.02 85)",
+          "oklch(50% 0.02 85)",
+          "oklch(62% 0.02 85)",
+          "oklch(74% 0.02 85)",
+          "oklch(85% 0.02 85)",
+          "oklch(95% 0.02 85)"
+        ]
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "Concourse Ground",
+        "tonalRamp": [
+          "oklch(15% 0.006 265)",
+          "oklch(25% 0.006 265)",
+          "oklch(37% 0.006 265)",
+          "oklch(50% 0.006 265)",
+          "oklch(62% 0.006 265)",
+          "oklch(74% 0.006 265)",
+          "oklch(85% 0.006 265)",
+          "oklch(95% 0.006 265)"
+        ]
+      },
+      "board": {
+        "role": "neutral",
+        "displayName": "Board Black",
+        "tonalRamp": [
+          "oklch(15% 0.006 265)",
+          "oklch(25% 0.006 265)",
+          "oklch(37% 0.006 265)",
+          "oklch(50% 0.006 265)",
+          "oklch(62% 0.006 265)",
+          "oklch(74% 0.006 265)",
+          "oklch(85% 0.006 265)",
+          "oklch(95% 0.006 265)"
+        ]
+      },
+      "cell": {
+        "role": "neutral",
+        "displayName": "Flap Graphite",
+        "tonalRamp": [
+          "oklch(15% 0.006 265)",
+          "oklch(25% 0.006 265)",
+          "oklch(37% 0.006 265)",
+          "oklch(50% 0.006 265)",
+          "oklch(62% 0.006 265)",
+          "oklch(74% 0.006 265)",
+          "oklch(85% 0.006 265)",
+          "oklch(95% 0.006 265)"
+        ]
+      },
+      "cell-lo": {
+        "role": "neutral",
+        "displayName": "Lower Flap",
+        "tonalRamp": [
+          "oklch(15% 0.006 265)",
+          "oklch(25% 0.006 265)",
+          "oklch(37% 0.006 265)",
+          "oklch(50% 0.006 265)",
+          "oklch(62% 0.006 265)",
+          "oklch(74% 0.006 265)",
+          "oklch(85% 0.006 265)",
+          "oklch(95% 0.006 265)"
+        ]
+      },
+      "seam": {
+        "role": "neutral",
+        "displayName": "Seam",
+        "tonalRamp": [
+          "oklch(15% 0.003 265)",
+          "oklch(25% 0.003 265)",
+          "oklch(37% 0.003 265)",
+          "oklch(50% 0.003 265)",
+          "oklch(62% 0.003 265)",
+          "oklch(74% 0.003 265)",
+          "oklch(85% 0.003 265)",
+          "oklch(95% 0.003 265)"
+        ]
+      },
+      "frame": {
+        "role": "neutral",
+        "displayName": "Brushed Steel",
+        "tonalRamp": [
+          "oklch(15% 0.01 265)",
+          "oklch(25% 0.01 265)",
+          "oklch(37% 0.01 265)",
+          "oklch(50% 0.01 265)",
+          "oklch(62% 0.01 265)",
+          "oklch(74% 0.01 265)",
+          "oklch(85% 0.01 265)",
+          "oklch(95% 0.01 265)"
+        ]
+      },
+      "steel-edge": {
+        "role": "neutral",
+        "displayName": "Steel Edge",
+        "tonalRamp": [
+          "oklch(15% 0.012 265)",
+          "oklch(25% 0.012 265)",
+          "oklch(37% 0.012 265)",
+          "oklch(50% 0.012 265)",
+          "oklch(62% 0.012 265)",
+          "oklch(74% 0.012 265)",
+          "oklch(85% 0.012 265)",
+          "oklch(95% 0.012 265)"
+        ]
+      },
+      "steel-face": {
+        "role": "neutral",
+        "displayName": "Steel Face",
+        "tonalRamp": [
+          "oklch(15% 0.006 265)",
+          "oklch(25% 0.006 265)",
+          "oklch(37% 0.006 265)",
+          "oklch(50% 0.006 265)",
+          "oklch(62% 0.006 265)",
+          "oklch(74% 0.006 265)",
+          "oklch(85% 0.006 265)",
+          "oklch(95% 0.006 265)"
+        ]
+      },
+      "well": {
+        "role": "neutral",
+        "displayName": "Well",
+        "tonalRamp": [
+          "oklch(15% 0.003 265)",
+          "oklch(25% 0.003 265)",
+          "oklch(37% 0.003 265)",
+          "oklch(50% 0.003 265)",
+          "oklch(62% 0.003 265)",
+          "oklch(74% 0.003 265)",
+          "oklch(85% 0.003 265)",
+          "oklch(95% 0.003 265)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Rule",
+        "tonalRamp": [
+          "oklch(15% 0.01 265)",
+          "oklch(25% 0.01 265)",
+          "oklch(37% 0.01 265)",
+          "oklch(50% 0.01 265)",
+          "oklch(62% 0.01 265)",
+          "oklch(74% 0.01 265)",
+          "oklch(85% 0.01 265)",
+          "oklch(95% 0.01 265)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Board White",
+        "tonalRamp": [
+          "oklch(15% 0.006 110)",
+          "oklch(25% 0.006 110)",
+          "oklch(37% 0.006 110)",
+          "oklch(50% 0.006 110)",
+          "oklch(62% 0.006 110)",
+          "oklch(74% 0.006 110)",
+          "oklch(85% 0.006 110)",
+          "oklch(95% 0.006 110)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Dim Grey",
+        "tonalRamp": [
+          "oklch(15% 0.01 265)",
+          "oklch(25% 0.01 265)",
+          "oklch(37% 0.01 265)",
+          "oklch(50% 0.01 265)",
+          "oklch(62% 0.01 265)",
+          "oklch(74% 0.01 265)",
+          "oklch(85% 0.01 265)",
+          "oklch(95% 0.01 265)"
+        ]
+      },
+      "faint": {
+        "role": "neutral",
+        "displayName": "Faint Grey",
+        "tonalRamp": [
+          "oklch(15% 0.012 265)",
+          "oklch(25% 0.012 265)",
+          "oklch(37% 0.012 265)",
+          "oklch(50% 0.012 265)",
+          "oklch(62% 0.012 265)",
+          "oklch(74% 0.012 265)",
+          "oklch(85% 0.012 265)",
+          "oklch(95% 0.012 265)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Flap Display",
+        "purpose": "Characters inside flap cells only; size follows the cell (0.8 of its height)."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Section headings beside platforms and on Download, uppercase."
+      },
+      "title": {
+        "displayName": "Row Title",
+        "purpose": "Departure row names on boards."
+      },
+      "title-sm": {
+        "displayName": "Row Title Small",
+        "purpose": "Row heads in feature spec tables."
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "Facts strip values and numbers; tabular figures."
+      },
+      "button": {
+        "displayName": "Button",
+        "purpose": "Button labels, uppercase."
+      },
+      "nav": {
+        "displayName": "Nav",
+        "purpose": "Top bar links, uppercase."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Column headers, fact labels; board titles at 15px."
+      },
+      "lead": {
+        "displayName": "Lead",
+        "purpose": "The one-line plain lead under the hero board."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "All prose, sentence case."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "SQL, shell commands, inline code and kbd."
+      }
+    },
+    "fonts": [
+      {
+        "family": "Big Shoulders",
+        "source": "site/fonts/big-shoulders.woff",
+        "weights": "100 900",
+        "display": "swap",
+        "license": "site/fonts/OFL-BigShoulders.txt",
+        "preload": true
+      }
+    ],
+    "shadows": [
+      {
+        "name": "board-mount",
+        "value": "inset 0 0 0 1px #000, 0 1px 0 #3a3d43 inset, 0 34px 70px -34px #000",
+        "purpose": "Every steel-framed board."
+      },
+      {
+        "name": "bezel-drop",
+        "value": "0 30px 60px -30px #000",
+        "purpose": "Screenshot platforms."
+      },
+      {
+        "name": "flap-bevel",
+        "value": "inset 0 1px 0 rgba(255,255,255,.06), 0 1px 1px rgba(0,0,0,.7)",
+        "purpose": "Every flap cell."
+      },
+      {
+        "name": "button-weight",
+        "value": "0 8px 20px -10px rgba(0,0,0,.9)",
+        "purpose": "Amber primary button only."
+      }
+    ],
+    "cellGeometry": {
+      "height": "var(--c)",
+      "width": "calc(var(--c) * .66)",
+      "gap": "calc(var(--c) * .07)",
+      "radius": "calc(var(--c) * .07)",
+      "glyph": "600 calc(var(--c) * .8)/1 Big Shoulders, opsz 72",
+      "seam": "#060607 band from 49.4% to 50.6%",
+      "heroRowGap": "calc(var(--c) * .12)",
+      "sizes": {
+        "hero": "min(74px, (min(100vw,1200px) - 140px) / 15.3)",
+        "heroMobile": "(100vw - 92px) / 10.2",
+        "boardRow": "30px",
+        "boardRowMobile": "24px"
+      }
+    },
+    "frames": {
+      "board": "7px solid #2b2d32, radius 8px",
+      "bezel": "5px solid #2b2d32, radius 8px, aspect 1600/950"
+    },
+    "motion": [
+      {
+        "name": "flap-fold",
+        "value": "rotateX(0 -> -90deg), 110ms, cubic-bezier(.5,0,.9,.4), origin 50% 100%",
+        "purpose": "Top half folds down on every flap tick."
+      },
+      {
+        "name": "flap-tick",
+        "value": "70ms",
+        "purpose": "Interval between glyph changes in a cell."
+      },
+      {
+        "name": "flap-count",
+        "value": "3-7 flips per cell, 3 + ((i*7 + r*3) % 5)",
+        "purpose": "Random glyphs from A-Z 0-9 . · - before the real character lands."
+      },
+      {
+        "name": "cascade-stagger",
+        "value": "32ms per cell, 140ms per row; 18ms on hover replay",
+        "purpose": "Left-to-right, top-to-bottom cascade."
+      },
+      {
+        "name": "cascade-trigger",
+        "value": "IntersectionObserver threshold 0.6, once per board; row pointerenter, 900ms cooldown",
+        "purpose": "One cascade on entry; replay on a pointed departure row."
+      },
+      {
+        "name": "ease-control",
+        "value": "0.2s cubic-bezier(.2,.7,.2,1)",
+        "purpose": "Button background, border and shadow."
+      },
+      {
+        "name": "row-hover",
+        "value": "background-color .25s",
+        "purpose": "Departure row hover fill."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "prefers-reduced-motion: reduce",
+        "purpose": "No cascade, no fold, no smooth scroll; clips play with controls."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "stack",
+        "value": "960px",
+        "purpose": "Two-column layouts stack; facts strip 2x2."
+      },
+      {
+        "name": "compact",
+        "value": "700px",
+        "purpose": "Nav shows GitHub only; hero cells resize and wrap by word; departure rows stack."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button (Go)",
+      "kind": "button",
+      "refersTo": "button-go",
+      "description": "Amber Download button; the only amber fill on the page.",
+      "html": "<a class=\"ds-btn ds-btn-go\" href=\"#\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12 15V3\"/><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><path d=\"m7 10 5 5 5-5\"/></svg><span>Download for macOS</span></a>",
+      "css": ".ds-btn{display:inline-flex;align-items:center;gap:9px;padding:14px 22px;border-radius:7px;text-decoration:none;font:700 19px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.06em;text-transform:uppercase;border:1px solid transparent;cursor:pointer;transition:background-color .2s cubic-bezier(.2,.7,.2,1),border-color .2s,box-shadow .2s}.ds-btn:focus-visible{outline:2px solid #f2b33d;outline-offset:3px}.ds-btn-go{background:#f2b33d;color:#17130a;box-shadow:0 8px 20px -10px rgba(0,0,0,.9)}.ds-btn-go:hover{background:#ffc552}"
+    },
+    {
+      "name": "Secondary Button (Steel)",
+      "kind": "button",
+      "refersTo": "button-steel",
+      "description": "Steel plate for GitHub and Sponsors links.",
+      "html": "<a class=\"ds-btn ds-btn-steel\" href=\"#\">View on GitHub</a>",
+      "css": ".ds-btn{display:inline-flex;align-items:center;gap:9px;padding:14px 22px;border-radius:7px;text-decoration:none;font:700 19px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.06em;text-transform:uppercase;border:1px solid transparent;cursor:pointer;transition:background-color .2s cubic-bezier(.2,.7,.2,1),border-color .2s,box-shadow .2s}.ds-btn:focus-visible{outline:2px solid #f2b33d;outline-offset:3px}.ds-btn-steel{background:#1b1c1f;color:#f2f2ee;border-color:#3a3d43}.ds-btn-steel:hover{border-color:#6b7077}"
+    },
+    {
+      "name": "Flap Row",
+      "kind": "custom",
+      "refersTo": "flap-cell",
+      "description": "A framed row of split-flap cells; one character per cell, hover lamps amber.",
+      "html": "<div class=\"ds-flaps\" aria-label=\"With a map\"><span class=\"ds-cell\">W</span><span class=\"ds-cell\">I</span><span class=\"ds-cell\">T</span><span class=\"ds-cell\">H</span><span class=\"ds-cell ds-blank\"> </span><span class=\"ds-cell\">A</span><span class=\"ds-cell ds-blank\"> </span><span class=\"ds-cell\">M</span><span class=\"ds-cell\">A</span><span class=\"ds-cell\">P</span></div>",
+      "css": ".ds-flaps{--c:48px;display:flex;gap:calc(var(--c)*.07);padding:20px;background:#141518;border:7px solid #2b2d32;border-radius:8px}.ds-cell{display:inline-grid;place-items:center;width:calc(var(--c)*.66);height:var(--c);border-radius:calc(var(--c)*.07);color:#f2f2ee;font:600 calc(var(--c)*.8)/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;background:linear-gradient(180deg,#1d1e21 0 49.4%,#060607 49.4% 50.6%,#17181b 50.6%);box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 1px 1px rgba(0,0,0,.7)}.ds-cell.ds-blank{color:transparent}.ds-flaps:hover .ds-cell{color:#f2b33d}"
+    },
+    {
+      "name": "Departures Board",
+      "kind": "card",
+      "refersTo": "board",
+      "description": "Steel-framed table of departure rows; hovered row turns amber.",
+      "html": "<div class=\"ds-board\"><h3 class=\"ds-board-title\">Also aboard</h3><table class=\"ds-dep\"><tbody><tr><th>SQL CONSOLE</th><td>Autocomplete, formatter, slash commands</td></tr><tr><th>EXPORT</th><td>CSV, JSON, GeoJSON, Markdown, SQL, SVG</td></tr><tr class=\"ds-past\"><th>0.0.8</th><td>Notes</td></tr></tbody></table></div>",
+      "css": ".ds-board{border:7px solid #2b2d32;border-radius:8px;background:#141518;box-shadow:inset 0 0 0 1px #000,0 1px 0 #3a3d43 inset,0 34px 70px -34px #000;color:#f2f2ee}.ds-board-title{margin:0;padding:18px 24px 14px;font:700 15px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#a6a9b0;border-bottom:1px solid #2a2c31}.ds-dep{width:100%;border-collapse:collapse}.ds-dep tr{border-bottom:1px solid #202125;transition:background-color .25s}.ds-dep tr:last-child{border-bottom:0}.ds-dep th{padding:12px 24px;text-align:left;white-space:nowrap;width:1%;font:600 26px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.08em}.ds-dep td{padding:12px 24px;color:#a6a9b0;font:16px/1.6 -apple-system,BlinkMacSystemFont,\"SF Pro Text\",\"Segoe UI\",Roboto,system-ui,sans-serif}.ds-dep tr:hover{background:#18191c}.ds-dep tr:hover th{color:#f2b33d}.ds-dep tr.ds-past th,.ds-dep tr.ds-past td{color:#7c8088}"
+    },
+    {
+      "name": "Screenshot Bezel",
+      "kind": "card",
+      "refersTo": "board",
+      "description": "5px steel frame around a product screenshot or clip.",
+      "html": "<figure class=\"ds-bezel\"><div class=\"ds-shot\"></div></figure>",
+      "css": ".ds-bezel{margin:0;border:5px solid #2b2d32;border-radius:8px;overflow:hidden;aspect-ratio:1600/950;background:#0c0c0d;box-shadow:0 30px 60px -30px #000}.ds-shot{width:100%;height:100%;background:linear-gradient(90deg,#1d1e21 0 55%,#17181b 55%)}"
+    },
+    {
+      "name": "Facts Strip",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "Ruled row of label/value facts under the hero; tabular figures.",
+      "html": "<dl class=\"ds-facts\"><div><dt>Version</dt><dd>0.0.9</dd></div><div><dt>Download</dt><dd>~10 MB</dd></div><div><dt>Runs on</dt><dd>Apple silicon</dd></div></dl>",
+      "css": ".ds-facts{display:grid;grid-template-columns:repeat(3,1fr);margin:0;border-top:1px solid #2a2c31;border-bottom:1px solid #2a2c31;color:#f2f2ee}.ds-facts div{padding:16px 20px}.ds-facts div+div{border-left:1px solid #2a2c31}.ds-facts dt{font:700 13px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.16em;text-transform:uppercase;color:#7c8088}.ds-facts dd{margin:8px 0 0;font:600 21px/1.2 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.03em;font-variant-numeric:tabular-nums}"
+    },
+    {
+      "name": "Code Well",
+      "kind": "custom",
+      "refersTo": "code-well",
+      "description": "Dark well for shell commands and SQL.",
+      "html": "<pre class=\"ds-code\" tabindex=\"0\"><code>git clone https://github.com/yoouTaro/rgrip\ncd rgrip &amp;&amp; cargo run -p rgrip</code></pre>",
+      "css": ".ds-code{margin:0;padding:16px 18px;background:#0b0b0c;border:1px solid #2a2c31;border-radius:8px;overflow-x:auto;font:14px/1.6 ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;color:#d9dade}.ds-code:focus-visible{outline:2px solid #f2b33d;outline-offset:3px}"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "nav-link",
+      "description": "Sticky translucent bar with wordmark and uppercase links.",
+      "html": "<header class=\"ds-top\"><a class=\"ds-mark\" href=\"#\">rgrip</a><nav class=\"ds-nav\"><a href=\"#\">Map</a><a href=\"#\">Import</a><a href=\"#\">Also aboard</a><a href=\"#\">Download</a></nav></header>",
+      "css": ".ds-top{display:flex;align-items:center;justify-content:space-between;height:60px;padding:0 28px;background:color-mix(in srgb,#101113 88%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid #2a2c31}.ds-mark{color:#f2f2ee;text-decoration:none;font:700 24px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;letter-spacing:.02em}.ds-nav{display:flex;gap:26px}.ds-nav a{color:#a6a9b0;text-decoration:none;font:600 17px/1 \"Big Shoulders\",\"Arial Narrow\",sans-serif;text-transform:uppercase;letter-spacing:.07em}.ds-nav a:hover{color:#f2f2ee}.ds-nav a:focus-visible{outline:2px solid #f2b33d;outline-offset:3px;border-radius:4px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Solari Board",
+    "overview": "A departure board is a results grid, so the page is one. The site reads as a concourse split-flap board for rgrip: steel-framed boards of graphite flap cells carrying white condensed capitals, a single amber lamp marking what to act on, and everything else set in quiet greys on a near-black ground. Real product screenshots sit in the same steel frame as \"platforms\" beside the board rows that describe them.\n\nThe voice is plain and the density is moderate: big flap capitals do the shouting once, at the top, and the rest of the page is short system-sans prose and ruled tables. The board is mechanical, not glowing; depth comes from the frame, the cell seam and soft drop shadows, never from gradients of light or neon. It rejects the centered-glow developer-tool hero with a grid of feature cards.\n\nMotion has one grammar: a flap cascade. Each board flips its characters through a few random glyphs and settles, once as it enters view, and again on a departure row you point at.",
+    "keyCharacteristics": [
+      "Graphite flap cells with a dark centre seam, white condensed capitals, fixed cell widths.",
+      "Brushed-steel frame (7px on boards, 5px on screenshot bezels) around every board and platform.",
+      "Amber is the only accent: the primary action, the active or latest row, focus, selection.",
+      "Big Shoulders for everything on the board; system sans for prose; mono for SQL and commands.",
+      "Tables, not cards: features and releases are ruled departure rows."
+    ],
+    "rules": [
+      {
+        "name": "The One Lamp Rule",
+        "body": "Amber marks exactly what is live or actionable: the primary button, the current row, the hovered row, focus. Never use it for decoration, headings or large fills beyond the primary button.",
+        "section": "colors"
+      },
+      {
+        "name": "The No Second Accent Rule",
+        "body": "There is no secondary hue. Retired rows step down to Faint Grey; the dim red the direction proposed for retired rows was not built and is not part of the palette.",
+        "section": "colors"
+      },
+      {
+        "name": "The Board Speaks Caps Rule",
+        "body": "Everything that sits on the board (cells, row names, labels, buttons, nav) is Big Shoulders in uppercase with positive tracking. Sentences are never set in Big Shoulders; prose is always system sans in sentence case.",
+        "section": "typography"
+      },
+      {
+        "name": "The Fixed Cell Rule",
+        "body": "Flap text is set one character per cell; cells never stretch to fit text. Width is 0.66 of the cell height, the gap 0.07, so every row lines up on one character grid.",
+        "section": "typography"
+      },
+      {
+        "name": "The Mounted, Not Floating Rule",
+        "body": "Shadows fall straight down and are soft; nothing moves up on hover. State is shown by colour (amber, lighter steel border), never by elevation.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** put anything that is a feature, a release or a fact on a board row or a ruled table, set in uppercase Big Shoulders.",
+      "**Do** keep amber for the one primary action and the current or hovered row; text on amber is always Lamp Ink.",
+      "**Do** frame screenshots and boards in steel (5px or 7px Brushed Steel, 8px radius).",
+      "**Do** size flap text in whole cells (width 0.66c, gap 0.07c) and pad multi-row boards with blank cells to the longest row.",
+      "**Do** run the cascade once per board on entry and honour reduced motion with the final text.",
+      "**Do** use tabular figures for every number."
+    ],
+    "donts": [
+      "**Don't** add a second accent colour or a red for retired rows; past items go Faint Grey.",
+      "**Don't** use feature card grids, centered glows or gradient light: the board is mechanical and lit by one lamp.",
+      "**Don't** set prose in Big Shoulders or uppercase; sentences stay in system sans.",
+      "**Don't** lift elements on hover or add glow shadows; state changes are colour only.",
+      "**Don't** let flap text reflow inside a cell or stretch cells to fit; on narrow screens rows wrap by word.",
+      "**Don't** animate cells continuously or on scroll beyond the one entry cascade and the row hover replay."
+    ]
+  }
+}

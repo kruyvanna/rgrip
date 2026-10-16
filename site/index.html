@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>rgrip: a small Postgres client, with a map</title>
-  <meta name="description" content="A small native PostgreSQL client with a built-in map for PostGIS data. Free and open source.">
-  <meta name="theme-color" content="#1c1c1e">
+  <meta name="description" content="A small native PostgreSQL client for macOS with a built-in map for PostGIS data. Free and open source.">
+  <meta name="theme-color" content="#101113">
   <link rel="icon" type="image/png" href="img/icon.png">
   <link rel="apple-touch-icon" href="img/icon.png">
   <link rel="canonical" href="https://yoouTaro.github.io/rgrip/">
@@ -13,32 +13,32 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="rgrip">
   <meta property="og:title" content="rgrip: a small Postgres client, with a map">
-  <meta property="og:description" content="A small native PostgreSQL client with a built-in map for PostGIS data. Free and open source.">
+  <meta property="og:description" content="A small native PostgreSQL client for macOS with a built-in map for PostGIS data. Free and open source.">
   <meta property="og:url" content="https://yoouTaro.github.io/rgrip/">
-  <meta property="og:image" content="https://yoouTaro.github.io/rgrip/img/hero.png">
+  <meta property="og:image" content="https://yoouTaro.github.io/rgrip/img/og.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="rgrip: a small Postgres client, with a map">
-  <meta name="twitter:description" content="A small native PostgreSQL client with a built-in map for PostGIS data. Free and open source.">
-  <meta name="twitter:image" content="https://yoouTaro.github.io/rgrip/img/hero.png">
+  <meta name="twitter:description" content="A small native PostgreSQL client for macOS with a built-in map for PostGIS data. Free and open source.">
+  <meta name="twitter:image" content="https://yoouTaro.github.io/rgrip/img/og.png">
 
+  <link rel="preload" href="fonts/big-shoulders.woff" as="font" type="font/woff" crossorigin>
   <link rel="stylesheet" href="style.css">
   <script src="main.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
 
-  <header class="nav">
-    <div class="wrap nav-in">
-      <a class="brand" href="#top" aria-label="rgrip home">
-        <img src="img/icon.png" alt="" width="28" height="28"><span>rgrip</span>
+  <header class="top">
+    <div class="wrap top-in">
+      <a class="mark" href="#top" aria-label="rgrip home">
+        <img src="img/icon.png" alt="" width="26" height="26"><span>rgrip</span>
       </a>
       <nav aria-label="Primary">
-        <a href="#features">Features</a>
-        <a href="#screenshots">Screenshots</a>
+        <a href="#map">Map</a>
+        <a href="#import">Import</a>
+        <a href="#more">Also aboard</a>
         <a href="#download">Download</a>
-        <a href="https://github.com/yoouTaro/rgrip">GitHub</a>
-        <!-- TODO: set Buy Me a Coffee username (single constant lives in main.js; the href below is a fallback) -->
-        <a id="donate" class="btn btn-sm btn-coffee" data-donate href="https://github.com/sponsors/yoouTaro"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>Donate</a>
+        <a href="https://github.com/yoouTaro/rgrip" class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg><span>GitHub</span></a>
       </nav>
     </div>
   </header>
@@ -46,153 +46,143 @@
   <main id="main">
     <section class="hero" id="top">
       <div class="wrap">
-        <p class="eyebrow">Free and open source</p>
-        <h1>A small Postgres client, <span class="grad">with a map</span>.</h1>
-        <p class="lead">rgrip is a native PostgreSQL client written in Rust. Run a query and look at your PostGIS data on a map, follow relations between tables, and copy results to share.</p>
-        <div class="cta">
-          <a class="btn btn-primary" data-download href="https://github.com/yoouTaro/rgrip/releases">Download for macOS</a>
-          <a class="btn btn-ghost" href="https://github.com/yoouTaro/rgrip">View on GitHub</a>
+        <div class="board board-hero">
+          <h1 class="flaps" data-flaps aria-label="A small Postgres client, with a map, for macOS">
+            <span class="row">SMALL POSTGRES CLIENT</span>
+            <span class="row">WITH A MAP</span>
+            <span class="row">FOR MACOS</span>
+          </h1>
         </div>
-        <p class="fine">macOS · Apple silicon · MIT OR Apache-2.0</p>
-        <ul class="stats" aria-label="Measured on rgrip 0.0.7">
-          <li><b>~9 MB</b><span>download</span></li>
-          <li><b>~75 MB</b><span>memory at idle</span></li>
-          <li><b>Native</b><span>written in Rust</span></li>
-        </ul>
-        <figure class="shot shot-hero">
-          <img src="img/hero.png" alt="rgrip main window: schema explorer, SQL console and results grid" width="1600" height="1000" fetchpriority="high">
+
+        <div class="intro">
+          <p class="lead">rgrip is a native PostgreSQL client for macOS, written in Rust. Query, browse and edit your tables, and see PostGIS data on a map right next to the rows it came from.</p>
+          <div class="cta">
+            <a class="btn btn-go" data-download href="https://github.com/yoouTaro/rgrip/releases"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg><span>Download for macOS</span></a>
+            <a class="btn btn-steel" href="https://github.com/yoouTaro/rgrip">View on GitHub</a>
+          </div>
+        </div>
+
+        <dl class="facts" aria-label="At a glance">
+          <div><dt>Version</dt><dd data-version>0.0.9</dd></div>
+          <div><dt>Download</dt><dd>~10 MB</dd></div>
+          <div><dt>Runs on</dt><dd>macOS 11+, Apple silicon</dd></div>
+          <div><dt>Price</dt><dd>Free, MIT or Apache-2.0</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="feature" id="map" aria-labelledby="map-h">
+      <div class="wrap feature-in">
+        <figure class="bezel bezel-wide">
+          <video src="clips/linked.mp4" poster="img/split.webp" autoplay loop muted playsinline preload="metadata" aria-label="Split view of demo.parcels: selecting rows in the grid highlights the parcels on the map"></video>
         </figure>
+        <div class="copy">
+          <h2 id="map-h">The map shares the grid's selection</h2>
+          <p>Open a table with a geometry column and put the map next to the rows. Select rows and their features light up; click a feature and its row is selected. One selection, two views.</p>
+          <table class="dep">
+            <caption class="sr">What the map does</caption>
+            <tbody>
+              <tr><th scope="row">Split view</th><td>Grid and map side by side, resizable</td></tr>
+              <tr><th scope="row">Zoom to selected</th><td>Fit the map to the rows you picked</td></tr>
+              <tr><th scope="row">Filter by area</th><td>Draw a box, get a <code>WHERE</code> clause</td></tr>
+              <tr><th scope="row">Reprojects</th><td class="fig">4326 · 3857 · UTM</td></tr>
+              <tr><th scope="row">Basemaps</th><td>Dark, light, streets, satellite</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
 
-    <section id="features" class="section">
+    <section class="feature feature-rev" id="import" aria-labelledby="import-h">
+      <div class="wrap feature-in">
+        <figure class="bezel bezel-fit">
+          <img src="img/import.webp" alt="Import data dialog: markets.csv with inferred column types, a point column from lon and lat, SRID 4326 and a preview of the rows" width="1400" height="1223" loading="lazy">
+        </figure>
+        <div class="copy">
+          <h2 id="import-h">Files go straight into tables</h2>
+          <p>Right-click a schema, pick a file, check the preview and the column types, and import. rgrip creates the table, adds a key so the rows can be edited, and loads it all in one transaction.</p>
+          <table class="dep">
+            <caption class="sr">What import reads</caption>
+            <tbody>
+              <tr><th scope="row">CSV / TSV</th><td>Delimiter found for you; lon/lat become a point</td></tr>
+              <tr><th scope="row">GeoJSON</th><td>Properties become columns</td></tr>
+              <tr><th scope="row">Shapefile</th><td>SRID read from the <code>.prj</code></td></tr>
+              <tr><th scope="row">New or existing</th><td>Create a table or append to one</td></tr>
+              <tr><th scope="row">All or nothing</th><td>One COPY, rolled back on any error</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="more" id="more" aria-labelledby="more-h">
       <div class="wrap">
-        <h2>Features</h2>
-        <dl class="features">
-          <div><dt>PostGIS</dt><dd>Readable geometry cells and a built-in map that reprojects WGS84, Web Mercator and UTM on the fly.</dd></div>
-          <div><dt>SQL console</dt><dd>Highlighting, context-aware autocomplete, a formatter (<kbd class="k"><svg class="kicon" viewBox="0 0 24 24" aria-label="Shift"><path d="M9 18v-6H5l7-7 7 7h-4v6H9z"/></svg><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg>F</kbd>), saved queries, and slash commands like <code>/count</code> that expand into full queries.</dd></div>
-          <div><dt>Results grid</dt><dd>Virtualized with server-side paging, multi-row selection and frozen columns. Export to CSV, JSON, GeoJSON, Markdown, SQL or SVG, or copy rows as an image.</dd></div>
-          <div><dt>Inline editing</dt><dd>Double-click a cell to edit it, with a date/time picker for date and time columns. Changes are saved in one transaction, matched on the primary key.</dd></div>
-          <div><dt>Relations</dt><dd>Follow foreign keys in both directions from any row, in a popup you can chain.</dd></div>
-          <div><dt>Connections</dt><dd>SSL up to <code>verify-full</code> with client certificates, SSH tunnels, and paste-in connection strings.</dd></div>
-        </dl>
+        <div class="board">
+          <h2 id="more-h" class="board-title">Also aboard</h2>
+          <table class="departures">
+            <caption class="sr">Other features</caption>
+            <thead>
+              <tr><th scope="col">Feature</th><th scope="col">What it does</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row" data-flaps>SQL CONSOLE</th><td>Autocomplete, formatter, slash commands like <code>/count</code>, <kbd>⌘/</kbd> to comment</td></tr>
+              <tr><th scope="row" data-flaps>EDIT IN PLACE</th><td>Double-click a cell; changes save in one transaction</td></tr>
+              <tr><th scope="row" data-flaps>EDIT TABLE</th><td>Columns, types, defaults and the key, with the SQL shown</td></tr>
+              <tr><th scope="row" data-flaps>RELATIONS</th><td>Follow foreign keys, or ones inferred from column names</td></tr>
+              <tr><th scope="row" data-flaps>SAFE ON PROD</th><td>Colored connections, read-only mode, a check before risky statements</td></tr>
+              <tr><th scope="row" data-flaps>CONNECTIONS</th><td>SSL up to verify-full, SSH tunnels, passwords in the Keychain</td></tr>
+              <tr><th scope="row" data-flaps>EXPORT</th><td>CSV, JSON, GeoJSON, Markdown, SQL, SVG, or copy as an image</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="more-note">The full list, with shortcuts, is in the <a href="https://github.com/yoouTaro/rgrip#readme">README</a>.</p>
       </div>
     </section>
 
-    <section id="screenshots" class="section alt">
-      <div class="wrap">
-        <h2>A closer look</h2>
-        <p class="sub">Little workflows that add up.</p>
-
-        <div class="row">
-          <div class="txt">
-            <p class="tag geo">PostGIS</p>
-            <h3>See your data on a map</h3>
-            <p>Geometry columns become readable cells and one click puts them on a map. Pick a dark, light, streets or satellite basemap. rgrip reprojects WGS84, Web Mercator and UTM on the client and flags features that landed in the wrong hemisphere (hello, swapped lat/lon).</p>
+    <section class="download" id="download" aria-labelledby="download-h">
+      <div class="wrap download-in">
+        <div class="copy">
+          <h2 id="download-h">Get rgrip</h2>
+          <p>Download the zip, unzip it and open <code>rgrip.app</code>. It isn't notarized yet, so the first time, right-click it and choose Open. Updates install from inside the app.</p>
+          <div class="cta">
+            <a class="btn btn-go" data-download href="https://github.com/yoouTaro/rgrip/releases"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg><span>Download for macOS</span></a>
           </div>
-          <figure class="shot"><video src="clips/map.mp4" poster="img/map.png" autoplay loop muted playsinline preload="metadata" aria-label="PostGIS map view with feature popup"></video></figure>
+          <h3>Build from source</h3>
+          <p class="small">Needs Rust 1.88 or newer.</p>
+          <pre class="code" tabindex="0"><code>git clone https://github.com/yoouTaro/rgrip
+cd rgrip &amp;&amp; cargo run -p rgrip</code></pre>
         </div>
 
-        <div class="row rev">
-          <div class="txt">
-            <p class="tag">Editing</p>
-            <h3>Edit cells in place</h3>
-            <p>Double-click, pick a date from the calendar, set NULL. Pending changes stay highlighted until you save, and then everything goes out in a single transaction keyed on the primary key. If one row fails, nothing changes.</p>
-          </div>
-          <figure class="shot"><video src="clips/edit.mp4" poster="img/edit.png" autoplay loop muted playsinline preload="metadata" aria-label="Inline cell editing with a date picker"></video></figure>
-        </div>
-
-        <div class="row">
-          <div class="txt">
-            <p class="tag">Relations</p>
-            <h3>Follow relations, even without foreign keys</h3>
-            <p>Right-click a row and jump to the rows it points to, or the rows pointing at it. No constraints? rgrip infers relations from column names and types (<code>customer_id</code> → <code>customers.id</code>) and marks them as inferred. Keep chaining, step Back, or open any hop as a tab.</p>
-          </div>
-          <figure class="shot"><video src="clips/relations.mp4" poster="img/inferred.png" autoplay loop muted playsinline preload="metadata" aria-label="Related rows found through an inferred relation"></video></figure>
-        </div>
-
-        <div class="row rev">
-          <div class="txt">
-            <p class="tag">Grid</p>
-            <h3>Wide tables, tamed</h3>
-            <p>Freeze key columns so they stay put while you scroll, and jump to any column with <kbd class="k"><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg>J</kbd>. The grid is virtualized and pages 1,000 rows at a time from the server.</p>
-          </div>
-          <figure class="shot"><video src="clips/wide.mp4" poster="img/goto.png" autoplay loop muted playsinline preload="metadata" aria-label="Go to column search over a sorted table"></video></figure>
-        </div>
-
-        <div class="row">
-          <div class="txt">
-            <p class="tag">Safety</p>
-            <h3>Know when you're on prod</h3>
-            <p>Give a connection a color and every tab of it is tinted, titled <code>name@database</code>. Each console has its own schema picker, so unqualified names resolve where you expect.</p>
-          </div>
-          <figure class="shot"><img src="img/tabs.png" alt="Red-tinted production tabs and the console schema picker" width="1600" height="1000" loading="lazy"></figure>
-        </div>
-
-        <div class="row rev">
-          <div class="txt">
-            <p class="tag">Yours</p>
-            <h3>Your own slash commands</h3>
-            <p>Type <code>/count parcels</code> and press Tab. Edit the built-ins or add your own in Settings: an SQL template with <code>{table}</code>, <code>{field}</code> and <code>{n=100}</code>, with a live preview.</p>
-          </div>
-          <figure class="shot"><video src="clips/commands.mp4" poster="img/commands.png" autoplay loop muted playsinline preload="metadata" aria-label="Slash command editor with a live preview"></video></figure>
-        </div>
-
-        <div class="row">
-          <div class="txt">
-            <p class="tag">Sharing</p>
-            <h3>Copy as image</h3>
-            <p>Need to show someone a result? One click copies a PNG of the table to your clipboard, ready to paste into Telegram or Slack. There is also Copy for AI agent, which gives you markdown with the query and column types.</p>
-          </div>
-          <figure class="shot shot-wide"><img src="img/copy-image.png" alt="A table copied as a PNG image" width="1691" height="396" loading="lazy"></figure>
+        <div class="board board-releases">
+          <h3 class="board-title">Releases</h3>
+          <table class="departures releases">
+            <caption class="sr">Recent releases</caption>
+            <thead>
+              <tr><th scope="col">Version</th><th scope="col">Date</th><th scope="col">Status</th></tr>
+            </thead>
+            <tbody data-releases>
+              <tr class="now"><th scope="row" data-flaps>0.0.9</th><td class="fig">2026-10-16</td><td><a href="https://github.com/yoouTaro/rgrip/releases/tag/v0.0.9-alpha">Latest</a></td></tr>
+              <tr class="past"><th scope="row">0.0.8</th><td class="fig">2026-10-14</td><td><a href="https://github.com/yoouTaro/rgrip/releases/tag/v0.0.8-alpha">Notes</a></td></tr>
+              <tr class="past"><th scope="row">0.0.7</th><td class="fig">2026-10-13</td><td><a href="https://github.com/yoouTaro/rgrip/releases/tag/v0.0.7-alpha">Notes</a></td></tr>
+              <tr class="past"><th scope="row">0.0.6</th><td class="fig">2026-10-13</td><td><a href="https://github.com/yoouTaro/rgrip/releases/tag/v0.0.6-alpha">Notes</a></td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </section>
 
-    <section id="shortcuts" class="section">
-      <div class="wrap narrow">
-        <h2>Keyboard shortcuts</h2>
-        <dl class="keys">
-          <div><dt><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></kbd><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Return"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg></kbd></dt><dd>Run statement</dd></div>
-          <div><dt><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Shift"><path d="M9 18v-6H5l7-7 7 7h-4v6H9z"/></svg></kbd><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></kbd><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Return"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg></kbd></dt><dd>Run all (script)</dd></div>
-          <div><dt><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></kbd><kbd>S</kbd></dt><dd>Save query / save edits</dd></div>
-          <div><dt><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Shift"><path d="M9 18v-6H5l7-7 7 7h-4v6H9z"/></svg></kbd><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></kbd><kbd>F</kbd></dt><dd>Format SQL</dd></div>
-          <div><dt><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></kbd><kbd>N</kbd></dt><dd>New query</dd></div>
-          <div><dt><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></kbd><kbd>W</kbd></dt><dd>Close tab</dd></div>
-          <div><dt><kbd><svg class="kicon" viewBox="0 0 24 24" aria-label="Command"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></kbd><kbd>J</kbd></dt><dd>Go to column</dd></div>
-          <div><dt><kbd>Tab</kbd></dt><dd>Expand slash command</dd></div>
-        </dl>
-      </div>
-    </section>
-
-    <section id="download" class="section alt">
-      <div class="wrap narrow center">
-        <h2>Get rgrip</h2>
-        <p class="sub">Grab the Apple silicon zip from GitHub Releases, unzip, and open. Updates arrive in-app.</p>
-        <div class="cta center-cta">
-          <a class="btn btn-primary" data-download href="https://github.com/yoouTaro/rgrip/releases">Download for macOS</a>
-          <a class="btn btn-ghost" href="https://github.com/yoouTaro/rgrip">Star on GitHub</a>
-        </div>
-        <h3 class="mt">Build from source</h3>
-        <p class="sub">Needs Rust 1.88 or newer.</p>
-        <pre class="code" tabindex="0"><code>git clone https://github.com/yoouTaro/rgrip &amp;&amp; cd rgrip &amp;&amp; cargo run -p rgrip</code></pre>
-      </div>
-    </section>
-
-    <section id="support" class="section alt">
-      <div class="wrap narrow center">
-        <h2>Buy me a coffee</h2>
-        <p class="sub">rgrip is free and open source. If it saves you time, a coffee helps keep the late-night commits flowing. Sponsorships go through GitHub Sponsors, which passes on 100% to the maintainer.</p>
-        <a class="btn btn-coffee" data-donate href="https://github.com/sponsors/yoouTaro"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 2v2"/><path d="M14 2v2"/><path d="M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/><path d="M6 2v2"/></svg>Buy me a coffee</a>
-        <p class="vibe">Built in conversation with an AI pair programmer, then reviewed and tested by a human.</p>
-      </div>
+    <section class="support" id="support">
+      <div class="wrap"><div class="support-box">
+        <p>rgrip is free and open source. If it saves you time, you can support it through GitHub Sponsors.</p>
+        <a class="btn btn-steel" data-donate href="https://github.com/sponsors/yoouTaro"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 2v2"/><path d="M14 2v2"/><path d="M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1"/><path d="M6 2v2"/></svg><span>Buy me a coffee</span></a>
+      </div></div>
     </section>
   </main>
 
-  <footer class="footer">
+  <footer class="foot">
     <div class="wrap foot-in">
-      <span>© <span id="year">2026</span> rgrip · MIT OR Apache-2.0</span>
-      <span><a href="https://github.com/yoouTaro/rgrip">GitHub</a> · <a href="https://github.com/yoouTaro/rgrip/releases">Releases</a></span>
+      <span>© <span id="year">2026</span> rgrip · MIT OR Apache-2.0 · Built with an AI pair programmer, reviewed and tested by a human.</span>
+      <span><a href="https://github.com/yoouTaro/rgrip">GitHub</a> · <a href="https://github.com/yoouTaro/rgrip/releases">Releases</a> · <a href="https://github.com/yoouTaro/rgrip/blob/main/CHANGELOG.md">Changelog</a></span>
     </div>
   </footer>
 </body>

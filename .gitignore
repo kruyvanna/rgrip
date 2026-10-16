@@ -4,3 +4,6 @@ dev/ssh/id_ed25519*
 dist/
 .DS_Store
 .claude/
+.impeccable/review/
+.impeccable/direction*.json
+.impeccable/questions/

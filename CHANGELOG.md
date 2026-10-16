@@ -5,6 +5,8 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.0.9-alpha] - 2026-10-16
+
 ### Added
 - Read-only connections: a checkbox in the connection dialog makes the session read-only on the server (including the per-database connections), so Postgres refuses writes with "This connection is read-only". A lock badge shows in the explorer, console toolbar and status bar, and inline editing is turned off.
 - Confirm before risky statements: Run / Run all asks first for `DELETE`/`UPDATE` without `WHERE`, `TRUNCATE`, `DROP` and `ALTER … DROP` on any connection, and for any write on a red (production) connection, listing each statement with the reason. Cancel is the default; ⌘↩ runs anyway. Saving inline edits on a red connection asks once.
@@ -19,6 +21,7 @@ All notable changes to rgrip are documented here. The format is based on
 - ⌘/ comments or uncomments the selected lines (or the cursor's line) with `--` in the console.
 
 ### Changed
+- New site: leads with the map and import; the other features are in one short list.
 - The console's schema list stays open while you tick several schemas; click outside to close it.
 - Passwords, SSH passwords and key passphrases are stored in the macOS Keychain instead of plain text in `connections.toml`. Existing plain-text secrets migrate automatically; if the Keychain is unavailable rgrip warns once and falls back to the file.
 
@@ -128,7 +131,8 @@ First alpha: a minimal DataGrip-style PostgreSQL client written in Rust.
 - Khmer typed into the SQL editor is not shaped yet.
 - Only macOS on Apple silicon is published; other platforms can build from source.
 
-[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.8-alpha...HEAD
+[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.9-alpha...HEAD
+[0.0.9-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.9-alpha
 [0.0.8-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.8-alpha
 [0.0.7-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.7-alpha
 [0.0.6-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.6-alpha

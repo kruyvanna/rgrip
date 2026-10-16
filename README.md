@@ -68,6 +68,10 @@
 
 <table>
   <tr>
+    <td><img src="docs/clips/linked.gif" alt="Linked map and grid"><br><sub>Split view: rows selected in the grid light up on the map</sub></td>
+    <td><img src="docs/screenshots/import-markets.png" alt="Import data"><br><sub>Import a CSV, GeoJSON or Shapefile into a table</sub></td>
+  </tr>
+  <tr>
     <td><img src="docs/clips/map.gif" alt="PostGIS map"><br><sub>PostGIS map: districts, parcels and landmarks</sub></td>
     <td><img src="docs/clips/edit.gif" alt="Inline editing"><br><sub>Inline editing with a date picker and pending changes</sub></td>
   </tr>
