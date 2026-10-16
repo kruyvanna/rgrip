@@ -5,6 +5,8 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.0.10-alpha] - 2026-10-16
+
 ### Added
 - Quotes and brackets close themselves in the console: typing `'`, `"`, `(` or `[` adds the closing one, typing the closer steps over it, Backspace in an empty pair removes both, and a selection gets wrapped.
 
@@ -137,7 +139,8 @@ First alpha: a minimal DataGrip-style PostgreSQL client written in Rust.
 - Khmer typed into the SQL editor is not shaped yet.
 - Only macOS on Apple silicon is published; other platforms can build from source.
 
-[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.9-alpha...HEAD
+[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.10-alpha...HEAD
+[0.0.10-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.10-alpha
 [0.0.9-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.9-alpha
 [0.0.8-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.8-alpha
 [0.0.7-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.7-alpha
