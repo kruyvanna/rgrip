@@ -2046,6 +2046,14 @@ impl App {
                     return advance(self);
                 }
             }
+            "hover" => {
+                // `hover:x,y`: move the pointer there (no click).
+                let (x, y) = arg.split_once(',').unwrap_or(("0", "0"));
+                let pos = egui::pos2(x.trim().parse().unwrap_or(0.0), y.trim().parse().unwrap_or(0.0));
+                self.demo_input.push(egui::Event::PointerMoved(pos));
+                self.egui_ctx.request_repaint();
+                return advance(self);
+            }
             "drag" => {
                 // `drag:x1,y1,x2,y2`: press, move over ten frames, release.
                 let v: Vec<f32> = arg.split(',').filter_map(|n| n.trim().parse().ok()).collect();

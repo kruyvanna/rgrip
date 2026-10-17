@@ -240,6 +240,21 @@ impl Layer {
         )
     }
 
+    /// The extent of the features whose `column` has `value` (a category).
+    pub fn class_extent_sql(&self, column: &str, value: Option<&str>) -> String {
+        let (t, g) = (self.table_ref(), self.geom());
+        let c = crate::sql::quote_ident(column);
+        let is = match value {
+            Some(v) => format!("({c})::text = '{}'", v.replace('\'', "''")),
+            None => format!("{c} is null"),
+        };
+        format!(
+            "with s as (select coalesce(nullif(ST_SRID({g}), 0), 4326) as srid from {t} where {g} is not null limit 1) \
+             select ST_Transform(ST_SetSRID(ST_Extent({g})::geometry, (select srid from s)), 4326), count(*) from {t} where {is}{}",
+            self.filter_and()
+        )
+    }
+
     /// The most common values of `column`, with counts.
     pub fn classes_sql(&self, column: &str, limit: usize) -> String {
         let f = self.filter.trim();
@@ -661,6 +676,16 @@ impl Layout {
     }
 
     /// Center and scale to the visible layers, with some room around them.
+    /// Center and scale to a lon/lat box (at least `min_scale`).
+    pub fn fit_bounds(&mut self, lo: Coord, hi: Coord, min_scale: f64) {
+        let (a, b) = (merc(lo), merc(hi));
+        let mid = unmerc([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]);
+        let f = self.frame();
+        let span = ((b[0] - a[0]).abs() / f.w).max((b[1] - a[1]).abs() / f.h).max(1e-9) * 1.12;
+        self.center = mid;
+        self.scale = round_scale(span * 1000.0 * mid[1].to_radians().cos()).clamp(min_scale.max(100.0), 50_000_000.0);
+    }
+
     pub fn fit(&mut self) {
         let mut lo = [f64::MAX; 2];
         let mut hi = [f64::MIN; 2];
@@ -760,6 +785,39 @@ impl Layout {
     /// The page as SVG (mm). `tile` returns a basemap tile's image bytes
     /// (PNG or JPEG), `None` to leave it out; `dpi` picks the tile zoom.
     pub fn svg(&self, tile: &mut dyn FnMut(u8, u32, u32) -> Option<Vec<u8>>, dpi: f64) -> String {
+        self.svg_with(tile, dpi, true)
+    }
+
+    /// The page without the title, legend, scale bar and north arrow (the
+    /// preview draws those separately, so dragging them needs no re-render).
+    pub fn svg_map(&self, tile: &mut dyn FnMut(u8, u32, u32) -> Option<Vec<u8>>, dpi: f64) -> String {
+        self.svg_with(tile, dpi, false)
+    }
+
+    /// One element alone, as a small SVG, and the page area (mm) it covers
+    /// (its box with a little room for strokes and halos). `None` when hidden.
+    pub fn element_svg(&self, e: Element) -> Option<(String, Rect)> {
+        if !self.item(e).visible || (e == Element::Title && self.title.trim().is_empty()) || (e == Element::Legend && self.layers.is_empty()) {
+            return None;
+        }
+        let b = self.boxes()[e as usize];
+        let pad = 1.5;
+        let r = Rect { x: b.x - pad, y: b.y - pad, w: b.w + 2.0 * pad, h: b.h + 2.0 * pad };
+        let mut s = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}mm" height="{}mm" viewBox="{} {} {} {}" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">"#,
+            n(r.w),
+            n(r.h),
+            n(r.x),
+            n(r.y),
+            n(r.w),
+            n(r.h)
+        );
+        self.elements_svg(&mut s, Some(e));
+        s.push_str("</svg>");
+        Some((s, r))
+    }
+
+    fn svg_with(&self, tile: &mut dyn FnMut(u8, u32, u32) -> Option<Vec<u8>>, dpi: f64, elements: bool) -> String {
         let (pw, ph) = self.page_mm();
         let f = self.frame();
         let mut s = String::new();
@@ -821,7 +879,9 @@ impl Layout {
         s.push_str("</g>");
         let _ = write!(s, r##"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#222" stroke-width="0.3"/>"##, n(f.x), n(f.y), n(f.w), n(f.h));
         s.push_str(&grid_labels);
-        self.elements_svg(&mut s);
+        if elements {
+            self.elements_svg(&mut s, None);
+        }
         s.push_str("</svg>");
         s
     }
@@ -907,10 +967,12 @@ impl Layout {
         }
     }
 
-    fn elements_svg(&self, s: &mut String) {
+    /// The page elements (or just `only`).
+    fn elements_svg(&self, s: &mut String, only: Option<Element>) {
+        let want = |e: Element| only.is_none_or(|o| o == e);
         let boxes = self.boxes();
         let card = r##"fill="#fff" fill-opacity="0.92" stroke="#222" stroke-opacity="0.25" stroke-width="0.25""##;
-        if self.item(Element::Title).visible && !self.title.trim().is_empty() {
+        if want(Element::Title) && self.item(Element::Title).visible && !self.title.trim().is_empty() {
             let b = boxes[Element::Title as usize];
             let ts = self.title_size * PT;
             let _ = write!(
@@ -923,7 +985,7 @@ impl Layout {
                 esc(self.title.trim())
             );
         }
-        if self.item(Element::Legend).visible && !self.layers.is_empty() {
+        if want(Element::Legend) && self.item(Element::Legend).visible && !self.layers.is_empty() {
             let b = boxes[Element::Legend as usize];
             let _ = write!(s, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="1" {card}/>"#, n(b.x), n(b.y), n(b.w), n(b.h));
             let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="#111">{}</text>"##, n(b.x + 4.0), n(b.y + 6.0), n(LEGEND_TITLE), esc(&self.legend_title));
@@ -959,7 +1021,7 @@ impl Layout {
                 let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" fill="#222">{}</text>"##, n(sx + 8.0), n(sy + 3.0), n(LEGEND_TEXT), lines(&row.label, sx + 8.0));
             }
         }
-        if self.item(Element::ScaleBar).visible {
+        if want(Element::ScaleBar) && self.item(Element::ScaleBar).visible {
             let b = boxes[Element::ScaleBar as usize];
             let (len, label) = self.scale_bar();
             let _ = write!(s, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="1" {card}/>"#, n(b.x), n(b.y), n(b.w), n(b.h));
@@ -973,7 +1035,7 @@ impl Layout {
             let _ = write!(s, r##"<text x="{}" y="{}" font-size="2.6" fill="#222" text-anchor="end">{}</text>"##, n(x0 + len), n(y - 1.2), esc(&label));
             let _ = write!(s, r##"<text x="{}" y="{}" font-size="2.4" fill="#555">1:{}</text>"##, n(x0), n(y + 5.0), thousands(self.scale));
         }
-        if self.item(Element::North).visible {
+        if want(Element::North) && self.item(Element::North).visible {
             let b = boxes[Element::North as usize];
             let (cx, top) = (b.x + b.w / 2.0, b.y + 1.0);
             let _ = write!(
@@ -1338,6 +1400,24 @@ mod tests {
         assert!(svg.contains("′E"));
         l.graticule.labels = false;
         assert!(!l.svg(&mut |_, _, _| None, 150.0).contains("′E"));
+    }
+
+    #[test]
+    fn elements_render_on_their_own() {
+        let mut l = layout_with(vec![Geometry::Point([104.91, 11.56])]);
+        l.title = "Parcels".into();
+        let map = l.svg_map(&mut |_, _, _| None, 150.0);
+        assert!(!map.contains("Parcels") && !map.contains("Legend") && map.contains("<circle"));
+        let (title, r) = l.element_svg(Element::Title).unwrap();
+        assert!(title.contains("Parcels") && !title.contains("Legend"));
+        assert!(r.contains(l.item(Element::Title).pos));
+        l.item_mut(Element::North).visible = false;
+        assert!(l.element_svg(Element::North).is_none());
+        let sql = l.layers[0].class_extent_sql("status", Some("it's"));
+        assert!(sql.contains("(\"status\")::text = 'it''s'"), "{sql}");
+        assert!(l.layers[0].class_extent_sql("status", None).contains("\"status\" is null"));
+        l.fit_bounds([104.9, 11.55], [104.9, 11.55], 2000.0);
+        assert_eq!(l.scale, 2000.0);
     }
 
     #[test]

@@ -62,7 +62,7 @@ enum Job {
 enum Done {
     /// The page it was drawn for comes back too, so the picture can be
     /// stretched to a new view until the next one arrives.
-    Preview { version: u64, image: ColorImage, layout: Box<Layout> },
+    Preview { version: u64, image: ColorImage, layout: Box<Layout>, elements: Vec<(Element, ColorImage, layout::Rect)> },
     Exported(Result<PathBuf, String>),
 }
 
@@ -79,6 +79,8 @@ struct LayerState {
     data: Option<(u64, [f64; 4], f64)>,
     extent: Option<u64>,
     classes: Option<u64>,
+    /// A category's extent, to zoom to.
+    locate: Option<u64>,
     note: Option<(String, bool)>,
     open: bool,
 }
@@ -94,6 +96,11 @@ pub struct LayoutTab {
     /// When the view last moved (data reloads wait for it to settle).
     moved_at: Instant,
     texture: Option<(u64, TextureHandle, Box<Layout>)>,
+    /// The page elements, drawn on their own so dragging them is instant:
+    /// each texture and the page area it was drawn for.
+    element_tex: Vec<(Element, TextureHandle, layout::Rect)>,
+    /// The category row under the pointer: its features get rings on the map.
+    hover_class: Option<(u64, Option<String>)>,
     jobs: mpsc::Sender<Job>,
     done: mpsc::Receiver<Done>,
     drag: Option<Drag>,
@@ -124,6 +131,8 @@ impl LayoutTab {
             sent: 0,
             moved_at: Instant::now(),
             texture: None,
+            element_tex: Vec::new(),
+            hover_class: None,
             jobs,
             done,
             drag: None,
@@ -196,6 +205,16 @@ impl LayoutTab {
                 layer.values = values.into();
                 layer.loaded = Some((bbox, scale));
             }
+            Ok(LayerResult::Extent(extent, _)) if state.locate == Some(seq) => {
+                state.locate = None;
+                match extent {
+                    Some((lo, hi)) => {
+                        self.layout.fit_bounds(lo, hi, 2000.0);
+                        self.moved_at = Instant::now() - Duration::from_secs(1);
+                    }
+                    None => self.status = Some(("No features with that value".into(), true, Instant::now())),
+                }
+            }
             Ok(LayerResult::Extent(extent, total)) => {
                 if state.extent != Some(seq) {
                     return;
@@ -217,7 +236,7 @@ impl LayoutTab {
                     return;
                 }
                 state.classes = None;
-                if let Style::Categories { classes, more, .. } = &mut layer.style {
+                if let Style::Categories { classes, more, column } = &mut layer.style {
                     *more = values.len() > MAX_CLASSES;
                     *classes = values
                         .into_iter()
@@ -299,9 +318,13 @@ impl LayoutTab {
         let mut actions = Vec::new();
         while let Ok(done) = self.done.try_recv() {
             match done {
-                Done::Preview { version, image, layout } => {
+                Done::Preview { version, image, layout, elements } => {
                     let tex = ui.ctx().load_texture("map-layout-preview", image, egui::TextureOptions::LINEAR);
                     self.texture = Some((version, tex, layout));
+                    self.element_tex = elements
+                        .into_iter()
+                        .map(|(e, img, r)| (e, ui.ctx().load_texture(format!("map-layout-{e:?}"), img, egui::TextureOptions::LINEAR), r))
+                        .collect();
                 }
                 Done::Exported(r) => {
                     self.exporting = false;
@@ -334,6 +357,8 @@ impl LayoutTab {
 
     fn side(&mut self, ui: &mut Ui, catalog: &Catalog, actions: &mut Vec<Action>) {
         let before = self.layout.clone();
+        self.hover_class = None;
+        let mut hover_class = None;
 
         section(ui, "Page", true);
         row(ui, "Size", |ui| {
@@ -445,6 +470,7 @@ impl LayoutTab {
                 .map(|t| t.columns.iter().filter(|(_, ty)| !ty.starts_with("geometry") && !ty.starts_with("geography")).map(|(c, _)| c.clone()).collect())
                 .unwrap_or_default();
             let mut queries = Vec::new();
+            let mut locate: Option<String> = None;
             let state = self.states.entry(id).or_default();
             let loading = state.data.is_some() || state.extent.is_some() || state.classes.is_some();
             let layer = &mut self.layout.layers[i];
@@ -533,7 +559,7 @@ impl LayoutTab {
                     ui.add(egui::Slider::new(&mut layer.fill_opacity, 0.0..=1.0).max_decimals(2));
                     ui.end_row();
                 });
-                if let Style::Categories { classes, more, .. } = &mut layer.style {
+                if let Style::Categories { classes, more, column } = &mut layer.style {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Categories").size(11.5).color(theme::MUTED()));
@@ -545,18 +571,30 @@ impl LayoutTab {
                     // Fixed columns: check, color, label, count (right-aligned).
                     const COUNT_W: f32 = 50.0;
                     let gap = ui.spacing().item_spacing.x;
-                    let label_w = (ui.available_width() - 22.0 - 40.0 - COUNT_W - 3.0 * gap - 12.0).max(60.0);
+                    const LOCATE_W: f32 = 20.0;
+                    let label_w = (ui.available_width() - 22.0 - 40.0 - COUNT_W - LOCATE_W - 4.0 * gap - 12.0).max(60.0);
+                    let column = column.clone();
                     for c in classes.iter_mut() {
-                        ui.horizontal_top(|ui| {
+                        let in_view = layer.values.iter().filter(|v| **v == c.value).count();
+                        let row = ui.horizontal_top(|ui| {
                             ui.add_sized([22.0, 22.0], egui::Checkbox::without_text(&mut c.visible)).on_hover_text("Show this value on the map and in the legend");
                             ui.color_edit_button_srgb(&mut c.color);
                             label_edit(ui, &mut c.label, "", label_w);
                             ui.allocate_ui_with_layout(vec2(COUNT_W, 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.set_width(COUNT_W);
                                 ui.label(RichText::new(layout::thousands(c.count as f64)).size(11.0).color(theme::FAINT()))
-                                    .on_hover_text("Rows in the whole table with this value");
+                                    .on_hover_text(format!("{} in the table, {in_view} in view", layout::thousands(c.count as f64)));
                             });
+                            let locate_btn = egui::Button::image(icons::image(ui.ctx(), Svg::Locate, 13.0, theme::MUTED())).frame(false);
+                            if ui.add(locate_btn).on_hover_text("Zoom the map to this value's features").clicked() {
+                                let sql = layer_extent_sql(&column, c.value.as_deref(), id, &before);
+                                locate = sql;
+                            }
                         });
+                        // Pointing at a row rings its features on the map.
+                        if ui.rect_contains_pointer(row.response.rect) {
+                            hover_class = Some((id, c.value.clone()));
+                        }
                     }
                     if *more {
                         hint(ui, &format!("The other values draw as \"Other\" in the layer color (top {MAX_CLASSES} shown)"));
@@ -581,6 +619,11 @@ impl LayoutTab {
             for (kind, sql) in queries {
                 actions.push(self.query(id, kind, sql));
             }
+            if let Some(sql) = locate {
+                self.seq += 1;
+                self.states.entry(id).or_default().locate = Some(self.seq);
+                actions.push(Action { layer: id, seq: self.seq, kind: LayerQuery::Extent, sql });
+            }
         }
         if let Some((a, b)) = swap {
             self.layout.layers.swap(a, b);
@@ -589,6 +632,8 @@ impl LayoutTab {
             let id = self.layout.layers.remove(i).id;
             self.states.remove(&id);
         }
+
+        self.hover_class = hover_class;
 
         section(ui, "On the page", false);
         hint(ui, "Drag them on the page to place them");
@@ -793,6 +838,44 @@ impl LayoutTab {
                 framed.image(tex.id(), Rect::from_min_max(to_screen(a), to_screen(b)), uv, Color32::WHITE);
             }
         }
+        // Page elements, each at its current spot.
+        if let Some((_, _, drawn)) = &self.texture {
+            for (e, tex, r) in &self.element_tex {
+                if !self.layout.item(*e).visible {
+                    continue;
+                }
+                let (now, then) = (self.layout.item(*e).pos, drawn.item(*e).pos);
+                let (dx, dy) = (now[0] - then[0], now[1] - then[1]);
+                let rect = Rect::from_min_max(to_screen([r.x + dx, r.y + dy]), to_screen([r.x + r.w + dx, r.y + r.h + dy]));
+                painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+            }
+        }
+        // The hovered category's features in view: pulsing rings.
+        if let Some((id, value)) = &self.hover_class
+            && let Some(layer) = self.layout.layers.iter().find(|l| l.id == *id)
+        {
+            let f = self.layout.frame();
+            let clip = Rect::from_min_max(to_screen([f.x, f.y]), to_screen([f.x + f.w, f.y + f.h]));
+            let rings = painter.with_clip_rect(clip);
+            let t = ui.input(|i| i.time) as f32;
+            let r = 9.0 + 4.0 * (t * 5.0).sin();
+            let mut shown = 0;
+            for (g, v) in layer.shapes.iter().zip(layer.values.iter()) {
+                if v != value || shown >= 400 {
+                    continue;
+                }
+                let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+                g.for_each_coord(&mut |c| {
+                    lo = [lo[0].min(c[0]), lo[1].min(c[1])];
+                    hi = [hi[0].max(c[0]), hi[1].max(c[1])];
+                });
+                let at = to_screen(self.layout.to_page([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0]));
+                rings.circle_stroke(at, r + 2.0, Stroke::new(3.0, Color32::WHITE));
+                rings.circle_stroke(at, r, Stroke::new(2.0, theme::ACCENT()));
+                shown += 1;
+            }
+            ui.ctx().request_repaint();
+        }
         if self.texture.as_ref().is_none_or(|(v, _, _)| *v != self.version) || self.busy() {
             painter.text(page.right_bottom() + vec2(-8.0, -8.0), Align2::RIGHT_BOTTOM, if self.busy() { "Loading…" } else { "Rendering…" }, FontId::proportional(11.0), Color32::from_gray(120));
         }
@@ -825,9 +908,9 @@ impl LayoutTab {
                     self.moved.insert(*e);
                     let b = boxes[*e as usize];
                     let pos = snap([p[0] - grab[0], p[1] - grab[1]], [b.w, b.h], &self.layout);
+                    // Only the element's own picture moves: no re-render.
                     self.layout.item_mut(*e).pos = pos;
                     self.layout.clamp_items();
-                    self.version += 1;
                 }
                 Some(Drag::Pan(last)) => {
                     let d = [p[0] - last[0], p[1] - last[1]];
@@ -875,6 +958,11 @@ impl LayoutTab {
             );
         }
     }
+}
+
+/// The extent query for one category of a layer.
+fn layer_extent_sql(column: &str, value: Option<&str>, id: u64, layout: &Layout) -> Option<String> {
+    layout.layers.iter().find(|l| l.id == id).map(|l| l.class_extent_sql(column, value))
 }
 
 /// A label field: Enter adds a line break (for the legend), and Khmer is
@@ -967,6 +1055,11 @@ fn same(a: &Layout, b: &Layout) -> bool {
 /// The SVG for `layout`, with tiles from `cache`, filled from disk and (with
 /// `network`) downloaded as needed. Also returns whether tiles are missing.
 fn page_svg(layout: &Layout, dpi: f64, cache: &mut HashMap<(Basemap, u8, u32, u32), Vec<u8>>, network: bool) -> (String, bool) {
+    page_svg_with(layout, dpi, cache, network, true)
+}
+
+/// [`page_svg`], optionally without the page elements (the preview draws them apart).
+fn page_svg_with(layout: &Layout, dpi: f64, cache: &mut HashMap<(Basemap, u8, u32, u32), Vec<u8>>, network: bool, elements: bool) -> (String, bool) {
     let (z, tiles) = layout.tiles(dpi);
     let missing: Vec<(u32, u32)> = tiles.iter().copied().filter(|(x, y)| !cache.contains_key(&(layout.basemap, z, *x, *y))).collect();
     let mut incomplete = false;
@@ -981,7 +1074,9 @@ fn page_svg(layout: &Layout, dpi: f64, cache: &mut HashMap<(Basemap, u8, u32, u3
         cache.clear();
     }
     let basemap = layout.basemap;
-    (layout.svg(&mut |z, x, y| cache.get(&(basemap, z, x, y)).cloned(), dpi), incomplete)
+    let mut tile = |z, x, y| cache.get(&(basemap, z, x, y)).cloned();
+    let svg = if elements { layout.svg(&mut tile, dpi) } else { layout.svg_map(&mut tile, dpi) };
+    (svg, incomplete)
 }
 
 fn render_loop(jobs: mpsc::Receiver<Job>, done: mpsc::Sender<Done>, ctx: egui::Context) {
@@ -1000,20 +1095,24 @@ fn render_loop(jobs: mpsc::Receiver<Job>, done: mpsc::Sender<Done>, ctx: egui::C
                         continue;
                     }
                     let dpi = (px_per_mm as f64 * 25.4).clamp(48.0, 150.0);
+                    // The SVG is in mm; usvg sizes it at 96 px per inch.
+                    let raster = |svg: &str| {
+                        snapshot::render_at(svg, px_per_mm * 25.4 / 96.0).map(|p| ColorImage::from_rgba_premultiplied([p.width() as usize, p.height() as usize], p.data()))
+                    };
+                    let elements: Vec<(Element, ColorImage, layout::Rect)> =
+                        Element::ALL.into_iter().filter_map(|e| layout.element_svg(e).and_then(|(svg, r)| raster(&svg).map(|img| (e, img, r)))).collect();
                     let render = |svg: &str| {
-                        // The SVG is in mm; usvg sizes it at 96 px per inch.
-                        if let Some(p) = snapshot::render_at(svg, px_per_mm * 25.4 / 96.0) {
-                            let image = ColorImage::from_rgba_premultiplied([p.width() as usize, p.height() as usize], p.data());
-                            let _ = done.send(Done::Preview { version, image, layout: Box::new(layout.clone()) });
+                        if let Some(image) = raster(svg) {
+                            let _ = done.send(Done::Preview { version, image, layout: Box::new(layout.clone()), elements: elements.clone() });
                             ctx.request_repaint();
                         }
                     };
                     // Draw now with the tiles at hand, then again once the
                     // missing ones are downloaded.
-                    let (svg, incomplete) = page_svg(&layout, dpi, &mut cache, false);
+                    let (svg, incomplete) = page_svg_with(&layout, dpi, &mut cache, false, false);
                     render(&svg);
                     if incomplete {
-                        let (svg, _) = page_svg(&layout, dpi, &mut cache, true);
+                        let (svg, _) = page_svg_with(&layout, dpi, &mut cache, true, false);
                         render(&svg);
                     }
                 }

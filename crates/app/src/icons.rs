@@ -43,6 +43,7 @@ pub enum Svg {
     ChevronDown,
     ArrowUp,
     ArrowDown,
+    Locate,
 }
 
 impl Svg {
@@ -64,6 +65,7 @@ impl Svg {
             Svg::Copy => lucide(r#"<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>"#),
             Svg::Image => lucide(r#"<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>"#),
             Svg::Bot => lucide(r#"<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>"#),
+            Svg::Locate => lucide(r#"<line x1="2" x2="5" y1="12" y2="12"/><line x1="19" x2="22" y1="12" y2="12"/><line x1="12" x2="12" y1="2" y2="5"/><line x1="12" x2="12" y1="19" y2="22"/><circle cx="12" cy="12" r="7"/>"#),
             Svg::ChevronRight => lucide(r#"<path d="m9 18 6-6-6-6"/>"#),
             Svg::ChevronDown => lucide(r#"<path d="m6 9 6 6 6-6"/>"#),
             Svg::ArrowUp => lucide(r#"<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>"#),
