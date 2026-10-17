@@ -340,6 +340,95 @@ pub struct Layout {
     pub title_size: f64,
     pub legend_title: String,
     pub items: [Item; 4],
+    pub graticule: Graticule,
+}
+
+/// A latitude/longitude grid over the map, labeled along the frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Graticule {
+    pub visible: bool,
+    /// Degrees between lines; `None` picks a round step for the view.
+    pub interval: Option<f64>,
+    pub labels: bool,
+    /// Degrees, minutes, seconds instead of decimal degrees.
+    pub dms: bool,
+    pub color: [u8; 3],
+    pub opacity: f64,
+}
+
+impl Default for Graticule {
+    fn default() -> Self {
+        Self { visible: false, interval: None, labels: true, dms: false, color: [60, 60, 60], opacity: 0.5 }
+    }
+}
+
+/// Graticule steps, in degrees: 1″ … 30″, 1′ … 30′, 1° … 30°.
+pub const GRATICULE_STEPS: [f64; 18] = [
+    1.0 / 3600.0,
+    2.0 / 3600.0,
+    5.0 / 3600.0,
+    10.0 / 3600.0,
+    15.0 / 3600.0,
+    30.0 / 3600.0,
+    1.0 / 60.0,
+    2.0 / 60.0,
+    5.0 / 60.0,
+    10.0 / 60.0,
+    15.0 / 60.0,
+    30.0 / 60.0,
+    1.0,
+    2.0,
+    5.0,
+    10.0,
+    15.0,
+    30.0,
+];
+
+/// Steps for decimal-degree labels, so they read 104.95°, not 104.9667°.
+pub const GRATICULE_STEPS_DECIMAL: [f64; 16] = [0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0];
+
+/// The steps that suit the label format.
+pub fn graticule_steps(dms: bool) -> &'static [f64] {
+    if dms { &GRATICULE_STEPS } else { &GRATICULE_STEPS_DECIMAL }
+}
+
+/// A graticule step for display: 30″, 5′, 2° (or 0.05° for decimal steps).
+pub fn step_label(deg: f64) -> String {
+    if GRATICULE_STEPS_DECIMAL.contains(&deg) && !GRATICULE_STEPS.contains(&deg) {
+        let s = format!("{deg:.4}");
+        return format!("{}°", s.trim_end_matches('0').trim_end_matches('.'));
+    }
+    let secs = (deg * 3600.0).round();
+    if secs < 60.0 {
+        format!("{secs}″")
+    } else if secs < 3600.0 {
+        format!("{}′", secs / 60.0)
+    } else {
+        format!("{}°", secs / 3600.0)
+    }
+}
+
+/// A coordinate label: `lon` picks E/W, else N/S.
+pub fn coord_label(v: f64, lon: bool, dms: bool) -> String {
+    let hemi = match (lon, v < -1e-9) {
+        (true, false) => "E",
+        (true, true) => "W",
+        (false, false) => "N",
+        (false, true) => "S",
+    };
+    let a = v.abs();
+    if !dms {
+        let s = format!("{a:.4}");
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        return format!("{s}°{hemi}");
+    }
+    let total = (a * 3600.0).round() as i64;
+    let (d, m, sec) = (total / 3600, total / 60 % 60, total % 60);
+    match (m, sec) {
+        (0, 0) => format!("{d}°{hemi}"),
+        (_, 0) => format!("{d}°{m:02}′{hemi}"),
+        _ => format!("{d}°{m:02}′{sec:02}″{hemi}"),
+    }
 }
 
 impl Default for Layout {
@@ -356,6 +445,7 @@ impl Default for Layout {
             title_size: 20.0,
             legend_title: "Legend".into(),
             items: [Item { visible: true, pos: [0.0, 0.0] }; 4],
+            graticule: Graticule::default(),
         };
         l.place_defaults();
         l
@@ -431,6 +521,69 @@ impl Layout {
             let pos = &mut self.items[e as usize].pos;
             pos[0] = pos[0].clamp(0.0, (w - b.w).max(0.0));
             pos[1] = pos[1].clamp(0.0, (h - b.h).max(0.0));
+        }
+    }
+
+    /// The graticule step in degrees: the chosen one, or the smallest round
+    /// step that leaves lines at least ~35 mm apart.
+    pub fn graticule_step(&self) -> f64 {
+        if let Some(i) = self.graticule.interval {
+            return i;
+        }
+        let deg_per_mm = self.m_per_mm() / (2.0 * std::f64::consts::PI * R / 360.0);
+        graticule_steps(self.graticule.dms).iter().copied().find(|s| s / deg_per_mm >= 35.0).unwrap_or(10.0)
+    }
+
+    fn graticule_svg(&self, s: &mut String) {
+        let g = self.graticule;
+        let f = self.frame();
+        let step = self.graticule_step();
+        let [w, south, e, north] = self.view_bbox(0.0);
+        // Too many lines (a tiny step at a small scale): skip rather than flood.
+        if ((e - w) / step) > 200.0 || ((north - south) / step) > 200.0 {
+            return;
+        }
+        let color = format!("#{:02x}{:02x}{:02x}", g.color[0], g.color[1], g.color[2]);
+        let mut d = String::new();
+        let mut lons = Vec::new();
+        let mut lats = Vec::new();
+        let mut v = (w / step).ceil() * step;
+        while v <= e {
+            let x = self.to_page([v, self.center[1]])[0];
+            let _ = write!(d, "M{} {}V{}", n(x), n(f.y), n(f.y + f.h));
+            lons.push((v, x));
+            v += step;
+        }
+        let mut v = (south / step).ceil() * step;
+        while v <= north {
+            let y = self.to_page([self.center[0], v])[1];
+            let _ = write!(d, "M{} {}H{}", n(f.x), n(y), n(f.x + f.w));
+            lats.push((v, y));
+            v += step;
+        }
+        let _ = write!(s, r#"<path d="{d}" fill="none" stroke="{color}" stroke-opacity="{}" stroke-width="0.18"/>"#, n(g.opacity));
+        if !g.labels {
+            return;
+        }
+        // In the margin when it has room, else just inside the frame.
+        let [mt, mr, mb, ml] = self.margin;
+        let size = 2.3;
+        let halo = r##" stroke="#fff" stroke-width="0.5" paint-order="stroke""##;
+        let text = |s: &mut String, x: f64, y: f64, anchor: &str, inside: bool, label: &str| {
+            let _ = write!(s, r##"<text x="{}" y="{}" font-size="{size}" fill="#333" text-anchor="{anchor}"{}>{}</text>"##, n(x), n(y), if inside { halo } else { "" }, esc(label));
+        };
+        for (v, x) in &lons {
+            let label = coord_label(*v, true, g.dms);
+            let (top, bottom) = (mt >= 5.0, mb >= 5.0);
+            text(s, *x, if top { f.y - 1.2 } else { f.y + size + 1.0 }, "middle", !top, &label);
+            text(s, *x, if bottom { f.y + f.h + size + 1.0 } else { f.y + f.h - 1.2 }, "middle", !bottom, &label);
+        }
+        for (v, y) in &lats {
+            let label = coord_label(*v, false, g.dms);
+            let room = text_w(&label, size) + 2.0;
+            let (left, right) = (ml >= room, mr >= room);
+            text(s, if left { f.x - 1.0 } else { f.x + 1.0 }, y + size * 0.35, if left { "end" } else { "start" }, !left, &label);
+            text(s, if right { f.x + f.w + 1.0 } else { f.x + f.w - 1.0 }, y + size * 0.35, if right { "start" } else { "end" }, !right, &label);
         }
     }
 
@@ -615,6 +768,15 @@ impl Layout {
         for l in self.layers.iter().rev().filter(|l| l.visible) {
             self.layer_svg(&mut s, l);
         }
+        let mut grid_labels = String::new();
+        if self.graticule.visible {
+            // Lines are clipped to the frame; labels may sit in the margin.
+            let mut grid = String::new();
+            self.graticule_svg(&mut grid);
+            let split = grid.find("<text").unwrap_or(grid.len());
+            s.push_str(&grid[..split]);
+            grid_labels = grid[split..].to_string();
+        }
         if self.basemap != Basemap::None {
             let text = self.basemap.attribution();
             let _ = write!(
@@ -628,6 +790,7 @@ impl Layout {
         }
         s.push_str("</g>");
         let _ = write!(s, r##"<rect x="{}" y="{}" width="{}" height="{}" fill="none" stroke="#222" stroke-width="0.3"/>"##, n(f.x), n(f.y), n(f.w), n(f.h));
+        s.push_str(&grid_labels);
         self.elements_svg(&mut s);
         s.push_str("</svg>");
         s
@@ -1114,6 +1277,34 @@ mod tests {
         assert!((two - one - LEGEND_LINE).abs() < 1e-9);
         let svg = l.svg(&mut |_, _, _| None, 150.0);
         assert!(svg.contains("Land parcels<tspan") && svg.contains(">(surveyed 2024)</tspan>"), "{svg}");
+    }
+
+    #[test]
+    fn graticule_lines_and_labels() {
+        assert_eq!(coord_label(104.9, true, false), "104.9°E");
+        assert_eq!(coord_label(-0.5, true, false), "0.5°W");
+        assert_eq!(coord_label(11.5, false, true), "11°30′N");
+        assert_eq!(coord_label(11.0 + 34.0 / 60.0 + 20.0 / 3600.0, false, true), "11°34′20″N");
+        assert_eq!(coord_label(-12.0, false, true), "12°S");
+        assert_eq!(step_label(5.0 / 60.0), "5′");
+        assert_eq!(step_label(30.0 / 3600.0), "30″");
+        assert_eq!(step_label(2.0), "2°");
+        let mut l = Layout::default();
+        l.basemap = Basemap::None;
+        assert!(!l.svg(&mut |_, _, _| None, 150.0).contains("°E"));
+        l.graticule.visible = true;
+        // 1:50,000 on A4: lines a round step apart, at least 35 mm.
+        let step = l.graticule_step();
+        assert!(GRATICULE_STEPS_DECIMAL.contains(&step), "{step}");
+        assert_eq!(step_label(0.05), "0.05°");
+        let svg = l.svg(&mut |_, _, _| None, 150.0);
+        assert!(svg.contains("°E") && svg.contains("°N"), "{svg}");
+        l.graticule.interval = Some(1.0 / 60.0);
+        l.graticule.dms = true;
+        let svg = l.svg(&mut |_, _, _| None, 150.0);
+        assert!(svg.contains("′E"));
+        l.graticule.labels = false;
+        assert!(!l.svg(&mut |_, _, _| None, 150.0).contains("′E"));
     }
 
     #[test]

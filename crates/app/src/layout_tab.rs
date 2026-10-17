@@ -134,8 +134,19 @@ impl LayoutTab {
             fit_pending: true,
             add_search: String::new(),
             moved: HashSet::new(),
-            margins_each: false,
+            // Debug screenshot scenes: `RGRIP_DEMO_LAYOUT_GRID=1` shows the
+            // graticule and the per-side margins.
+            margins_each: cfg!(debug_assertions) && std::env::var("RGRIP_DEMO_LAYOUT_GRID").is_ok(),
         }
+        .with_demo_grid()
+    }
+
+    fn with_demo_grid(mut self) -> Self {
+        if cfg!(debug_assertions) && std::env::var("RGRIP_DEMO_LAYOUT_GRID").is_ok() {
+            self.layout.graticule.visible = true;
+            self.layout.margin = [14.0, 18.0, 14.0, 18.0];
+        }
+        self
     }
 
     fn query(&mut self, layer: u64, kind: LayerQuery, sql: String) -> Action {
@@ -337,12 +348,16 @@ impl LayoutTab {
             ui.selectable_value(&mut self.layout.landscape, false, "Portrait");
             ui.selectable_value(&mut self.layout.landscape, true, "Landscape");
         });
+        // Each side: two rows of two fixed-width fields, so the panel keeps its width.
+        let side = |ui: &mut Ui, name: &str, v: &mut f64| {
+            ui.add_sized([44.0, 20.0], egui::Label::new(RichText::new(name).size(11.5).color(theme::FAINT())));
+            ui.add_sized([56.0, 20.0], egui::DragValue::new(v).range(0.0..=60.0).speed(0.5).max_decimals(1).suffix(" mm"));
+        };
         row(ui, "Margins", |ui| {
             if self.margins_each {
-                for (i, side) in ["T", "R", "B", "L"].into_iter().enumerate() {
-                    ui.label(RichText::new(side).size(11.0).color(theme::FAINT()));
-                    ui.add(egui::DragValue::new(&mut self.layout.margin[i]).range(0.0..=60.0).speed(0.5).max_decimals(1));
-                }
+                let [t, _, b, _] = &mut self.layout.margin;
+                side(ui, "Top", t);
+                side(ui, "Bottom", b);
             } else {
                 let mut all = self.layout.margin[0];
                 if ui.add(egui::DragValue::new(&mut all).range(0.0..=60.0).speed(0.5).max_decimals(1).suffix(" mm")).changed() {
@@ -350,6 +365,13 @@ impl LayoutTab {
                 }
             }
         });
+        if self.margins_each {
+            row(ui, "", |ui| {
+                let [_, r, _, l] = &mut self.layout.margin;
+                side(ui, "Left", l);
+                side(ui, "Right", r);
+            });
+        }
         row(ui, "", |ui| {
             if ui.checkbox(&mut self.margins_each, "Each side").changed() && !self.margins_each {
                 self.layout.margin = [self.layout.margin[0]; 4];
@@ -375,6 +397,39 @@ impl LayoutTab {
             self.layout.fit();
         }
         hint(ui, "Drag the map to pan, scroll over it to zoom");
+        let g = &mut self.layout.graticule;
+        row(ui, "Graticule", |ui| {
+            ui.checkbox(&mut g.visible, "Show").on_hover_text("A latitude/longitude grid, labeled along the frame");
+            if g.visible {
+                ui.checkbox(&mut g.labels, "Labels");
+            }
+        });
+        if g.visible {
+            let auto = format!("Auto ({})", layout::step_label(self.layout.graticule_step()));
+            let g = &mut self.layout.graticule;
+            row(ui, "Every", |ui| {
+                let text = g.interval.map_or(auto.clone(), layout::step_label);
+                egui::ComboBox::from_id_salt("layout-grid-step").width(110.0).selected_text(text).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut g.interval, None, auto.as_str());
+                    for &step in layout::graticule_steps(g.dms) {
+                        ui.selectable_value(&mut g.interval, Some(step), layout::step_label(step));
+                    }
+                });
+            });
+            row(ui, "Labels as", |ui| {
+                let dms = g.dms;
+                ui.selectable_value(&mut g.dms, false, "104.92°");
+                ui.selectable_value(&mut g.dms, true, "104°55′");
+                // A fixed step from the other format would make odd labels.
+                if g.dms != dms {
+                    g.interval = None;
+                }
+            });
+            row(ui, "Line", |ui| {
+                ui.color_edit_button_srgb(&mut g.color);
+                ui.add(egui::Slider::new(&mut g.opacity, 0.1..=1.0).max_decimals(2)).on_hover_text("Line opacity");
+            });
+        }
 
         section(ui, "Layers", false);
         self.add_layer_ui(ui, catalog, actions);
@@ -893,6 +948,7 @@ fn same(a: &Layout, b: &Layout) -> bool {
         && a.title_size == b.title_size
         && a.legend_title == b.legend_title
         && a.items == b.items
+        && a.graticule == b.graticule
         && a.layers.len() == b.layers.len()
         && a.layers.iter().zip(&b.layers).all(|(x, y)| {
             x.id == y.id
