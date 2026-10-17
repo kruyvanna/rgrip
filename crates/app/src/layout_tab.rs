@@ -60,7 +60,9 @@ enum Job {
 }
 
 enum Done {
-    Preview { version: u64, image: ColorImage },
+    /// The page it was drawn for comes back too, so the picture can be
+    /// stretched to a new view until the next one arrives.
+    Preview { version: u64, image: ColorImage, layout: Box<Layout> },
     Exported(Result<PathBuf, String>),
 }
 
@@ -91,7 +93,7 @@ pub struct LayoutTab {
     sent: u64,
     /// When the view last moved (data reloads wait for it to settle).
     moved_at: Instant,
-    texture: Option<(u64, TextureHandle)>,
+    texture: Option<(u64, TextureHandle, Box<Layout>)>,
     jobs: mpsc::Sender<Job>,
     done: mpsc::Receiver<Done>,
     drag: Option<Drag>,
@@ -276,9 +278,9 @@ impl LayoutTab {
         let mut actions = Vec::new();
         while let Ok(done) = self.done.try_recv() {
             match done {
-                Done::Preview { version, image } => {
+                Done::Preview { version, image, layout } => {
                     let tex = ui.ctx().load_texture("map-layout-preview", image, egui::TextureOptions::LINEAR);
-                    self.texture = Some((version, tex));
+                    self.texture = Some((version, tex, layout));
                 }
                 Done::Exported(r) => {
                     self.exporting = false;
@@ -683,8 +685,10 @@ impl LayoutTab {
         let to_mm = |p: Pos2| [((p.x - page.left()) / scale) as f64, ((p.y - page.top()) / scale) as f64];
         let painter = ui.painter_at(ui.max_rect());
 
-        // Ask for a fresh preview once the last one is out of date.
-        if self.sent != self.version {
+        // Ask for a fresh preview once the last one is out of date, but not
+        // mid-zoom or mid-pan: the old picture is stretched meanwhile.
+        let settling = self.moved_at.elapsed() < Duration::from_millis(180) || matches!(self.drag, Some(Drag::Pan(_)));
+        if self.sent != self.version && !settling {
             let px_per_mm = scale * ui.ctx().pixels_per_point();
             let _ = self.jobs.send(Job::Preview { version: self.version, layout: self.layout.clone(), px_per_mm });
             self.sent = self.version;
@@ -692,10 +696,25 @@ impl LayoutTab {
 
         painter.rect_filled(page.translate(vec2(0.0, 6.0)).expand(2.0), 4.0, Color32::from_black_alpha(90));
         painter.rect_filled(page, 0.0, Color32::WHITE);
-        if let Some((_, tex)) = &self.texture {
-            painter.image(tex.id(), page, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+        if let Some((_, tex, drawn)) = &self.texture {
+            let full = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+            let same_view = drawn.center == self.layout.center && drawn.scale == self.layout.scale && drawn.frame() == self.layout.frame();
+            painter.image(tex.id(), page, full, Color32::WHITE);
+            if !same_view && drawn.page_mm() == self.layout.page_mm() {
+                // Where the old map now sits: its frame corners, through the
+                // new view. Draw that part of the old picture there.
+                let f = drawn.frame();
+                let a = self.layout.to_page(drawn.from_page([f.x, f.y]));
+                let b = self.layout.to_page(drawn.from_page([f.x + f.w, f.y + f.h]));
+                let nf = self.layout.frame();
+                let clip = Rect::from_min_max(to_screen([nf.x, nf.y]), to_screen([nf.x + nf.w, nf.y + nf.h]));
+                let uv = Rect::from_min_max(pos2((f.x / pw) as f32, (f.y / ph) as f32), pos2(((f.x + f.w) / pw) as f32, ((f.y + f.h) / ph) as f32));
+                let framed = painter.with_clip_rect(clip);
+                framed.rect_filled(clip, 0.0, Color32::from_gray(238));
+                framed.image(tex.id(), Rect::from_min_max(to_screen(a), to_screen(b)), uv, Color32::WHITE);
+            }
         }
-        if self.texture.as_ref().is_none_or(|(v, _)| *v != self.version) || self.busy() {
+        if self.texture.as_ref().is_none_or(|(v, _, _)| *v != self.version) || self.busy() {
             painter.text(page.right_bottom() + vec2(-8.0, -8.0), Align2::RIGHT_BOTTOM, if self.busy() { "Loading…" } else { "Rendering…" }, FontId::proportional(11.0), Color32::from_gray(120));
         }
 
@@ -884,7 +903,7 @@ fn render_loop(jobs: mpsc::Receiver<Job>, done: mpsc::Sender<Done>, ctx: egui::C
                         // The SVG is in mm; usvg sizes it at 96 px per inch.
                         if let Some(p) = snapshot::render_at(svg, px_per_mm * 25.4 / 96.0) {
                             let image = ColorImage::from_rgba_premultiplied([p.width() as usize, p.height() as usize], p.data());
-                            let _ = done.send(Done::Preview { version, image });
+                            let _ = done.send(Done::Preview { version, image, layout: Box::new(layout.clone()) });
                             ctx.request_repaint();
                         }
                     };
