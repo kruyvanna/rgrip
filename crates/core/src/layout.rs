@@ -343,7 +343,16 @@ pub struct Layout {
     pub title: String,
     /// Title size, points.
     pub title_size: f64,
+    pub title_color: [u8; 3],
+    pub title_bold: bool,
+    /// A white outline around the title letters (reads on any map).
+    pub title_halo: bool,
     pub legend_title: String,
+    /// Legend item text size, points (the rest of the legend scales with it).
+    pub legend_size: f64,
+    pub legend_color: [u8; 3],
+    /// The legend's white box.
+    pub legend_box: bool,
     pub items: [Item; 4],
     pub graticule: Graticule,
 }
@@ -448,7 +457,13 @@ impl Default for Layout {
             layers: Vec::new(),
             title: String::new(),
             title_size: 20.0,
+            title_color: [17, 17, 17],
+            title_bold: true,
+            title_halo: true,
             legend_title: "Legend".into(),
+            legend_size: LEGEND_TEXT / PT,
+            legend_color: [34, 34, 34],
+            legend_box: true,
             items: [Item { visible: true, pos: [0.0, 0.0] }; 4],
             graticule: Graticule::default(),
         };
@@ -720,11 +735,12 @@ impl Layout {
             .map(|r| r.label.lines().map(|l| text_w(l, LEGEND_TEXT)).fold(0.0, f64::max) + if r.indent { 3.0 } else { 0.0 })
             .fold(0.0, f64::max);
         let head_w = text_w(&self.legend_title, LEGEND_TITLE);
+        let k = self.legend_scale();
         let legend = Rect {
             x: at(Element::Legend)[0],
             y: at(Element::Legend)[1],
-            w: (label_w + 13.0).max(head_w + 8.0).max(28.0),
-            h: 9.0 + rows_h + 2.0,
+            w: (label_w + 13.0).max(head_w + 8.0).max(28.0) * k,
+            h: (9.0 + rows_h + 2.0) * k,
         };
         let (bar, label) = self.scale_bar();
         let scale = Rect {
@@ -958,6 +974,11 @@ impl Layout {
         }
     }
 
+    /// The legend's size relative to its default (from the text size).
+    pub fn legend_scale(&self) -> f64 {
+        (self.legend_size * PT / LEGEND_TEXT).clamp(0.4, 4.0)
+    }
+
     /// The page elements (or just `only`).
     fn elements_svg(&self, s: &mut String, only: Option<Element>) {
         let want = |e: Element| only.is_none_or(|o| o == e);
@@ -966,20 +987,29 @@ impl Layout {
         if want(Element::Title) && self.item(Element::Title).visible && !self.title.trim().is_empty() {
             let b = boxes[Element::Title as usize];
             let ts = self.title_size * PT;
+            let halo = if self.title_halo { format!(r##" stroke="#fff" stroke-width="{}" stroke-linejoin="round" paint-order="stroke""##, n(ts * 0.18)) } else { String::new() };
             let _ = write!(
                 s,
-                r##"<text x="{}" y="{}" font-size="{}" font-weight="600" text-anchor="middle" fill="#111" stroke="#fff" stroke-width="{}" stroke-linejoin="round" paint-order="stroke">{}</text>"##,
+                r##"<text x="{}" y="{}" font-size="{}" font-weight="{}" text-anchor="middle" fill="{}"{halo}>{}</text>"##,
                 n(b.x + b.w / 2.0),
                 n(b.y + ts * 1.1),
                 n(ts),
-                n(ts * 0.18),
+                if self.title_bold { 600 } else { 400 },
+                hex(self.title_color),
                 esc(self.title.trim())
             );
         }
         if want(Element::Legend) && self.item(Element::Legend).visible && !self.layers.is_empty() {
-            let b = boxes[Element::Legend as usize];
-            let _ = write!(s, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="1" {card}/>"#, n(b.x), n(b.y), n(b.w), n(b.h));
-            let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="#111">{}</text>"##, n(b.x + 4.0), n(b.y + 6.0), n(LEGEND_TITLE), esc(&self.legend_title));
+            // Laid out at the default size, then scaled about its corner.
+            let k = self.legend_scale();
+            let b0 = boxes[Element::Legend as usize];
+            let b = Rect { w: b0.w / k, h: b0.h / k, ..b0 };
+            let ink = hex(self.legend_color);
+            let _ = write!(s, r#"<g transform="translate({} {}) scale({}) translate({} {})">"#, n(b.x), n(b.y), k, n(-b.x), n(-b.y));
+            if self.legend_box {
+                let _ = write!(s, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="1" {card}/>"#, n(b.x), n(b.y), n(b.w), n(b.h));
+            }
+            let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="{ink}">{}</text>"##, n(b.x + 4.0), n(b.y + 6.0), n(LEGEND_TITLE), esc(&self.legend_title));
             // Style per row comes from its layer (line width, fill, point size).
             let mut layer_of_row = Vec::new();
             for l in self.layers.iter().filter(|l| l.visible) {
@@ -994,7 +1024,7 @@ impl Layout {
                 let y = row_y;
                 let (sx, sy) = (b.x + 4.0 + if row.indent { 3.0 } else { 0.0 }, y + 1.0);
                 let Some((kind, c)) = row.swatch else {
-                    let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="#333">{}</text>"##, n(sx), n(sy + 3.0), n(LEGEND_TEXT), lines(&row.label, sx));
+                    let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="{ink}">{}</text>"##, n(sx), n(sy + 3.0), n(LEGEND_TEXT), lines(&row.label, sx));
                     continue;
                 };
                 let color = format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
@@ -1009,8 +1039,9 @@ impl Layout {
                         let _ = write!(s, r##"<circle cx="{}" cy="{}" r="{}" fill="{color}" stroke="#fff" stroke-width="0.3"/>"##, n(sx + 2.5), n(sy + 1.8), n(l.point.min(2.0)));
                     }
                 }
-                let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" fill="#222">{}</text>"##, n(sx + 8.0), n(sy + 3.0), n(LEGEND_TEXT), lines(&row.label, sx + 8.0));
+                let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" fill="{ink}">{}</text>"##, n(sx + 8.0), n(sy + 3.0), n(LEGEND_TEXT), lines(&row.label, sx + 8.0));
             }
+            s.push_str("</g>");
         }
         if want(Element::ScaleBar) && self.item(Element::ScaleBar).visible {
             let b = boxes[Element::ScaleBar as usize];
@@ -1086,7 +1117,22 @@ fn dot(out: &mut String, p: [f64; 2], r: f64, lo: [f64; 2], hi: [f64; 2]) {
 
 /// Estimated width of `text` at `size` mm in a sans-serif face.
 pub fn text_w(text: &str, size: f64) -> f64 {
-    text.chars().map(|c| if c.is_ascii_uppercase() || c == 'm' || c == 'w' { 0.68 } else if " il.,:;|'".contains(c) { 0.3 } else { 0.54 }).sum::<f64>() * size
+    let mut w = 0.0;
+    let mut after_coeng = false;
+    for c in text.chars() {
+        w += match c {
+            // Khmer: vowel signs and marks stack on the consonant, and a
+            // consonant after the coeng sign is written below it.
+            '\u{17B4}'..='\u{17DD}' | '\u{200B}'..='\u{200D}' => 0.0,
+            '\u{1780}'..='\u{17B3}' if after_coeng => 0.0,
+            '\u{1780}'..='\u{17B3}' => 0.62,
+            c if c.is_ascii_uppercase() || c == 'm' || c == 'w' => 0.68,
+            c if " il.,:;|'".contains(c) => 0.3,
+            _ => 0.54,
+        };
+        after_coeng = c == '\u{17D2}';
+    }
+    w * size
 }
 
 pub fn merc(c: Coord) -> [f64; 2] {
@@ -1141,6 +1187,10 @@ fn n(v: f64) -> String {
     let s = format!("{v:.2}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.into() }
+}
+
+fn hex(c: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
 fn esc(s: &str) -> String {
@@ -1406,6 +1456,31 @@ mod tests {
         assert!(l.element_svg(Element::North).is_none());
         l.fit_bounds([104.9, 11.55], [104.9, 11.55], 2000.0);
         assert_eq!(l.scale, 2000.0);
+    }
+
+    #[test]
+    fn khmer_width_skips_stacked_marks() {
+        // ខ្មែរ: ខ with ម written below it, the vowel sign, then រ: two columns.
+        assert!((text_w("ខ្មែរ", 1.0) - 0.62 * 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn text_styles() {
+        let mut l = layout_with(vec![Geometry::Point([104.91, 11.56])]);
+        l.title = "T".into();
+        l.title_color = [200, 0, 0];
+        l.title_bold = false;
+        l.title_halo = false;
+        let (svg, _) = l.element_svg(Element::Title).unwrap();
+        assert!(svg.contains(r##"fill="#c80000""##) && svg.contains(r#"font-weight="400""#) && !svg.contains("paint-order"), "{svg}");
+        let small = l.boxes()[Element::Legend as usize];
+        l.legend_size *= 2.0;
+        l.legend_box = false;
+        l.legend_color = [0, 0, 200];
+        let big = l.boxes()[Element::Legend as usize];
+        assert!((big.w - 2.0 * small.w).abs() < 1e-6 && (big.h - 2.0 * small.h).abs() < 1e-6);
+        let (svg, _) = l.element_svg(Element::Legend).unwrap();
+        assert!(svg.contains("scale(2)") && svg.contains(r##"fill="#0000c8""##) && !svg.contains("<rect x"), "{svg}");
     }
 
     #[test]

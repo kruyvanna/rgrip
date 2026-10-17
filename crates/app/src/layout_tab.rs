@@ -112,6 +112,8 @@ pub struct LayoutTab {
     margins_each: bool,
     /// The view the in-view counts were made for.
     counted: Option<[f64; 4]>,
+    /// Snap lines under the element being dragged (page mm).
+    guides: [Option<f64>; 2],
 }
 
 impl LayoutTab {
@@ -143,6 +145,7 @@ impl LayoutTab {
             // Debug screenshot scenes: `RGRIP_DEMO_LAYOUT_GRID=1` shows the
             // graticule and the per-side margins.
             counted: None,
+            guides: [None, None],
             margins_each: cfg!(debug_assertions) && std::env::var("RGRIP_DEMO_LAYOUT_GRID").is_ok(),
         }
         .with_demo_grid()
@@ -478,7 +481,7 @@ impl LayoutTab {
                     if matches!(layer.style, Style::Single) {
                         ui.color_edit_button_srgb(&mut layer.color);
                     }
-                    label_edit(ui, &mut layer.label, "Legend label", ui.available_width());
+                    label_edit(ui, &mut layer.label, "Legend label", ui.available_width(), true);
                 });
                 ui.horizontal(|ui| {
                     ui.add_space(22.0);
@@ -567,7 +570,7 @@ impl LayoutTab {
                         ui.horizontal_top(|ui| {
                             ui.add_sized([22.0, 22.0], egui::Checkbox::without_text(&mut c.visible)).on_hover_text("Show this value on the map and in the legend");
                             ui.color_edit_button_srgb(&mut c.color);
-                            label_edit(ui, &mut c.label, "", label_w);
+                            label_edit(ui, &mut c.label, "", label_w, true);
                             ui.allocate_ui_with_layout(vec2(COUNT_W, 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.set_width(COUNT_W);
                                 ui.label(RichText::new(layout::thousands(c.count as f64)).size(11.0).color(theme::FAINT()));
@@ -615,13 +618,25 @@ impl LayoutTab {
         let mut vis = self.layout.items.map(|i| i.visible);
         egui::Grid::new("layout-elements").num_columns(2).spacing([10.0, 6.0]).min_col_width(LABEL_W).show(ui, |ui| {
             ui.checkbox(&mut vis[Element::Title as usize], "Title");
+            label_edit(ui, &mut self.layout.title, "Map title", ui.available_width() - 10.0, false);
+            ui.end_row();
+            ui.label("");
             ui.horizontal(|ui| {
-                ui.add(TextEdit::singleline(&mut self.layout.title).hint_text("Map title").desired_width(ui.available_width() - 70.0));
-                ui.add(egui::DragValue::new(&mut self.layout.title_size).range(8.0..=60.0).suffix(" pt"));
+                ui.add(egui::DragValue::new(&mut self.layout.title_size).range(8.0..=60.0).suffix(" pt")).on_hover_text("Title size");
+                ui.color_edit_button_srgb(&mut self.layout.title_color).on_hover_text("Title color");
+                ui.toggle_value(&mut self.layout.title_bold, RichText::new("B").strong()).on_hover_text("Bold");
+                ui.toggle_value(&mut self.layout.title_halo, "Outline").on_hover_text("A white outline around the letters, so the title reads over the map");
             });
             ui.end_row();
             ui.checkbox(&mut vis[Element::Legend as usize], "Legend");
-            ui.add(TextEdit::singleline(&mut self.layout.legend_title).hint_text("Legend title").desired_width(ui.available_width() - 10.0));
+            label_edit(ui, &mut self.layout.legend_title, "Legend title", ui.available_width() - 10.0, false);
+            ui.end_row();
+            ui.label("");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut self.layout.legend_size).range(5.0..=24.0).speed(0.1).max_decimals(1).suffix(" pt")).on_hover_text("Legend text size");
+                ui.color_edit_button_srgb(&mut self.layout.legend_color).on_hover_text("Legend text color");
+                ui.toggle_value(&mut self.layout.legend_box, "Box").on_hover_text("A white box behind the legend");
+            });
             ui.end_row();
             ui.checkbox(&mut vis[Element::ScaleBar as usize], "Scale bar");
             ui.label("");
@@ -855,7 +870,8 @@ impl LayoutTab {
                 Some(Drag::Element(e, grab)) => {
                     self.moved.insert(*e);
                     let b = boxes[*e as usize];
-                    let pos = snap([p[0] - grab[0], p[1] - grab[1]], [b.w, b.h], &self.layout);
+                    let (pos, guides) = snap([p[0] - grab[0], p[1] - grab[1]], [b.w, b.h], &self.layout);
+                    self.guides = guides;
                     // Only the element's own picture moves: no re-render.
                     self.layout.item_mut(*e).pos = pos;
                     self.layout.clamp_items();
@@ -871,6 +887,19 @@ impl LayoutTab {
         }
         if response.drag_stopped() {
             self.drag = None;
+            self.guides = [None, None];
+        }
+        // Snap guides while dragging an element.
+        if matches!(self.drag, Some(Drag::Element(..))) {
+            let guide = Stroke::new(1.0, theme::ACCENT());
+            if let Some(x) = self.guides[0] {
+                let x = to_screen([x, 0.0]).x;
+                painter.add(egui::Shape::dashed_line(&[pos2(x, page.top()), pos2(x, page.bottom())], guide, 5.0, 4.0));
+            }
+            if let Some(y) = self.guides[1] {
+                let y = to_screen([0.0, y]).y;
+                painter.add(egui::Shape::dashed_line(&[pos2(page.left(), y), pos2(page.right(), y)], guide, 5.0, 4.0));
+            }
         }
         if let Some(p) = hover
             && self.layout.frame().contains(p)
@@ -941,7 +970,7 @@ fn count_classes(style: &mut Style, values: &[Option<String>]) {
 
 /// A label field: Enter adds a line break (for the legend), and Khmer is
 /// drawn shaped over egui's unshaped text, as in the SQL editor.
-fn label_edit(ui: &mut Ui, text: &mut String, hint_text: &str, width: f32) -> egui::Response {
+fn label_edit(ui: &mut Ui, text: &mut String, hint_text: &str, width: f32, multiline: bool) -> egui::Response {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let color = ui.visuals().text_color();
     let mut khmer = Vec::new();
@@ -953,7 +982,8 @@ fn label_edit(ui: &mut Ui, text: &mut String, hint_text: &str, width: f32) -> eg
     let out = ui
         .allocate_ui(vec2(width, 22.0), |ui| {
             ui.set_max_width(width);
-            TextEdit::multiline(text).desired_rows(1).desired_width(width - 8.0).hint_text(hint_text).layouter(&mut layouter).show(ui)
+            let edit = if multiline { TextEdit::multiline(text).desired_rows(1) } else { TextEdit::singleline(text) };
+            edit.desired_width(width - 8.0).hint_text(hint_text).layouter(&mut layouter).show(ui)
         })
         .inner;
     crate::shaping::paint_runs(ui, &out.galley, out.galley_pos, &khmer);
@@ -986,15 +1016,40 @@ fn hint(ui: &mut Ui, text: &str) {
     ui.add(egui::Label::new(RichText::new(text).size(11.0).color(theme::FAINT())).wrap());
 }
 
-/// Snap an element's top-left to the frame's edges and center lines when
-/// within 2 mm (with a 5 mm inset, the default spacing).
-fn snap(pos: [f64; 2], size: [f64; 2], layout: &Layout) -> [f64; 2] {
+/// Snap an element's top-left when within 2 mm of: the page's edges (5 mm
+/// in) and center, the frame's edges (5 mm in, or just outside, as for a
+/// title above the map) and center. Returns the position and the lines it
+/// snapped to (x for vertical guides, y for horizontal), for drawing.
+fn snap(pos: [f64; 2], size: [f64; 2], layout: &Layout) -> ([f64; 2], [Option<f64>; 2]) {
     let f = layout.frame();
+    let (pw, ph) = layout.page_mm();
     let inset = 5.0;
-    let xs = [f.x + inset, f.x + f.w - inset - size[0], f.x + (f.w - size[0]) / 2.0];
-    let ys = [f.y + inset, f.y + f.h - inset - size[1], f.y + (f.h - size[1]) / 2.0];
-    let pick = |v: f64, targets: &[f64]| targets.iter().copied().find(|t| (t - v).abs() < 2.0).unwrap_or(v);
-    [pick(pos[0], &xs), pick(pos[1], &ys)]
+    let gap = 2.0;
+    // (where the element's left/top goes, the guide line it lines up with)
+    let xs = [
+        (inset, inset),
+        (pw - inset - size[0], pw - inset),
+        ((pw - size[0]) / 2.0, pw / 2.0),
+        (f.x + inset, f.x + inset),
+        (f.x + f.w - inset - size[0], f.x + f.w - inset),
+        (f.x + (f.w - size[0]) / 2.0, f.x + f.w / 2.0),
+    ];
+    let ys = [
+        (inset, inset),
+        (ph - inset - size[1], ph - inset),
+        ((ph - size[1]) / 2.0, ph / 2.0),
+        (f.y + inset, f.y + inset),
+        (f.y + f.h - inset - size[1], f.y + f.h - inset),
+        (f.y + (f.h - size[1]) / 2.0, f.y + f.h / 2.0),
+        (f.y - gap - size[1], f.y - gap),
+        (f.y + f.h + gap, f.y + f.h + gap),
+    ];
+    let pick = |v: f64, targets: &[(f64, f64)]| {
+        targets.iter().copied().filter(|(t, _)| (t - v).abs() < 2.0).min_by(|a, b| (a.0 - v).abs().total_cmp(&(b.0 - v).abs())).map_or((v, None), |(t, g)| (t, Some(g)))
+    };
+    let (x, gx) = pick(pos[0], &xs);
+    let (y, gy) = pick(pos[1], &ys);
+    ([x, y], [gx, gy])
 }
 
 /// Layouts compare by everything that changes the picture (shapes by
@@ -1008,6 +1063,12 @@ fn same(a: &Layout, b: &Layout) -> bool {
         && a.basemap == b.basemap
         && a.title == b.title
         && a.title_size == b.title_size
+        && a.title_color == b.title_color
+        && a.title_bold == b.title_bold
+        && a.title_halo == b.title_halo
+        && a.legend_size == b.legend_size
+        && a.legend_color == b.legend_color
+        && a.legend_box == b.legend_box
         && a.legend_title == b.legend_title
         && a.items == b.items
         && a.graticule == b.graticule
@@ -1116,4 +1177,28 @@ fn pdf(svg: &str) -> Result<Vec<u8>, String> {
     // usvg sizes the mm page at 96 px per inch; dpi 96 keeps it to size.
     let page = svg2pdf::PageOptions { dpi: 96.0 };
     svg2pdf::to_pdf(&tree, svg2pdf::ConversionOptions::default(), page).map_err(|e| format!("{e:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snaps_to_page_and_frame() {
+        let mut l = Layout::default();
+        l.margin = [30.0, 10.0, 10.0, 10.0];
+        let (pw, _) = l.page_mm();
+        let f = l.frame();
+        // Near the page's center line: centered on it, with a guide there.
+        let (p, g) = snap([(pw - 40.0) / 2.0 + 1.5, 50.0], [40.0, 8.0], &l);
+        assert_eq!(p[0], (pw - 40.0) / 2.0);
+        assert_eq!(g[0], Some(pw / 2.0));
+        // Just above the frame (a title in the top margin).
+        let (p, g) = snap([60.0, f.y - 2.0 - 8.0 + 1.0], [40.0, 8.0], &l);
+        assert_eq!(p[1], f.y - 10.0);
+        assert_eq!(g[1], Some(f.y - 2.0));
+        // Far from everything: left alone.
+        let (p, g) = snap([61.3, 77.7], [40.0, 8.0], &l);
+        assert_eq!((p, g), ([61.3, 77.7], [None, None]));
+    }
 }
