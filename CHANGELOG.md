@@ -5,6 +5,9 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Export map: the **Export map** button on the map saves what you see as a PNG (or copies it), laid out like a printed map: an optional title, a legend (layer and selected features), a scale bar and a north arrow, with the basemap credit. Saved at screen resolution.
+
 ## [0.0.11-alpha] - 2026-10-16
 
 ### Fixed

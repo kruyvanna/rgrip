@@ -42,6 +42,7 @@ Load a CSV, TSV, GeoJSON or Shapefile into a new or existing table. You get a pr
 - Production safety: colored connections, read-only connections, confirmation before risky statements
 - SSL up to `verify-full`, SSH tunnels, passwords in the macOS Keychain
 - Export to CSV, TSV, JSON, GeoJSON, Markdown, SQL INSERT and SVG; copy rows as an image or for an AI agent
+- Export the map as a PNG with a title, legend, scale bar and north arrow
 - Dark, light and system themes, and in-app updates
 
 <table>

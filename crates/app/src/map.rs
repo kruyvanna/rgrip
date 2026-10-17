@@ -210,6 +210,8 @@ pub struct Link<'a> {
     pub selection: &'a mut BTreeSet<usize>,
     /// Asks the grid to scroll a row into view.
     pub reveal: &'a mut Option<usize>,
+    /// Name for the legend of an exported map (the table); else the column.
+    pub layer: Option<&'a str>,
     /// Table tabs: the applied WHERE text, which enables "Filter by area".
     pub area_filter: Option<&'a str>,
 }
@@ -363,6 +365,12 @@ pub struct MapView {
     /// Column to show when it appears (e.g. after reprojecting).
     pub prefer: Option<String>,
     cache: Option<(usize, MapData)>,
+    /// Export map: open while setting it up, and while capturing.
+    export: Option<crate::map_export::Export>,
+    /// Meters per screen point at the map's center (for the scale bar).
+    meters_per_px: Option<f64>,
+    /// A short message on the map ("Saved map.png").
+    notice: Option<(String, std::time::Instant)>,
 }
 
 impl Default for MapView {
@@ -388,6 +396,9 @@ impl Default for MapView {
             hide_outliers: false,
             prefer: None,
             cache: None,
+            export: None,
+            meters_per_px: None,
+            notice: None,
         }
     }
 }
@@ -493,6 +504,7 @@ impl MapView {
         let mut drawing = self.drawing.take();
         let area = self.area.as_ref().map(|(b, _)| *b);
         let mut memory = std::mem::take(&mut self.memory);
+        let mut scale = self.meters_per_px;
         {
             let tiles = self.tiles(&ctx);
             let map = walkers::Map::new(Some(tiles), &mut memory, lon_lat(0.0, 0.0))
@@ -512,10 +524,12 @@ impl MapView {
                     drawing: &mut drawing,
                     finished: &mut finished,
                     area,
+                    scale: &mut scale,
                 });
             ui.put(rect, map);
         }
         self.memory = memory;
+        self.meters_per_px = scale;
         self.drawing = drawing;
         let mut out = MapOutput::default();
         if let Some((hit, additive)) = clicked {
@@ -541,14 +555,16 @@ impl MapView {
             self.area = None;
             out.area = Some(AreaEvent::Clear);
         }
-        if let Some(i) = hovered.filter(|_| self.selected.is_none() || hovered != self.selected) {
+        let exporting = self.export.is_some();
+        if let Some(i) = hovered.filter(|_| !exporting && (self.selected.is_none() || hovered != self.selected)) {
             let f = &data.features[i];
             egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("map-hover"), egui::PopupAnchor::Pointer)
                 .show(|ui| feature_title(ui, rs, f.row, self.column));
         }
-        if let Some(i) = self.selected.filter(|i| *i < data.features.len()) {
+        if let Some(i) = self.selected.filter(|i| *i < data.features.len() && !exporting) {
             self.details(ui, rect, rs, data.features[i].row);
         }
+        self.export_step(ui, rect, &data, rs, link.selection, link.layer);
         self.cache = Some((key, data));
         out
     }
@@ -584,7 +600,9 @@ impl MapView {
 
         let mut fit = false;
         let mut zoom_sel = false;
-        panel(ui, rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, "map-controls", &mut |ui| {
+        let mut export = false;
+        let capturing = self.export.as_ref().is_some_and(|e| e.capturing());
+        if !capturing { panel(ui, rect.left_top() + vec2(12.0, 12.0), Align2::LEFT_TOP, "map-controls", &mut |ui| {
             for b in Basemap::ALL {
                 if ui.selectable_label(self.basemap == b, b.label()).clicked() {
                     self.basemap = b;
@@ -605,6 +623,9 @@ impl MapView {
             }
             if sel_bounds.is_some() && ui.button("Zoom to selected").on_hover_text("Zoom to the rows selected in the grid or on the map").clicked() {
                 zoom_sel = true;
+            }
+            if ui.button("Export map").on_hover_text("Save the map as a picture, with a title, legend, scale bar and north arrow").clicked() {
+                export = true;
             }
             if link.area_filter.is_some() {
                 if ui
@@ -649,7 +670,11 @@ impl MapView {
                     reproject = Some(rs.columns[self.column].clone());
                 }
             }
-        });
+        }); }
+        if export {
+            self.export = Some(Default::default());
+            self.selected = None;
+        }
         if fit {
             self.fit(data, rect.size());
         }
@@ -664,6 +689,77 @@ impl MapView {
         ui.painter().rect_filled(back, 4.0, theme::POPUP().gamma_multiply(0.85));
         ui.painter().galley(pos, galley, theme::MUTED());
         (reproject, clear_area)
+    }
+
+    /// Export map: the layout over the map, the options panel, and the
+    /// capture (controls hidden for one frame, then a screenshot).
+    fn export_step(&mut self, ui: &mut Ui, rect: Rect, data: &MapData, rs: &ResultSet, selection: &BTreeSet<usize>, layer: Option<&str>) {
+        use crate::map_export::{self as mx, PanelAction, Stage};
+        let layer = layer.map(str::to_string).or_else(|| rs.columns.get(self.column).cloned()).unwrap_or_default();
+        if let Some(e) = &mut self.export {
+            let mut legend = vec![mx::LegendItem { color: theme::GEO(), label: format!("{layer} ({})", data.features.len()) }];
+            let shown = selection.iter().filter(|r| data.feature_of_row(**r).is_some()).count();
+            if shown > 0 {
+                legend.push(mx::LegendItem { color: theme::ACCENT(), label: format!("Selected ({shown})") });
+            }
+            mx::paint(&ui.painter().with_clip_rect(rect), rect, e, self.meters_per_px, &legend);
+            match e.stage {
+                Stage::Edit => match mx::panel(ui, rect, e) {
+                    PanelAction::Save => e.stage = Stage::Hide { copy: false },
+                    PanelAction::Copy => e.stage = Stage::Hide { copy: true },
+                    PanelAction::Close => self.export = None,
+                    PanelAction::None => {}
+                },
+                // This frame is drawn without the controls: capture it.
+                Stage::Hide { copy } => {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+                    e.stage = Stage::Wait { copy, since: std::time::Instant::now() };
+                    ui.ctx().request_repaint();
+                }
+                Stage::Wait { copy, since } => {
+                    let shot = ui.input(|i| {
+                        i.events.iter().find_map(|ev| match ev {
+                            egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                            _ => None,
+                        })
+                    });
+                    if let Some(screen) = shot {
+                        let image = mx::crop(&screen, rect, ui.ctx().pixels_per_point());
+                        let name = mx::file_name(&e.title, &layer);
+                        let message = if copy {
+                            ui.ctx().copy_image(image);
+                            Some("Copied the map".to_string())
+                        } else {
+                            match rfd::FileDialog::new().set_file_name(&name).add_filter("PNG image", &["png"]).save_file() {
+                                Some(path) => match mx::png(&image).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
+                                    Ok(()) => Some(format!("Saved {}", path.file_name().map_or(name.clone(), |n| n.to_string_lossy().into_owned()))),
+                                    Err(err) => Some(format!("Couldn't save the map: {err}")),
+                                },
+                                None => None,
+                            }
+                        };
+                        self.export = None;
+                        self.notice = message.map(|m| (m, std::time::Instant::now()));
+                    } else if since.elapsed() > std::time::Duration::from_secs(3) {
+                        self.export = None;
+                        self.notice = Some(("Couldn't capture the map".into(), std::time::Instant::now()));
+                    } else {
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+        }
+        if let Some((text, at)) = &self.notice {
+            if at.elapsed() > std::time::Duration::from_millis(2500) {
+                self.notice = None;
+            } else {
+                let galley = ui.painter().layout_no_wrap(text.clone(), FontId::proportional(12.5), theme::TEXT());
+                let back = Rect::from_center_size(rect.center_bottom() - vec2(0.0, 40.0), galley.size() + vec2(24.0, 12.0));
+                ui.painter().rect(back, 8.0, theme::POPUP(), Stroke::new(1.0, theme::BORDER()), egui::StrokeKind::Inside);
+                ui.painter().galley(back.center() - galley.size() / 2.0, galley, theme::TEXT());
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            }
+        }
     }
 
     fn details(&mut self, ui: &mut Ui, rect: Rect, rs: &ResultSet, row: usize) {
@@ -799,12 +895,18 @@ struct Features<'a> {
     finished: &'a mut Option<(Coord, Coord)>,
     /// The box the table is currently filtered to.
     area: Option<BBox>,
+    /// Out: meters per screen point at the map's center.
+    scale: &'a mut Option<f64>,
 }
 
 impl Plugin for Features<'_> {
     fn run(self: Box<Self>, ui: &mut Ui, response: &egui::Response, projector: &Projector, _: &MapMemory) {
         let painter = ui.painter_at(response.rect);
         let screen = |c: &Coord| -> Pos2 { projector.project(lon_lat(c[0], c[1])).to_pos2() };
+        // Scale: the ground distance across 100 points at the center.
+        let mid = response.rect.center();
+        let (a, b) = (projector.unproject(mid.to_vec2()), projector.unproject((mid + vec2(100.0, 0.0)).to_vec2()));
+        *self.scale = Some(crate::map_export::haversine([a.x(), a.y()], [b.x(), b.y()]) / 100.0);
         let pointer = response.hover_pos();
         let hide = self.hide_outliers;
         let data = self.data;

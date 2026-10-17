@@ -3510,7 +3510,7 @@ fn console_ui(
                     if cols.is_empty() {
                         centered(ui, |ui| muted(ui, "No geometry columns in this result"));
                     } else {
-                        let link = crate::map::Link { selection: &mut grid.selection, reveal: &mut grid.reveal, area_filter: None };
+                        let link = crate::map::Link { selection: &mut grid.selection, reveal: &mut grid.reveal, layer: None, area_filter: None };
                         if let Some(col) = map.show(ui, sets[n], &cols, paged.is_some(), link).reproject {
                             action = Some(TabAction::Reproject(col));
                         }
@@ -3527,7 +3527,7 @@ fn console_ui(
                         Id::new(("split", tab_id)),
                         grid,
                         |ui, g| {
-                            let link = crate::map::Link { selection: &mut g.selection, reveal: &mut g.reveal, area_filter: None };
+                            let link = crate::map::Link { selection: &mut g.selection, reveal: &mut g.reveal, layer: None, area_filter: None };
                             if let Some(col) = map.show(ui, sets[n], &cols, can_reproject, link).reproject {
                                 *reproject = Some(TabAction::Reproject(col));
                             }
@@ -4059,7 +4059,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
             let applied = t.applied_filter.as_str();
             let map = &mut t.map;
             let mut draw_map = |ui: &mut Ui, g: &mut GridState| {
-                let link = crate::map::Link { selection: &mut g.selection, reveal: &mut g.reveal, area_filter: Some(applied) };
+                let link = crate::map::Link { selection: &mut g.selection, reveal: &mut g.reveal, layer: Some(table_name.as_str()), area_filter: Some(applied) };
                 map.show(ui, rs, &cols, false, link)
             };
             let mut event = None;
