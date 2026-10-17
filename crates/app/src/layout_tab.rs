@@ -34,8 +34,6 @@ const CLASS_COLORS: [[u8; 3]; 12] = [
     [174, 199, 232],
     [255, 187, 120],
 ];
-/// Most categories per layer; the rest draw as "Other".
-const MAX_CLASSES: usize = 12;
 /// Largest PNG export, in pixels.
 const MAX_PIXELS: f64 = 120_000_000.0;
 /// Width of the label column in the side panel.
@@ -76,11 +74,11 @@ enum Drag {
 /// Per layer: queries in flight (by sequence number) and what to show.
 #[derive(Default)]
 struct LayerState {
+    /// Each loaded shape's lon/lat box, to count what's inside the frame.
+    bounds: Vec<[f64; 4]>,
+    truncated: bool,
     data: Option<(u64, [f64; 4], f64)>,
     extent: Option<u64>,
-    classes: Option<u64>,
-    /// A category's extent, to zoom to.
-    locate: Option<u64>,
     note: Option<(String, bool)>,
     open: bool,
 }
@@ -99,10 +97,6 @@ pub struct LayoutTab {
     /// The page elements, drawn on their own so dragging them is instant:
     /// each texture and the page area it was drawn for.
     element_tex: Vec<(Element, TextureHandle, layout::Rect)>,
-    /// The category row under the pointer: its features get rings on the map.
-    hover_class: Option<(u64, Option<String>)>,
-    /// Why the hovered category shows nothing, if it doesn't.
-    hover_note: Option<String>,
     jobs: mpsc::Sender<Job>,
     done: mpsc::Receiver<Done>,
     drag: Option<Drag>,
@@ -116,6 +110,8 @@ pub struct LayoutTab {
     /// Elements the user has dragged; the rest stay at their usual spots.
     moved: HashSet<Element>,
     margins_each: bool,
+    /// The view the in-view counts were made for.
+    counted: Option<[f64; 4]>,
 }
 
 impl LayoutTab {
@@ -134,8 +130,6 @@ impl LayoutTab {
             moved_at: Instant::now(),
             texture: None,
             element_tex: Vec::new(),
-            hover_class: None,
-            hover_note: None,
             jobs,
             done,
             drag: None,
@@ -148,6 +142,7 @@ impl LayoutTab {
             moved: HashSet::new(),
             // Debug screenshot scenes: `RGRIP_DEMO_LAYOUT_GRID=1` shows the
             // graticule and the per-side margins.
+            counted: None,
             margins_each: cfg!(debug_assertions) && std::env::var("RGRIP_DEMO_LAYOUT_GRID").is_ok(),
         }
         .with_demo_grid()
@@ -166,7 +161,6 @@ impl LayoutTab {
         let state = self.states.entry(layer).or_default();
         match kind {
             LayerQuery::Extent => state.extent = Some(self.seq),
-            LayerQuery::Classes => state.classes = Some(self.seq),
             LayerQuery::Data => {}
         }
         Action { layer, seq: self.seq, kind, sql }
@@ -195,28 +189,19 @@ impl LayoutTab {
                     return;
                 }
                 state.data = None;
-                let in_view = layout::thousands(shapes.len() as f64);
-                let mut note = match layer.total {
-                    Some(t) => format!("{in_view} in view · {} in table", layout::thousands(t as f64)),
-                    None => format!("{in_view} in view"),
-                };
-                if truncated {
-                    note = format!("First {} in view: zoom in for the rest", layout::thousands(LAYER_LIMIT as f64));
-                }
-                state.note = Some((note, false));
+                state.truncated = truncated;
+                state.bounds = shapes
+                    .iter()
+                    .map(|g| {
+                        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+                        g.for_each_coord(&mut |c| b = [b[0].min(c[0]), b[1].min(c[1]), b[2].max(c[0]), b[3].max(c[1])]);
+                        b
+                    })
+                    .collect();
                 layer.shapes = shapes.into();
                 layer.values = values.into();
                 layer.loaded = Some((bbox, scale));
-            }
-            Ok(LayerResult::Extent(extent, _)) if state.locate == Some(seq) => {
-                state.locate = None;
-                match extent {
-                    Some((lo, hi)) => {
-                        self.layout.fit_bounds(lo, hi, 2000.0);
-                        self.moved_at = Instant::now() - Duration::from_secs(1);
-                    }
-                    None => self.status = Some(("No features with that value".into(), true, Instant::now())),
-                }
+                self.counted = None;
             }
             Ok(LayerResult::Extent(extent, total)) => {
                 if state.extent != Some(seq) {
@@ -234,37 +219,9 @@ impl LayoutTab {
                     self.moved_at = Instant::now() - Duration::from_secs(1);
                 }
             }
-            Ok(LayerResult::Classes(values)) => {
-                if state.classes != Some(seq) {
-                    return;
-                }
-                state.classes = None;
-                if let Style::Categories { classes, more, column } = &mut layer.style {
-                    *more = values.len() > MAX_CLASSES;
-                    *classes = values
-                        .into_iter()
-                        .take(MAX_CLASSES)
-                        .enumerate()
-                        .map(|(i, (value, count, with_geom))| Class {
-                            label: value.clone().unwrap_or_else(|| "(empty)".into()),
-                            value,
-                            color: CLASS_COLORS[i % CLASS_COLORS.len()],
-                            visible: true,
-                            count,
-                            with_geom,
-                        })
-                        .collect();
-                    // Debug screenshot scenes: `RGRIP_DEMO_LAYOUT_CLASS_LABEL` renames the first class.
-                    #[cfg(debug_assertions)]
-                    if let (Ok(label), Some(first)) = (std::env::var("RGRIP_DEMO_LAYOUT_CLASS_LABEL"), classes.first_mut()) {
-                        first.label = label.replace("\\n", "\n");
-                    }
-                }
-            }
             Err(e) => {
                 state.data = None;
                 state.extent = None;
-                state.classes = None;
                 state.note = Some((e, true));
             }
         }
@@ -289,8 +246,39 @@ impl LayoutTab {
         self.status = Some((text.into(), error, Instant::now()));
     }
 
+    /// Counts and categories from the features that touch the frame (the
+    /// loaded data reaches past it, so panning doesn't wait on a reload).
+    fn recount(&mut self, view: [f64; 4]) {
+        let mut changed = false;
+        for layer in self.layout.layers.iter_mut() {
+            let Some(state) = self.states.get_mut(&layer.id) else { continue };
+            if layer.loaded.is_none() {
+                continue;
+            }
+            let inside: Vec<bool> = state.bounds.iter().map(|b| b[0] <= view[2] && b[2] >= view[0] && b[1] <= view[3] && b[3] >= view[1]).collect();
+            let n = inside.iter().filter(|x| **x).count();
+            let in_view = layout::thousands(n as f64);
+            let note = if state.truncated {
+                format!("First {} loaded: zoom in for the rest", layout::thousands(LAYER_LIMIT as f64))
+            } else {
+                match layer.total {
+                    Some(t) => format!("{in_view} in view · {} in table", layout::thousands(t as f64)),
+                    None => format!("{in_view} in view"),
+                }
+            };
+            state.note = Some((note, false));
+            let values: Vec<Option<String>> = layer.values.iter().zip(&inside).filter(|(_, i)| **i).map(|(v, _)| v.clone()).collect();
+            let before = layer.style.clone();
+            count_classes(&mut layer.style, &values);
+            changed |= layer.style != before;
+        }
+        if changed {
+            self.changed();
+        }
+    }
+
     fn busy(&self) -> bool {
-        self.states.values().any(|s| s.data.is_some() || s.extent.is_some() || s.classes.is_some())
+        self.states.values().any(|s| s.data.is_some() || s.extent.is_some())
     }
 
     /// Once the view has settled, reload the layers it has moved past.
@@ -299,13 +287,17 @@ impl LayoutTab {
             return;
         }
         let view = self.layout.view_bbox(0.0);
+        if self.counted != Some(view) {
+            self.counted = Some(view);
+            self.recount(view);
+        }
         let scale = self.layout.scale;
         let wanted: Vec<(u64, String)> = self
             .layout
             .layers
             .iter()
             .filter(|l| l.visible && l.needs_reload(view, scale))
-            .filter(|l| self.states.get(&l.id).is_none_or(|s| s.data.is_none() && s.classes.is_none()))
+            .filter(|l| self.states.get(&l.id).is_none_or(|s| s.data.is_none()))
             .map(|l| (l.id, l.data_sql(self.layout.view_bbox(0.5), scale, LAYER_LIMIT + 1)))
             .collect();
         let bbox = self.layout.view_bbox(0.5);
@@ -361,9 +353,6 @@ impl LayoutTab {
 
     fn side(&mut self, ui: &mut Ui, catalog: &Catalog, actions: &mut Vec<Action>) {
         let before = self.layout.clone();
-        self.hover_class = None;
-        let mut hover_class = None;
-        let mut self_hover_note: Option<String> = None;
 
         section(ui, "Page", true);
         row(ui, "Size", |ui| {
@@ -475,9 +464,8 @@ impl LayoutTab {
                 .map(|t| t.columns.iter().filter(|(_, ty)| !ty.starts_with("geometry") && !ty.starts_with("geography")).map(|(c, _)| c.clone()).collect())
                 .unwrap_or_default();
             let mut queries = Vec::new();
-            let mut locate: Option<String> = None;
             let state = self.states.entry(id).or_default();
-            let loading = state.data.is_some() || state.extent.is_some() || state.classes.is_some();
+            let loading = state.data.is_some() || state.extent.is_some();
             let layer = &mut self.layout.layers[i];
             egui::Frame::new().fill(theme::BG()).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -521,9 +509,6 @@ impl LayoutTab {
                         if apply {
                             layer.loaded = None;
                             queries.push((LayerQuery::Extent, layer.extent_sql()));
-                            if let Some(c) = layer.category_column() {
-                                queries.push((LayerQuery::Classes, layer.classes_sql(c, MAX_CLASSES + 1)));
-                            }
                         }
                     });
                     ui.end_row();
@@ -546,7 +531,6 @@ impl LayoutTab {
                             layer.values = Default::default();
                         }
                         Some(Some(c)) if current.as_deref() != Some(&c) => {
-                            queries.push((LayerQuery::Classes, layer.classes_sql(&c, MAX_CLASSES + 1)));
                             layer.style = Style::Categories { column: c, classes: Vec::new(), more: false };
                             // Reload with the column's values.
                             layer.loaded = None;
@@ -564,61 +548,37 @@ impl LayoutTab {
                     ui.add(egui::Slider::new(&mut layer.fill_opacity, 0.0..=1.0).max_decimals(2));
                     ui.end_row();
                 });
-                if let Style::Categories { classes, more, column } = &mut layer.style {
+                if let Style::Categories { classes, more, .. } = &mut layer.style {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Categories").size(11.5).color(theme::MUTED()));
+                        ui.label(RichText::new("Categories in view").size(11.5).color(theme::MUTED()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new("Rows").size(11.0).color(theme::FAINT())).on_hover_text("Rows in the whole table with this value (not just in view)");
+                            ui.label(RichText::new("In view").size(11.0).color(theme::FAINT()));
                         });
                     });
                     hint(ui, "Edit a label to rename it in the legend; Enter starts a new line");
                     // Fixed columns: check, color, label, count (right-aligned).
                     const COUNT_W: f32 = 50.0;
                     let gap = ui.spacing().item_spacing.x;
-                    const LOCATE_W: f32 = 20.0;
-                    let label_w = (ui.available_width() - 22.0 - 40.0 - COUNT_W - LOCATE_W - 4.0 * gap - 12.0).max(60.0);
-                    let column = column.clone();
-                    for c in classes.iter_mut() {
-                        let in_view = layer.values.iter().filter(|v| **v == c.value).count();
-                        let row = ui.horizontal_top(|ui| {
+                    let label_w = (ui.available_width() - 22.0 - 40.0 - COUNT_W - 3.0 * gap - 12.0).max(60.0);
+                    let mut shown = 0;
+                    for c in classes.iter_mut().filter(|c| c.count > 0).take(layout::MAX_CLASSES) {
+                        shown += 1;
+                        ui.horizontal_top(|ui| {
                             ui.add_sized([22.0, 22.0], egui::Checkbox::without_text(&mut c.visible)).on_hover_text("Show this value on the map and in the legend");
                             ui.color_edit_button_srgb(&mut c.color);
                             label_edit(ui, &mut c.label, "", label_w);
                             ui.allocate_ui_with_layout(vec2(COUNT_W, 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.set_width(COUNT_W);
-                                let no_geom = c.count - c.with_geom;
-                                let color = if c.with_geom == 0 { theme::WARN() } else { theme::FAINT() };
-                                let mut tip = format!("{} in the table, {in_view} in view", layout::thousands(c.count as f64));
-                                if no_geom > 0 {
-                                    tip.push_str(&format!("\n{} without a geometry (not on the map)", layout::thousands(no_geom as f64)));
-                                }
-                                ui.label(RichText::new(layout::thousands(c.count as f64)).size(11.0).color(color)).on_hover_text(tip);
+                                ui.label(RichText::new(layout::thousands(c.count as f64)).size(11.0).color(theme::FAINT()));
                             });
-                            let locate_btn = egui::Button::image(icons::image(ui.ctx(), Svg::Locate, 13.0, theme::MUTED())).frame(false);
-                            if ui.add(locate_btn).on_hover_text("Zoom the map to this value's features").clicked() {
-                                let sql = layer_extent_sql(&column, c.value.as_deref(), id, &before);
-                                locate = sql;
-                            }
                         });
-                        // Pointing at a row rings its features on the map.
-                        if ui.rect_contains_pointer(row.response.rect) {
-                            hover_class = Some((id, c.value.clone()));
-                            self_hover_note = Some(if !layer.visible {
-                                "This layer is hidden".to_string()
-                            } else if !c.visible {
-                                "This value is turned off".to_string()
-                            } else if c.with_geom == 0 {
-                                format!("{}: no geometry, so nothing to draw", c.label.lines().next().unwrap_or(""))
-                            } else if in_view == 0 {
-                                format!("{}: none in view, the locate button zooms to them", c.label.lines().next().unwrap_or(""))
-                            } else {
-                                String::new()
-                            });
-                        }
+                    }
+                    if shown == 0 {
+                        hint(ui, "No features in view");
                     }
                     if *more {
-                        hint(ui, &format!("The other values draw as \"Other\" in the layer color (top {MAX_CLASSES} shown)"));
+                        hint(ui, &format!("More values in view than {}: the rest draw as \"Other\" in the layer color", layout::MAX_CLASSES));
                     }
                 }
                 ui.add_space(6.0);
@@ -640,11 +600,6 @@ impl LayoutTab {
             for (kind, sql) in queries {
                 actions.push(self.query(id, kind, sql));
             }
-            if let Some(sql) = locate {
-                self.seq += 1;
-                self.states.entry(id).or_default().locate = Some(self.seq);
-                actions.push(Action { layer: id, seq: self.seq, kind: LayerQuery::Extent, sql });
-            }
         }
         if let Some((a, b)) = swap {
             self.layout.layers.swap(a, b);
@@ -654,8 +609,6 @@ impl LayoutTab {
             self.states.remove(&id);
         }
 
-        self.hover_class = hover_class;
-        self.hover_note = self_hover_note.filter(|n| !n.is_empty());
 
         section(ui, "On the page", false);
         hint(ui, "Drag them on the page to place them");
@@ -796,12 +749,11 @@ impl LayoutTab {
     #[cfg(debug_assertions)]
     pub fn demo_color_by(&mut self, column: &str) -> Vec<Action> {
         let Some(layer) = self.layout.layers.first_mut() else { return Vec::new() };
-        let sql = layer.classes_sql(column, MAX_CLASSES + 1);
         layer.style = Style::Categories { column: column.into(), classes: Vec::new(), more: false };
         layer.loaded = None;
         let id = layer.id;
         self.states.entry(id).or_default().open = true;
-        vec![self.query(id, LayerQuery::Classes, sql)]
+        Vec::new()
     }
 
     fn export(&mut self) {
@@ -871,40 +823,6 @@ impl LayoutTab {
                 let rect = Rect::from_min_max(to_screen([r.x + dx, r.y + dy]), to_screen([r.x + r.w + dx, r.y + r.h + dy]));
                 painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
             }
-        }
-        // The hovered category's features in view: pulsing rings.
-        if let Some((id, value)) = &self.hover_class
-            && let Some(layer) = self.layout.layers.iter().find(|l| l.id == *id)
-        {
-            let f = self.layout.frame();
-            let clip = Rect::from_min_max(to_screen([f.x, f.y]), to_screen([f.x + f.w, f.y + f.h]));
-            let rings = painter.with_clip_rect(clip);
-            let t = ui.input(|i| i.time) as f32;
-            let r = 9.0 + 4.0 * (t * 5.0).sin();
-            let mut shown = 0;
-            for (g, v) in layer.shapes.iter().zip(layer.values.iter()) {
-                if v != value || shown >= 400 {
-                    continue;
-                }
-                let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-                g.for_each_coord(&mut |c| {
-                    lo = [lo[0].min(c[0]), lo[1].min(c[1])];
-                    hi = [hi[0].max(c[0]), hi[1].max(c[1])];
-                });
-                let at = to_screen(self.layout.to_page([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0]));
-                rings.circle_stroke(at, r + 2.0, Stroke::new(3.0, Color32::WHITE));
-                rings.circle_stroke(at, r, Stroke::new(2.0, theme::ACCENT()));
-                shown += 1;
-            }
-            ui.ctx().request_repaint();
-        }
-        if let Some(note) = &self.hover_note {
-            let f = self.layout.frame();
-            let at = to_screen([f.x + f.w / 2.0, f.y + f.h / 2.0]);
-            let galley = painter.layout_no_wrap(note.clone(), FontId::proportional(13.0), Color32::WHITE);
-            let back = Rect::from_center_size(at, galley.size() + vec2(24.0, 14.0));
-            painter.rect_filled(back, 8.0, Color32::from_black_alpha(200));
-            painter.galley(back.center() - galley.size() / 2.0, galley, Color32::WHITE);
         }
         if self.texture.as_ref().is_none_or(|(v, _, _)| *v != self.version) || self.busy() {
             painter.text(page.right_bottom() + vec2(-8.0, -8.0), Align2::RIGHT_BOTTOM, if self.busy() { "Loading…" } else { "Rendering…" }, FontId::proportional(11.0), Color32::from_gray(120));
@@ -990,9 +908,35 @@ impl LayoutTab {
     }
 }
 
-/// The extent query for one category of a layer.
-fn layer_extent_sql(column: &str, value: Option<&str>, id: u64, layout: &Layout) -> Option<String> {
-    layout.layers.iter().find(|l| l.id == id).map(|l| l.class_extent_sql(column, value))
+/// Update a categorized layer's classes from the values in view: counts,
+/// new values (each keeps its color and label once seen), most first.
+fn count_classes(style: &mut Style, values: &[Option<String>]) {
+    let Style::Categories { classes, more, .. } = style else { return };
+    let mut counts: HashMap<Option<String>, i64> = HashMap::new();
+    for v in values {
+        *counts.entry(v.clone()).or_default() += 1;
+    }
+    for c in classes.iter_mut() {
+        c.count = counts.remove(&c.value).unwrap_or(0);
+    }
+    let mut new: Vec<(Option<String>, i64)> = counts.into_iter().collect();
+    new.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for (value, count) in new {
+        let color = CLASS_COLORS[classes.len() % CLASS_COLORS.len()];
+        #[allow(unused_mut)]
+        let mut label = value.clone().unwrap_or_else(|| "(empty)".to_string());
+        // Debug screenshot scenes: `RGRIP_DEMO_LAYOUT_CLASS_LABEL` renames the first class.
+        #[cfg(debug_assertions)]
+        if classes.is_empty()
+            && let Ok(l) = std::env::var("RGRIP_DEMO_LAYOUT_CLASS_LABEL")
+        {
+            label = l.replace("\\n", "\n");
+        }
+        classes.push(Class { value, label, color, visible: true, count });
+    }
+    // Most features first; values gone from view keep their color and label.
+    classes.sort_by(|a, b| b.count.cmp(&a.count));
+    *more = classes.iter().filter(|c| c.count > 0).count() > layout::MAX_CLASSES;
 }
 
 /// A label field: Enter adds a line break (for the legend), and Khmer is

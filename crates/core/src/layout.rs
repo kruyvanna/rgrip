@@ -159,9 +159,19 @@ pub struct Class {
     pub label: String,
     pub color: [u8; 3],
     pub visible: bool,
+    /// Features with this value in view.
     pub count: i64,
-    /// Rows with this value that have a geometry (the rest can't be drawn).
-    pub with_geom: i64,
+}
+
+/// Most categories a layer draws and lists; further values draw as "Other".
+pub const MAX_CLASSES: usize = 12;
+
+impl Style {
+    /// The classes drawn and listed: values in view, most first, at most
+    /// [`MAX_CLASSES`] (the classes are kept sorted by count).
+    pub fn shown(classes: &[Class]) -> impl Iterator<Item = &Class> {
+        classes.iter().filter(|c| c.count > 0).take(MAX_CLASSES)
+    }
 }
 
 /// One row of the legend: a swatch (layer kind and color) or a heading.
@@ -242,33 +252,6 @@ impl Layer {
         )
     }
 
-    /// The extent of the features whose `column` has `value` (a category).
-    pub fn class_extent_sql(&self, column: &str, value: Option<&str>) -> String {
-        let (t, g) = (self.table_ref(), self.geom());
-        let c = crate::sql::quote_ident(column);
-        let is = match value {
-            Some(v) => format!("({c})::text = '{}'", v.replace('\'', "''")),
-            None => format!("{c} is null"),
-        };
-        format!(
-            "with s as (select coalesce(nullif(ST_SRID({g}), 0), 4326) as srid from {t} where {g} is not null limit 1) \
-             select ST_Transform(ST_SetSRID(ST_Extent({g})::geometry, (select srid from s)), 4326), count(*) from {t} where {is}{}",
-            self.filter_and()
-        )
-    }
-
-    /// The most common values of `column`, with counts.
-    pub fn classes_sql(&self, column: &str, limit: usize) -> String {
-        let f = self.filter.trim();
-        let filter = if f.is_empty() { String::new() } else { format!(" where {f}") };
-        format!(
-            "select ({})::text, count(*), count({}) from {}{filter} group by 1 order by 2 desc, 1 limit {limit}",
-            crate::sql::quote_ident(column),
-            crate::sql::quote_ident(&self.column),
-            self.table_ref()
-        )
-    }
-
     /// Whether the loaded shapes no longer cover `view` (lon/lat) or were
     /// simplified for a very different scale.
     pub fn needs_reload(&self, view: [f64; 4], scale: f64) -> bool {
@@ -283,8 +266,12 @@ impl Layer {
         match &self.style {
             Style::Single => out.push(LegendRow { label: self.label.clone(), swatch: Some((self.kind(), self.color)), indent: false }),
             Style::Categories { classes, more, .. } => {
+                // Nothing of it on the map: nothing in the legend either.
+                if !*more && !Style::shown(classes).any(|c| c.visible) {
+                    return;
+                }
                 out.push(LegendRow { label: self.label.clone(), swatch: None, indent: false });
-                for c in classes.iter().filter(|c| c.visible) {
+                for c in Style::shown(classes).filter(|c| c.visible) {
                     out.push(LegendRow { label: c.label.clone(), swatch: Some((self.kind(), c.color)), indent: true });
                 }
                 if *more {
@@ -893,6 +880,7 @@ impl Layout {
         match &l.style {
             Style::Single => self.group_svg(s, l, l.shapes.iter(), l.color),
             Style::Categories { classes, .. } => {
+                let classes: Vec<&Class> = Style::shown(classes).collect();
                 let index: std::collections::HashMap<Option<&str>, usize> = classes.iter().enumerate().map(|(i, c)| (c.value.as_deref(), i)).collect();
                 let mut groups: Vec<Vec<&Geometry>> = vec![Vec::new(); classes.len() + 1];
                 for (i, g) in l.shapes.iter().enumerate() {
@@ -1350,7 +1338,7 @@ mod tests {
     fn categories_color_and_label_features() {
         let mut l = layout_with(vec![Geometry::Point([104.91, 11.56]), Geometry::Point([104.92, 11.56]), Geometry::Point([104.93, 11.56])]);
         l.layers[0].values = vec![Some("garden".to_string()), Some("public".to_string()), None].into();
-        let class = |v: &str, label: &str, color| Class { value: Some(v.into()), label: label.into(), color, visible: true, count: 1, with_geom: 1 };
+        let class = |v: &str, label: &str, color| Class { value: Some(v.into()), label: label.into(), color, visible: true, count: 1 };
         l.layers[0].style = Style::Categories { column: "land_use".into(), classes: vec![class("garden", "Gardens", [0, 200, 0]), class("public", "Public land", [0, 0, 200])], more: true };
         let svg = l.svg(&mut |_, _, _| None, 150.0);
         assert!(svg.contains("#00c800") && svg.contains("#0000c8"));
@@ -1416,9 +1404,6 @@ mod tests {
         assert!(r.contains(l.item(Element::Title).pos));
         l.item_mut(Element::North).visible = false;
         assert!(l.element_svg(Element::North).is_none());
-        let sql = l.layers[0].class_extent_sql("status", Some("it's"));
-        assert!(sql.contains("(\"status\")::text = 'it''s'"), "{sql}");
-        assert!(l.layers[0].class_extent_sql("status", None).contains("\"status\" is null"));
         l.fit_bounds([104.9, 11.55], [104.9, 11.55], 2000.0);
         assert_eq!(l.scale, 2000.0);
     }
@@ -1455,7 +1440,6 @@ mod tests {
         let sql = layer.data_sql([0.0, 0.0, 1.0, 1.0], 1000.0, 5);
         assert!(sql.contains(", (\"land_use\")::text from") && sql.contains(" and (land_use = 'garden') limit 5"), "{sql}");
         assert!(layer.extent_sql().contains("ST_Extent(\"geom\"::geometry)"));
-        assert_eq!(layer.classes_sql("land_use", 20), "select (\"land_use\")::text, count(*), count(\"geom\") from \"demo\".\"parcels\" where land_use = 'garden' group by 1 order by 2 desc, 1 limit 20");
         // Reload when the view leaves what's loaded, or the scale moves a lot.
         layer.loaded = Some(([0.0, 0.0, 10.0, 10.0], 10_000.0));
         assert!(!layer.needs_reload([1.0, 1.0, 9.0, 9.0], 12_000.0));

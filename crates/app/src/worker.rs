@@ -22,16 +22,12 @@ pub enum LayerQuery {
     Data,
     /// One WGS84 geometry: the layer's extent.
     Extent,
-    /// Category values and counts.
-    Classes,
 }
 
 pub enum LayerResult {
     Data { shapes: Vec<rgrip_core::geo::Geometry>, values: Vec<Option<String>>, truncated: bool },
     /// The extent, and the row count.
     Extent(Option<(rgrip_core::geo::Coord, rgrip_core::geo::Coord)>, Option<i64>),
-    /// Value, rows, rows with a geometry.
-    Classes(Vec<(Option<String>, i64, i64)>),
 }
 
 pub enum Cmd {
@@ -370,14 +366,6 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                             let count = rows.first().and_then(|(r, _)| r.get(1).cloned().flatten()).and_then(|n| n.parse().ok());
                             LayerResult::Extent((lo[0] <= hi[0]).then_some((lo, hi)), count)
                         }
-                        LayerQuery::Classes => LayerResult::Classes(
-                            rows.into_iter()
-                                .map(|(r, _)| {
-                                    let num = |i: usize| r.get(i).cloned().flatten().and_then(|n| n.parse().ok()).unwrap_or(0);
-                                    (r.first().cloned().flatten(), num(1), num(2))
-                                })
-                                .collect(),
-                        ),
                     }
                 }),
                 Err(e) => Err(e),
