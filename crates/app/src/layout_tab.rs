@@ -172,21 +172,26 @@ impl LayoutTab {
                     return;
                 }
                 state.data = None;
-                let mut note = format!("{} in view", crate::app::plural(shapes.len(), "feature"));
+                let in_view = layout::thousands(shapes.len() as f64);
+                let mut note = match layer.total {
+                    Some(t) => format!("{in_view} in view · {} in table", layout::thousands(t as f64)),
+                    None => format!("{in_view} in view"),
+                };
                 if truncated {
-                    note = format!("first {} in view (zoom in for the rest)", layout::thousands(LAYER_LIMIT as f64));
+                    note = format!("First {} in view: zoom in for the rest", layout::thousands(LAYER_LIMIT as f64));
                 }
                 state.note = Some((note, false));
                 layer.shapes = shapes.into();
                 layer.values = values.into();
                 layer.loaded = Some((bbox, scale));
             }
-            Ok(LayerResult::Extent(extent)) => {
+            Ok(LayerResult::Extent(extent, total)) => {
                 if state.extent != Some(seq) {
                     return;
                 }
                 state.extent = None;
                 layer.extent = extent;
+                layer.total = total;
                 if extent.is_none() {
                     state.note = Some(("No geometry".into(), false));
                 }
@@ -215,6 +220,11 @@ impl LayoutTab {
                             count,
                         })
                         .collect();
+                    // Debug screenshot scenes: `RGRIP_DEMO_LAYOUT_CLASS_LABEL` renames the first class.
+                    #[cfg(debug_assertions)]
+                    if let (Ok(label), Some(first)) = (std::env::var("RGRIP_DEMO_LAYOUT_CLASS_LABEL"), classes.first_mut()) {
+                        first.label = label.replace("\\n", "\n");
+                    }
                 }
             }
             Err(e) => {
@@ -394,7 +404,7 @@ impl LayoutTab {
                     if matches!(layer.style, Style::Single) {
                         ui.color_edit_button_srgb(&mut layer.color);
                     }
-                    ui.add(TextEdit::singleline(&mut layer.label).desired_width(ui.available_width()).hint_text("Legend label"));
+                    label_edit(ui, &mut layer.label, "Legend label", ui.available_width());
                 });
                 ui.horizontal(|ui| {
                     ui.add_space(22.0);
@@ -470,13 +480,27 @@ impl LayoutTab {
                 });
                 if let Style::Categories { classes, more, .. } = &mut layer.style {
                     ui.add_space(6.0);
-                    ui.label(RichText::new("Categories: legend labels and colors").size(11.5).color(theme::MUTED()));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Categories").size(11.5).color(theme::MUTED()));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new("Rows").size(11.0).color(theme::FAINT())).on_hover_text("Rows in the whole table with this value (not just in view)");
+                        });
+                    });
+                    hint(ui, "Edit a label to rename it in the legend; Enter starts a new line");
+                    // Fixed columns: check, color, label, count (right-aligned).
+                    const COUNT_W: f32 = 50.0;
+                    let gap = ui.spacing().item_spacing.x;
+                    let label_w = (ui.available_width() - 22.0 - 40.0 - COUNT_W - 3.0 * gap - 12.0).max(60.0);
                     for c in classes.iter_mut() {
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut c.visible, "");
+                        ui.horizontal_top(|ui| {
+                            ui.add_sized([22.0, 22.0], egui::Checkbox::without_text(&mut c.visible)).on_hover_text("Show this value on the map and in the legend");
                             ui.color_edit_button_srgb(&mut c.color);
-                            ui.add(TextEdit::singleline(&mut c.label).desired_width(ui.available_width() - 44.0));
-                            ui.label(RichText::new(layout::thousands(c.count as f64)).size(11.0).color(theme::FAINT()));
+                            label_edit(ui, &mut c.label, "", label_w);
+                            ui.allocate_ui_with_layout(vec2(COUNT_W, 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.set_width(COUNT_W);
+                                ui.label(RichText::new(layout::thousands(c.count as f64)).size(11.0).color(theme::FAINT()))
+                                    .on_hover_text("Rows in the whole table with this value");
+                            });
                         });
                     }
                     if *more {
@@ -796,6 +820,27 @@ impl LayoutTab {
             );
         }
     }
+}
+
+/// A label field: Enter adds a line break (for the legend), and Khmer is
+/// drawn shaped over egui's unshaped text, as in the SQL editor.
+fn label_edit(ui: &mut Ui, text: &mut String, hint_text: &str, width: f32) -> egui::Response {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let mut khmer = Vec::new();
+    let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+        let mut job = egui::text::LayoutJob::simple(buf.as_str().to_owned(), font.clone(), color, wrap);
+        khmer = crate::shaping::hide_runs(ui, &mut job);
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+    let out = ui
+        .allocate_ui(vec2(width, 22.0), |ui| {
+            ui.set_max_width(width);
+            TextEdit::multiline(text).desired_rows(1).desired_width(width - 8.0).hint_text(hint_text).layouter(&mut layouter).show(ui)
+        })
+        .inner;
+    crate::shaping::paint_runs(ui, &out.galley, out.galley_pos, &khmer);
+    out.response
 }
 
 /// A section heading, with a rule above it (except the first).

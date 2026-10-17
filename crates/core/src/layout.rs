@@ -139,6 +139,8 @@ pub struct Layer {
     pub extent: Option<(Coord, Coord)>,
     /// The area (lon/lat bbox) and scale the shapes were loaded for.
     pub loaded: Option<([f64; 4], f64)>,
+    /// Rows in the table (with the filter).
+    pub total: Option<i64>,
 }
 
 /// How a layer is colored.
@@ -186,6 +188,7 @@ impl Layer {
             values: Default::default(),
             extent: None,
             loaded: None,
+            total: None,
         }
     }
 
@@ -233,7 +236,7 @@ impl Layer {
         let filter = if f.is_empty() { String::new() } else { format!(" where {f}") };
         format!(
             "with s as (select coalesce(nullif(ST_SRID({g}), 0), 4326) as srid from {t} where {g} is not null limit 1) \
-             select ST_Transform(ST_SetSRID(ST_Extent({g})::geometry, (select srid from s)), 4326) from {t}{filter}"
+             select ST_Transform(ST_SetSRID(ST_Extent({g})::geometry, (select srid from s)), 4326), count(*) from {t}{filter}"
         )
     }
 
@@ -513,14 +516,17 @@ impl Layout {
         let title = if self.title.trim().is_empty() { "Map title" } else { self.title.trim() };
         let title = Rect { x: at(Element::Title)[0], y: at(Element::Title)[1], w: text_w(title, ts) + 4.0, h: ts * 1.5 };
         let legend_rows = self.legend_rows();
-        let rows = legend_rows.len().max(1);
-        let label_w = legend_rows.iter().map(|r| text_w(&r.label, LEGEND_TEXT) + if r.indent { 3.0 } else { 0.0 }).fold(0.0, f64::max);
+        let rows_h = legend_rows.iter().map(|r| row_height(&r.label)).sum::<f64>().max(6.0);
+        let label_w = legend_rows
+            .iter()
+            .map(|r| r.label.lines().map(|l| text_w(l, LEGEND_TEXT)).fold(0.0, f64::max) + if r.indent { 3.0 } else { 0.0 })
+            .fold(0.0, f64::max);
         let head_w = text_w(&self.legend_title, LEGEND_TITLE);
         let legend = Rect {
             x: at(Element::Legend)[0],
             y: at(Element::Legend)[1],
             w: (label_w + 13.0).max(head_w + 8.0).max(28.0),
-            h: 9.0 + rows as f64 * 6.0 + 2.0,
+            h: 9.0 + rows_h + 2.0,
         };
         let (bar, label) = self.scale_bar();
         let scale = Rect {
@@ -735,11 +741,14 @@ impl Layout {
                 l.legend_rows(&mut rows);
                 layer_of_row.extend(std::iter::repeat_n(l, rows.len()));
             }
-            for (i, (row, l)) in self.legend_rows().iter().zip(layer_of_row).enumerate() {
-                let y = b.y + 9.0 + i as f64 * 6.0;
+            let mut y = b.y + 9.0;
+            for (row, l) in self.legend_rows().iter().zip(layer_of_row) {
+                let row_y = y;
+                y += row_height(&row.label);
+                let y = row_y;
                 let (sx, sy) = (b.x + 4.0 + if row.indent { 3.0 } else { 0.0 }, y + 1.0);
                 let Some((kind, c)) = row.swatch else {
-                    let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="#333">{}</text>"##, n(sx), n(sy + 3.0), n(LEGEND_TEXT), esc(&row.label));
+                    let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="#333">{}</text>"##, n(sx), n(sy + 3.0), n(LEGEND_TEXT), lines(&row.label, sx));
                     continue;
                 };
                 let color = format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
@@ -754,7 +763,7 @@ impl Layout {
                         let _ = write!(s, r##"<circle cx="{}" cy="{}" r="{}" fill="{color}" stroke="#fff" stroke-width="0.3"/>"##, n(sx + 2.5), n(sy + 1.8), n(l.point.min(2.0)));
                     }
                 }
-                let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" fill="#222">{}</text>"##, n(sx + 8.0), n(sy + 3.0), n(LEGEND_TEXT), esc(&row.label));
+                let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" fill="#222">{}</text>"##, n(sx + 8.0), n(sy + 3.0), n(LEGEND_TEXT), lines(&row.label, sx + 8.0));
             }
         }
         if self.item(Element::ScaleBar).visible {
@@ -791,6 +800,26 @@ impl Layout {
 
 const LEGEND_TITLE: f64 = 3.4;
 const LEGEND_TEXT: f64 = 3.0;
+/// Extra height of each further line of a legend label.
+const LEGEND_LINE: f64 = 3.8;
+
+/// A legend row's height: one line, plus each line break in its label.
+fn row_height(label: &str) -> f64 {
+    6.0 + label.trim_end().lines().count().saturating_sub(1) as f64 * LEGEND_LINE
+}
+
+/// Label text for SVG, one `tspan` per line (labels may hold line breaks).
+fn lines(label: &str, x: f64) -> String {
+    let mut out = String::new();
+    for (i, line) in label.trim_end().lines().enumerate() {
+        if i == 0 {
+            out.push_str(&esc(line));
+        } else {
+            let _ = write!(out, r#"<tspan x="{}" dy="{}">{}</tspan>"#, n(x), n(LEGEND_LINE), esc(line));
+        }
+    }
+    out
+}
 
 /// One polygon as its own `<path>` (outer ring and holes together).
 fn polygon(out: &mut String, rings: &[Vec<Coord>], path: &dyn Fn(&mut String, &[Coord], bool)) {
@@ -1074,6 +1103,17 @@ mod tests {
         }
         let svg = l.svg(&mut |_, _, _| None, 150.0);
         assert!(!svg.contains("#0000c8") && !svg.contains("Public land"));
+    }
+
+    #[test]
+    fn legend_labels_can_break_lines() {
+        let mut l = layout_with(vec![Geometry::Point([104.91, 11.56])]);
+        let one = l.boxes()[Element::Legend as usize].h;
+        l.layers[0].label = "Land parcels\n(surveyed 2024)".into();
+        let two = l.boxes()[Element::Legend as usize].h;
+        assert!((two - one - LEGEND_LINE).abs() < 1e-9);
+        let svg = l.svg(&mut |_, _, _| None, 150.0);
+        assert!(svg.contains("Land parcels<tspan") && svg.contains(">(surveyed 2024)</tspan>"), "{svg}");
     }
 
     #[test]

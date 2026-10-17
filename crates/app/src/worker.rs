@@ -28,7 +28,8 @@ pub enum LayerQuery {
 
 pub enum LayerResult {
     Data { shapes: Vec<rgrip_core::geo::Geometry>, values: Vec<Option<String>>, truncated: bool },
-    Extent(Option<(rgrip_core::geo::Coord, rgrip_core::geo::Coord)>),
+    /// The extent, and the row count.
+    Extent(Option<(rgrip_core::geo::Coord, rgrip_core::geo::Coord)>, Option<i64>),
     Classes(Vec<(Option<String>, i64)>),
 }
 
@@ -365,7 +366,8 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                                     hi = [hi[0].max(c[0]), hi[1].max(c[1])];
                                 });
                             }
-                            LayerResult::Extent((lo[0] <= hi[0]).then_some((lo, hi)))
+                            let count = rows.first().and_then(|(r, _)| r.get(1).cloned().flatten()).and_then(|n| n.parse().ok());
+                            LayerResult::Extent((lo[0] <= hi[0]).then_some((lo, hi)), count)
                         }
                         LayerQuery::Classes => LayerResult::Classes(
                             rows.into_iter().map(|(r, _)| (r.first().cloned().flatten(), r.get(1).cloned().flatten().and_then(|n| n.parse().ok()).unwrap_or(0))).collect(),
