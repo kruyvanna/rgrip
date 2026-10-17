@@ -41,7 +41,7 @@ if (hero && !reduce) {
 // Motion, everything is simply there.
 if (!reduce) {
   document.documentElement.classList.add("js");
-  const items = document.querySelectorAll(".hero .pill, .hero h1, .hero .lead, .hero .cta, .hero .fine, .copy");
+  const items = document.querySelectorAll(".hero .pill, .hero h1, .hero .lead, .hero .cta, .hero .fine, .copy, .page-head h1, .page-head .lead");
   items.forEach((el) => el.classList.add("rise"));
   const io = new IntersectionObserver((entries) => {
     entries.forEach((e) => {
@@ -68,3 +68,16 @@ clips.forEach((v) => {
   playIo.observe(v);
   v.addEventListener("pause", () => { if (!v.ended && document.visibilityState === "visible" && v.controls) v.dataset.userPaused = "1"; });
 });
+
+// Features page: the section index follows the section you're reading.
+const toc = document.querySelectorAll(".toc a");
+if (toc.length) {
+  const links = new Map([...toc].map((a) => [a.hash.slice(1), a]));
+  const spy = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (!e.isIntersecting) return;
+      toc.forEach((a) => a.classList.toggle("on", a === links.get(e.target.id)));
+    });
+  }, { rootMargin: "-30% 0px -60% 0px" });
+  document.querySelectorAll(".group").forEach((g) => spy.observe(g));
+}

@@ -229,6 +229,9 @@ Sticky translucent bar: wordmark (24px icon, 600 at 17px, -0.01em) on the left; 
 ### Inline code and keys
 Geist Mono 500 at 0.86em on Raised Slate Hi with a Hairline border and 5px radius.
 
+### Features page (`site/features.html`)
+Read mode, same world. A left-aligned page head (64px title, lead with the version), then a 180px sticky section index beside the groups: Faint Grey links on a Hairline rail, the current section in Paper White with a 1px App Blue rail mark. Each group is a headline, one line of Quiet Grey copy, one real screenshot in the standard frame, and a two-column ruled list of term and one-line definition. Groups are separated by a Hairline and 96px (72px under 900px, 56px under 640px). Under 900px the index is hidden.
+
 ### Footer
 Hairline top, Faint Grey 13.5px license line on the left, Quiet Grey links on the right (GitHub, Releases, Changelog, Sponsor with a heart line icon).
 

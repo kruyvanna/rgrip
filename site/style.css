@@ -84,6 +84,10 @@ h2{margin:0 0 16px;font-size:clamp(30px,3.6vw,44px);line-height:1.08;font-weight
 .list dt{font-weight:580;font-size:15px}
 .list dd{margin:0;color:var(--muted);font-size:15px;line-height:1.55}
 
+.more{margin:32px 0 0;text-align:center}
+.more a{display:inline-flex;align-items:center;gap:8px;color:var(--text);font-weight:550;font-size:15px;text-decoration:none}
+.more a .ico{width:16px;height:16px;color:var(--accent);transition:transform .2s var(--ease)}
+.more a:hover .ico{transform:translateX(3px)}
 .get{padding-bottom:120px}
 .get-icon{margin:0 auto 20px;border-radius:14px}
 .get p{color:var(--muted);margin:0 auto 30px;max-width:30em}
@@ -97,6 +101,44 @@ h2{margin:0 0 16px;font-size:clamp(30px,3.6vw,44px);line-height:1.08;font-weight
 .foot a{color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:6px}
 .foot a:hover{color:var(--text)}
 .foot .ico{width:14px;height:14px}
+
+/* Features page */
+.top nav a[aria-current="page"]{color:var(--text)}
+.page-head{position:relative;padding:96px 0 0;overflow:hidden}
+.page-head::before{content:"";position:absolute;left:-180px;top:-260px;width:900px;height:560px;z-index:-1;pointer-events:none;
+  background:radial-gradient(closest-side,rgba(122,162,247,.10),transparent)}
+.page-title{margin:0 0 18px;font-size:clamp(40px,5.2vw,64px)}
+.page-lead{margin:0;max-width:34em}
+.page-lead a{color:var(--text);text-decoration-color:var(--line-2);text-underline-offset:3px;transition:text-decoration-color .2s}
+.page-lead a:hover{text-decoration-color:var(--text)}
+.feat{display:grid;grid-template-columns:180px minmax(0,1fr);gap:56px;align-items:start;margin-top:72px}
+.toc{position:sticky;top:96px;display:flex;flex-direction:column;border-left:1px solid var(--line)}
+.toc a{margin-left:-1px;padding:6px 0 6px 16px;border-left:1px solid transparent;color:var(--faint);font-size:14px;text-decoration:none;transition:color .2s,border-color .2s}
+.toc a:hover{color:var(--text)}
+.toc a.on{color:var(--text);border-left-color:var(--accent)}
+.group{padding:0 0 96px}
+.group + .group{padding-top:96px;border-top:1px solid var(--line)}
+.group h2{margin-bottom:12px}
+.group-copy{margin:0 0 36px;color:var(--muted);font-size:17px;max-width:34em}
+.group .shot{margin:0 0 40px}
+.items{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:40px;margin:0}
+.items div{padding:16px 0;border-top:1px solid var(--line)}
+.items dt{font-weight:580;font-size:15.5px;letter-spacing:-.005em}
+.items dd{margin:3px 0 0;color:var(--muted);font-size:14.5px;line-height:1.55}
+.feat + .get{padding-top:24px}
+@media (max-width:900px){
+  .feat{grid-template-columns:minmax(0,1fr);margin-top:56px}
+  .toc{display:none}
+  .group{padding-bottom:72px}
+  .group + .group{padding-top:72px}
+}
+@media (max-width:640px){
+  .page-head{padding-top:56px}
+  .items{grid-template-columns:minmax(0,1fr)}
+  .group .shot{border-radius:10px;margin-bottom:28px}
+  .group{padding-bottom:56px}
+  .group + .group{padding-top:56px}
+}
 
 /* Entrance: content is visible by default; JS only adds the motion. */
 .js .rise{opacity:0;transform:translateY(14px);filter:blur(6px);transition:opacity .9s var(--ease),transform .9s var(--ease),filter .9s var(--ease)}

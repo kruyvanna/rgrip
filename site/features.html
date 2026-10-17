@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Features · rgrip</title>
+  <meta name="description" content="Everything rgrip does: the SQL console, browsing and editing tables, the map, map layouts with PDF and PNG export, and importing files into PostGIS.">
+  <meta name="theme-color" content="#0c0d10">
+  <link rel="icon" type="image/png" href="img/icon.png">
+  <link rel="apple-touch-icon" href="img/icon.png">
+  <link rel="canonical" href="https://yoouTaro.github.io/rgrip/features.html">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="rgrip">
+  <meta property="og:title" content="Features · rgrip">
+  <meta property="og:description" content="Everything rgrip does: the SQL console, browsing and editing tables, the map, map layouts with PDF and PNG export, and importing files into PostGIS.">
+  <meta property="og:url" content="https://yoouTaro.github.io/rgrip/features.html">
+  <meta property="og:image" content="https://yoouTaro.github.io/rgrip/img/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <link rel="preload" href="fonts/geist.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css?v=13">
+  <script src="main.js?v=13" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="top">
+    <div class="wrap top-in">
+      <a class="mark" href="./" aria-label="rgrip home">
+        <img src="img/icon.png" alt="" width="24" height="24"><span>rgrip</span>
+      </a>
+      <nav aria-label="Primary">
+        <a href="./#map">Map</a>
+        <a href="./#import">Import</a>
+        <a href="./#layout">Layouts</a>
+        <a href="features.html" aria-current="page">Features</a>
+        <a href="https://github.com/yoouTaro/rgrip/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/yoouTaro/rgrip" class="nav-gh" aria-label="GitHub"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg></a>
+        <a class="btn btn-sm btn-primary" data-download href="https://github.com/yoouTaro/rgrip/releases"><span>Download</span></a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="page-head">
+      <div class="wrap">
+        <h1 class="page-title">Features</h1>
+        <p class="lead page-lead">What rgrip does today, version <span data-version>0.0.12</span>. It's alpha, so the list grows with each release; the <a href="https://github.com/yoouTaro/rgrip/blob/main/CHANGELOG.md">changelog</a> has the details.</p>
+      </div>
+    </section>
+
+    <div class="wrap feat">
+      <nav class="toc" aria-label="On this page">
+        <a href="#query" class="on">SQL console</a>
+        <a href="#edit">Browse and edit</a>
+        <a href="#map">Map</a>
+        <a href="#layout">Map layouts</a>
+        <a href="#import">Import</a>
+        <a href="#export">Export</a>
+      </nav>
+
+      <div class="groups">
+        <section class="group" id="query" aria-labelledby="query-h">
+          <h2 id="query-h">SQL console</h2>
+          <p class="group-copy">Write a query, run it, read the rows. Results sit under the editor, with a map tab when there's geometry in them.</p>
+          <figure class="shot"><img src="img/query.webp" alt="SQL console: a join across demo.parcels, owners and districts, and its 108 rows in the grid below" width="1400" height="1077" loading="lazy"></figure>
+          <dl class="items">
+            <div><dt>Autocomplete</dt><dd>Schemas, tables, columns and aliases as you type.</dd></div>
+            <div><dt>Formatter</dt><dd>Tidy a query in one click.</dd></div>
+            <div><dt>Slash commands</dt><dd><code>/count</code> and friends expand to SQL. Edit them, or add your own.</dd></div>
+            <div><dt>Comments and pairs</dt><dd><kbd>⌘/</kbd> toggles <code>--</code> comments; quotes and brackets close themselves.</dd></div>
+            <div><dt>Sort results</dt><dd>Click a column header. Paged results sort on the server.</dd></div>
+            <div><dt>Run one or all</dt><dd>Run the statement under the cursor, or the whole script.</dd></div>
+          </dl>
+        </section>
+
+        <section class="group" id="edit" aria-labelledby="edit-h">
+          <h2 id="edit-h">Browse and edit</h2>
+          <p class="group-copy">Open a table and change it in place. Edits wait as pending changes until you save, and then go in one transaction.</p>
+          <figure class="shot"><img src="img/edit.webp" alt="demo.owners with three pending changes and the date picker open on registered_on" width="1400" height="628" loading="lazy"></figure>
+          <dl class="items">
+            <div><dt>Edit in place</dt><dd>Double-click a cell; dates get a picker.</dd></div>
+            <div><dt>Edit table</dt><dd>Rename, add, retype and drop columns, defaults and the key, with the SQL shown first.</dd></div>
+            <div><dt>Add a primary key</dt><dd>For tables that have none, so they can be edited.</dd></div>
+            <div><dt>Related rows</dt><dd>Follow foreign keys, or relations inferred from column names.</dd></div>
+            <div><dt>Filter and sort</dt><dd>A <code>WHERE</code> box over the grid, and sorting by any column.</dd></div>
+            <div><dt>Freeze and go to</dt><dd>Pin columns while you scroll, or jump to one by name.</dd></div>
+          </dl>
+        </section>
+
+        <section class="group" id="map" aria-labelledby="map-h">
+          <h2 id="map-h">Map</h2>
+          <p class="group-copy">Any query or table with geometry shows on a map. Put it next to the grid and the two share one selection.</p>
+          <figure class="shot"><img src="img/split.webp" alt="Split view of demo.parcels: selected rows in the grid are highlighted on the map" width="1400" height="875" loading="lazy"></figure>
+          <dl class="items">
+            <div><dt>Split view</dt><dd>Grid and map side by side, resizable.</dd></div>
+            <div><dt>Linked selection</dt><dd>Select rows to light up features; click a feature to select its row.</dd></div>
+            <div><dt>Zoom to selected</dt><dd>Fit the map to the rows you picked.</dd></div>
+            <div><dt>Filter by area</dt><dd>Draw a box on the map to filter the table.</dd></div>
+            <div><dt>Reprojection</dt><dd>WGS 84, Web Mercator and UTM, done in the client.</dd></div>
+            <div><dt>Basemaps</dt><dd>Dark, light, streets or satellite.</dd></div>
+          </dl>
+        </section>
+
+        <section class="group" id="layout" aria-labelledby="layout-h">
+          <h2 id="layout-h">Map layouts</h2>
+          <p class="group-copy">A tab for making a map you can print or send: tables as layers, a page, and the things a map needs on it.</p>
+          <figure class="shot"><img src="img/layout.webp" alt="Map layout tab: the provinces of Cambodia on an A4 landscape page with a graticule, title, legend, scale bar and north arrow" width="1400" height="1005" loading="lazy"></figure>
+          <dl class="items">
+            <div><dt>Layers from tables</dt><dd>Several tables, each with its own filter, color and line width.</dd></div>
+            <div><dt>Color by a column</dt><dd>Categories come from what's in view; rename them in the legend.</dd></div>
+            <div><dt>Place by dragging</dt><dd>Title, legend, scale bar and north arrow snap to the page and the frame.</dd></div>
+            <div><dt>Page</dt><dd>A4, A3, Letter and more, portrait or landscape, margins per side.</dd></div>
+            <div><dt>Graticule</dt><dd>Decimal or degrees and minutes, labelled outside the frame.</dd></div>
+            <div><dt>PDF and PNG</dt><dd>Vector PDF, or PNG at the DPI you choose.</dd></div>
+          </dl>
+        </section>
+
+        <section class="group" id="import" aria-labelledby="import-h">
+          <h2 id="import-h">Import</h2>
+          <p class="group-copy">Right-click a schema and pick a file. Check the preview and the column types, then import into a new table or one you have.</p>
+          <figure class="shot"><img src="img/import.webp" alt="Import data dialog: markets.csv with inferred column types, a point column from lon and lat, SRID 4326 and a preview of the rows" width="1400" height="1238" loading="lazy"></figure>
+          <dl class="items">
+            <div><dt>CSV and TSV</dt><dd>The delimiter is found for you; lon and lat become a point.</dd></div>
+            <div><dt>GeoJSON and Shapefile</dt><dd>The SRID is read from the <code>.prj</code>.</dd></div>
+            <div><dt>Types you can change</dt><dd>Names and types are guessed, and editable before import.</dd></div>
+            <div><dt>All or nothing</dt><dd>One transaction; any error rolls it all back.</dd></div>
+          </dl>
+        </section>
+
+        <section class="group" id="export" aria-labelledby="export-h">
+          <h2 id="export-h">Export</h2>
+          <p class="group-copy">Get rows out the way the next tool wants them.</p>
+          <dl class="items">
+            <div><dt>Files</dt><dd>CSV, TSV, JSON, GeoJSON, Markdown, SQL <code>INSERT</code> and SVG.</dd></div>
+            <div><dt>Copy as an image</dt><dd>Selected rows as a picture, ready to paste.</dd></div>
+            <div><dt>Copy for an AI agent</dt><dd>Markdown with the query, the column types and the rows.</dd></div>
+            <div><dt>Map as PNG</dt><dd>A quick export from the map view, with a title and legend.</dd></div>
+          </dl>
+        </section>
+      </div>
+    </div>
+
+    <section class="section get" id="download" aria-labelledby="download-h">
+      <div class="wrap narrow center">
+        <img src="img/icon.png" alt="" width="64" height="64" class="get-icon">
+        <h2 id="download-h">Get rgrip</h2>
+        <p>Free and open source, for Apple silicon Macs. The first time, right-click <code>rgrip.app</code> and choose Open.</p>
+        <div class="cta center-cta">
+          <a class="btn btn-primary" data-download href="https://github.com/yoouTaro/rgrip/releases"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg><span>Download for macOS</span></a>
+          <a class="btn btn-ghost" href="https://github.com/yoouTaro/rgrip">View on GitHub</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap foot-in">
+      <p>rgrip is free and open source, MIT or Apache-2.0. Built with an AI pair programmer, reviewed and tested by a human.</p>
+      <nav aria-label="Footer">
+        <a href="https://github.com/yoouTaro/rgrip">GitHub</a>
+        <a href="https://github.com/yoouTaro/rgrip/releases">Releases</a>
+        <a href="https://github.com/yoouTaro/rgrip/blob/main/CHANGELOG.md">Changelog</a>
+        <a data-donate href="https://github.com/sponsors/yoouTaro"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>Sponsor</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>
