@@ -160,6 +160,8 @@ pub struct Class {
     pub color: [u8; 3],
     pub visible: bool,
     pub count: i64,
+    /// Rows with this value that have a geometry (the rest can't be drawn).
+    pub with_geom: i64,
 }
 
 /// One row of the legend: a swatch (layer kind and color) or a heading.
@@ -260,8 +262,9 @@ impl Layer {
         let f = self.filter.trim();
         let filter = if f.is_empty() { String::new() } else { format!(" where {f}") };
         format!(
-            "select ({})::text, count(*) from {}{filter} group by 1 order by 2 desc, 1 limit {limit}",
+            "select ({})::text, count(*), count({}) from {}{filter} group by 1 order by 2 desc, 1 limit {limit}",
             crate::sql::quote_ident(column),
+            crate::sql::quote_ident(&self.column),
             self.table_ref()
         )
     }
@@ -1347,7 +1350,7 @@ mod tests {
     fn categories_color_and_label_features() {
         let mut l = layout_with(vec![Geometry::Point([104.91, 11.56]), Geometry::Point([104.92, 11.56]), Geometry::Point([104.93, 11.56])]);
         l.layers[0].values = vec![Some("garden".to_string()), Some("public".to_string()), None].into();
-        let class = |v: &str, label: &str, color| Class { value: Some(v.into()), label: label.into(), color, visible: true, count: 1 };
+        let class = |v: &str, label: &str, color| Class { value: Some(v.into()), label: label.into(), color, visible: true, count: 1, with_geom: 1 };
         l.layers[0].style = Style::Categories { column: "land_use".into(), classes: vec![class("garden", "Gardens", [0, 200, 0]), class("public", "Public land", [0, 0, 200])], more: true };
         let svg = l.svg(&mut |_, _, _| None, 150.0);
         assert!(svg.contains("#00c800") && svg.contains("#0000c8"));
@@ -1452,7 +1455,7 @@ mod tests {
         let sql = layer.data_sql([0.0, 0.0, 1.0, 1.0], 1000.0, 5);
         assert!(sql.contains(", (\"land_use\")::text from") && sql.contains(" and (land_use = 'garden') limit 5"), "{sql}");
         assert!(layer.extent_sql().contains("ST_Extent(\"geom\"::geometry)"));
-        assert_eq!(layer.classes_sql("land_use", 20), "select (\"land_use\")::text, count(*) from \"demo\".\"parcels\" where land_use = 'garden' group by 1 order by 2 desc, 1 limit 20");
+        assert_eq!(layer.classes_sql("land_use", 20), "select (\"land_use\")::text, count(*), count(\"geom\") from \"demo\".\"parcels\" where land_use = 'garden' group by 1 order by 2 desc, 1 limit 20");
         // Reload when the view leaves what's loaded, or the scale moves a lot.
         layer.loaded = Some(([0.0, 0.0, 10.0, 10.0], 10_000.0));
         assert!(!layer.needs_reload([1.0, 1.0, 9.0, 9.0], 12_000.0));

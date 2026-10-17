@@ -101,6 +101,8 @@ pub struct LayoutTab {
     element_tex: Vec<(Element, TextureHandle, layout::Rect)>,
     /// The category row under the pointer: its features get rings on the map.
     hover_class: Option<(u64, Option<String>)>,
+    /// Why the hovered category shows nothing, if it doesn't.
+    hover_note: Option<String>,
     jobs: mpsc::Sender<Job>,
     done: mpsc::Receiver<Done>,
     drag: Option<Drag>,
@@ -133,6 +135,7 @@ impl LayoutTab {
             texture: None,
             element_tex: Vec::new(),
             hover_class: None,
+            hover_note: None,
             jobs,
             done,
             drag: None,
@@ -242,12 +245,13 @@ impl LayoutTab {
                         .into_iter()
                         .take(MAX_CLASSES)
                         .enumerate()
-                        .map(|(i, (value, count))| Class {
+                        .map(|(i, (value, count, with_geom))| Class {
                             label: value.clone().unwrap_or_else(|| "(empty)".into()),
                             value,
                             color: CLASS_COLORS[i % CLASS_COLORS.len()],
                             visible: true,
                             count,
+                            with_geom,
                         })
                         .collect();
                     // Debug screenshot scenes: `RGRIP_DEMO_LAYOUT_CLASS_LABEL` renames the first class.
@@ -359,6 +363,7 @@ impl LayoutTab {
         let before = self.layout.clone();
         self.hover_class = None;
         let mut hover_class = None;
+        let mut self_hover_note: Option<String> = None;
 
         section(ui, "Page", true);
         row(ui, "Size", |ui| {
@@ -582,8 +587,13 @@ impl LayoutTab {
                             label_edit(ui, &mut c.label, "", label_w);
                             ui.allocate_ui_with_layout(vec2(COUNT_W, 22.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.set_width(COUNT_W);
-                                ui.label(RichText::new(layout::thousands(c.count as f64)).size(11.0).color(theme::FAINT()))
-                                    .on_hover_text(format!("{} in the table, {in_view} in view", layout::thousands(c.count as f64)));
+                                let no_geom = c.count - c.with_geom;
+                                let color = if c.with_geom == 0 { theme::WARN() } else { theme::FAINT() };
+                                let mut tip = format!("{} in the table, {in_view} in view", layout::thousands(c.count as f64));
+                                if no_geom > 0 {
+                                    tip.push_str(&format!("\n{} without a geometry (not on the map)", layout::thousands(no_geom as f64)));
+                                }
+                                ui.label(RichText::new(layout::thousands(c.count as f64)).size(11.0).color(color)).on_hover_text(tip);
                             });
                             let locate_btn = egui::Button::image(icons::image(ui.ctx(), Svg::Locate, 13.0, theme::MUTED())).frame(false);
                             if ui.add(locate_btn).on_hover_text("Zoom the map to this value's features").clicked() {
@@ -594,6 +604,17 @@ impl LayoutTab {
                         // Pointing at a row rings its features on the map.
                         if ui.rect_contains_pointer(row.response.rect) {
                             hover_class = Some((id, c.value.clone()));
+                            self_hover_note = Some(if !layer.visible {
+                                "This layer is hidden".to_string()
+                            } else if !c.visible {
+                                "This value is turned off".to_string()
+                            } else if c.with_geom == 0 {
+                                format!("{}: no geometry, so nothing to draw", c.label.lines().next().unwrap_or(""))
+                            } else if in_view == 0 {
+                                format!("{}: none in view, the locate button zooms to them", c.label.lines().next().unwrap_or(""))
+                            } else {
+                                String::new()
+                            });
                         }
                     }
                     if *more {
@@ -634,6 +655,7 @@ impl LayoutTab {
         }
 
         self.hover_class = hover_class;
+        self.hover_note = self_hover_note.filter(|n| !n.is_empty());
 
         section(ui, "On the page", false);
         hint(ui, "Drag them on the page to place them");
@@ -875,6 +897,14 @@ impl LayoutTab {
                 shown += 1;
             }
             ui.ctx().request_repaint();
+        }
+        if let Some(note) = &self.hover_note {
+            let f = self.layout.frame();
+            let at = to_screen([f.x + f.w / 2.0, f.y + f.h / 2.0]);
+            let galley = painter.layout_no_wrap(note.clone(), FontId::proportional(13.0), Color32::WHITE);
+            let back = Rect::from_center_size(at, galley.size() + vec2(24.0, 14.0));
+            painter.rect_filled(back, 8.0, Color32::from_black_alpha(200));
+            painter.galley(back.center() - galley.size() / 2.0, galley, Color32::WHITE);
         }
         if self.texture.as_ref().is_none_or(|(v, _, _)| *v != self.version) || self.busy() {
             painter.text(page.right_bottom() + vec2(-8.0, -8.0), Align2::RIGHT_BOTTOM, if self.busy() { "Loading…" } else { "Rendering…" }, FontId::proportional(11.0), Color32::from_gray(120));
