@@ -5,8 +5,11 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.0.12-alpha] - 2026-10-17
+
 ### Added
 - Map layout: a tab for print maps. Right-click a table with a geometry column → **Add to map layout** (or a connection → **New map layout**) and add more tables from the tab. Set the page (A5–A2, Letter, Legal, Tabloid; portrait or landscape; margin), basemap and scale (1:N), pan and zoom the map on the page, and style each layer (color, line width, point size, fill, legend label, SQL filter). Drag the title, legend, scale bar and north arrow anywhere on the page; they snap to the frame's edges and center. Export as **PDF** (vector shapes and text) or **PNG** at 150, 300 or 600 dpi; the preview, the PNG and the PDF are drawn from the same page. Layers load only the features in view (simplified to print resolution and reprojected by PostGIS, so any SRID works) and reload as you pan and zoom. **Color by** a column gives each value its own color and an editable legend label; the categories, counts and legend follow what's in the frame (up to 12 values, the rest as Other), and a value keeps its color and label as it leaves and comes back into view. Margins can be set per side. Legend labels can break onto several lines. A **graticule** (latitude/longitude grid) can be shown, with an automatic or fixed interval, labels in decimal degrees or degrees-minutes-seconds along the frame, and its own line color and opacity. Title: size, color, bold and a white outline; legend: text size, color and box. Elements snap to the page's center and edges as well as the frame (and just above or below it), with a guide line.
+- Sort query results: click a column header in a console result (ascending, descending, then back to the order returned); the header shows an arrow. A single read-only query is sorted by the database, so every page is in order; other results sort the rows already loaded.
 - Export map: the **Export map** button on the map saves what you see as a PNG (or copies it), laid out like a printed map: an optional title, a legend (layer and selected features), a scale bar and a north arrow, with the basemap credit. Saved at screen resolution.
 
 ## [0.0.11-alpha] - 2026-10-16
@@ -148,7 +151,8 @@ First alpha: a minimal DataGrip-style PostgreSQL client written in Rust.
 - Khmer typed into the SQL editor is not shaped yet.
 - Only macOS on Apple silicon is published; other platforms can build from source.
 
-[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.11-alpha...HEAD
+[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.12-alpha...HEAD
+[0.0.12-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.12-alpha
 [0.0.11-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.11-alpha
 [0.0.10-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.10-alpha
 [0.0.9-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.9-alpha

@@ -140,6 +140,12 @@ struct Console {
     ddl: bool,
     /// Single read-only statement being paged server-side, and the current offset.
     paged: Option<String>,
+    /// The statement as run, before a sort wrapped it.
+    paged_base: Option<String>,
+    /// Result sort: which result, column, ascending.
+    order: Option<(usize, String, bool)>,
+    /// The rows of an in-memory sorted result in their original order.
+    unsorted: Option<(usize, Vec<Vec<Option<String>>>)>,
     offset: usize,
     map: crate::map::MapView,
     /// The saved query this console was opened from / saved as.
@@ -210,6 +216,9 @@ impl Console {
             popup: None,
             ddl: false,
             paged: None,
+            paged_base: None,
+            order: None,
+            unsorted: None,
             offset: 0,
             map: Default::default(),
             saved_id: None,
@@ -597,6 +606,8 @@ enum TabAction {
     Probe { modal: bool, rows: Vec<usize>, probes: Vec<(String, String, String)>, map: Vec<(usize, usize)> },
     /// Popup: back to the previous related rows.
     RelatedBack,
+    /// Sort a console result (result index, column index) by that column.
+    SortResult(usize, usize),
     /// Next (`true`) or previous page of a paged console query.
     Page(bool),
     Cancel,
@@ -1443,12 +1454,58 @@ impl App {
                 c.run_schema = c.schema_for_run(&schemas);
                 c.run_database = c.database.clone();
                 c.paged = sql::paged_query(&text, 1, 0).map(|_| text.clone());
+                c.paged_base = c.paged.clone();
+                c.order = None;
+                c.unsorted = None;
                 let page = c.paged.is_some().then_some(0);
                 if connected {
                     self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql: text, page, schema: c.run_schema.clone(), database: c.run_database.clone() });
                 } else {
                     c.pending = Some(text);
                     needs_connect = true;
+                }
+            }
+            (TabAction::SortResult(n, col), TabKind::Console(c)) => {
+                if c.running.is_some() {
+                    return;
+                }
+                let Some(Ok(out)) = &mut c.output else { return };
+                let Some(rs) = out.statements.iter_mut().filter_map(|s| s.result.as_mut()).nth(n) else { return };
+                let Some(name) = rs.columns.get(col).cloned() else { return };
+                // Cycle: ascending → descending → as returned.
+                c.order = match c.order.take() {
+                    Some((m, c2, true)) if m == n && c2 == name => Some((n, name.clone(), false)),
+                    Some((m, c2, false)) if m == n && c2 == name => None,
+                    _ => Some((n, name.clone(), true)),
+                };
+                match (&c.paged_base, connected) {
+                    // Paged: sort on the server, so every page is in order.
+                    (Some(base), true) => {
+                        c.paged = match &c.order {
+                            Some((_, name, asc)) => sql::sorted_query(base, name, *asc).or(Some(base.clone())),
+                            None => Some(base.clone()),
+                        };
+                        c.offset = 0;
+                        c.running = Some(Instant::now());
+                        let sql = c.paged.clone().unwrap_or_default();
+                        self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page: Some(0), schema: c.run_schema.clone(), database: c.run_database.clone() });
+                    }
+                    (Some(_), false) => {}
+                    // Everything is loaded: sort in memory (keeping the original order to go back to).
+                    (None, _) => {
+                        if c.unsorted.as_ref().is_none_or(|(m, _)| *m != n) {
+                            c.unsorted = Some((n, rs.rows.clone()));
+                        }
+                        match &c.order {
+                            Some((_, _, asc)) => rs.sort_by_column(col, *asc),
+                            None => {
+                                if let Some((_, rows)) = c.unsorted.take() {
+                                    rs.rows = rows;
+                                }
+                            }
+                        }
+                        c.grid = GridState::fresh(&c.grid);
+                    }
                 }
             }
             (TabAction::Page(forward), TabKind::Console(c)) => {
@@ -3556,7 +3613,7 @@ fn console_ui(
                 });
         });
 
-    let Console { running, output, view, grid, paged, offset, map, last_sql, .. } = c;
+    let Console { running, output, view, grid, paged, offset, map, last_sql, order, .. } = c;
     if let Some(started) = running {
         centered(ui, |ui| {
             ui.horizontal(|ui| {
@@ -3650,7 +3707,10 @@ fn console_ui(
                 View::Result(n) if n < sets.len() => {
                     let row_offset = if paged.is_some() { *offset } else { 0 };
                     let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations: &[], counts: &[] };
-                    grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, None, row_offset, &source, None);
+                    let sort = order.as_ref().filter(|(m, _, _)| *m == n).map(|(_, c, asc)| grid::Sort { column: c, ascending: *asc });
+                    if let Some(grid::GridEvent::HeaderClicked(i)) = grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, None) {
+                        action = Some(TabAction::SortResult(n, i));
+                    }
                 }
                 View::Map(n) if n < sets.len() => {
                     let cols = sets[n].geometry_columns().to_vec();
@@ -3668,6 +3728,7 @@ fn console_ui(
                     let row_offset = if paged.is_some() { *offset } else { 0 };
                     let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations: &[], counts: &[] };
                     let can_reproject = paged.is_some();
+                    let mut sort_click = None;
                     let reproject = &mut action;
                     split_view(
                         ui,
@@ -3680,9 +3741,15 @@ fn console_ui(
                             }
                         },
                         |ui, g| {
-                            grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], g, None, row_offset, &source, None);
+                            let sort = order.as_ref().filter(|(m, _, _)| *m == n).map(|(_, c, asc)| grid::Sort { column: c, ascending: *asc });
+                            if let Some(grid::GridEvent::HeaderClicked(i)) = grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], g, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, None) {
+                                sort_click = Some(TabAction::SortResult(n, i));
+                            }
                         },
                     );
+                    if sort_click.is_some() {
+                        action = sort_click;
+                    }
                 }
                 _ => output_log(ui, out),
             }

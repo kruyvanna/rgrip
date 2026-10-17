@@ -89,6 +89,16 @@ pub fn paged_query(stmt: &str, limit: usize, offset: usize) -> Option<(String, u
     Some((sql, PAGE_PREFIX.len()))
 }
 
+/// `stmt` wrapped to sort by `column` (for sorting a query result on the
+/// server, so every page is in order). `None` if it can't be wrapped.
+pub fn sorted_query(stmt: &str, column: &str, ascending: bool) -> Option<String> {
+    paged_query(stmt, 1, 0)?;
+    let [s] = &split_statements(stmt)[..] else { return None };
+    let body = &stmt[..s.trimmed.end];
+    let dir = if ascending { "asc nulls last" } else { "desc nulls last" };
+    Some(format!("select * from (\n{body}\n) as _rgrip_sort order by {} {dir}", quote_ident(column)))
+}
+
 /// Compact display form of verbose Postgres type names.
 pub fn short_type(ty: &str) -> String {
     const NAMES: [(&str, &str); 5] = [
@@ -262,4 +272,14 @@ mod tests {
         assert_eq!(short_type("timestamp with time zone[]"), "timestamptz[]");
         assert_eq!(short_type("character varying(20)"), "varchar(20)");
     }
+
+    #[test]
+    fn sorts_a_query_on_the_server() {
+        let q = sorted_query("select a, b from t where x = 1;", "b", false).unwrap();
+        assert_eq!(q, "select * from (\nselect a, b from t where x = 1\n) as _rgrip_sort order by \"b\" desc nulls last");
+        // Still pageable, and writes can't be wrapped.
+        assert!(paged_query(&q, 1000, 0).is_some());
+        assert!(sorted_query("delete from t", "a", true).is_none());
+    }
+
 }

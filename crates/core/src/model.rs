@@ -277,6 +277,28 @@ pub struct ResultSet {
 }
 
 impl ResultSet {
+    /// Sort the rows by column `col` (stable). Numbers compare as numbers
+    /// when both values parse; NULLs go last either way.
+    pub fn sort_by_column(&mut self, col: usize, ascending: bool) {
+        self.rows.sort_by(|a, b| {
+            let (x, y) = (a.get(col).and_then(|v| v.as_deref()), b.get(col).and_then(|v| v.as_deref()));
+            match (x, y) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, _) => std::cmp::Ordering::Greater,
+                (_, None) => std::cmp::Ordering::Less,
+                (Some(x), Some(y)) => {
+                    let o = match (x.trim().parse::<f64>(), y.trim().parse::<f64>()) {
+                        (Ok(p), Ok(q)) => p.total_cmp(&q),
+                        _ => x.cmp(y),
+                    };
+                    if ascending { o } else { o.reverse() }
+                }
+            }
+        });
+    }
+}
+
+impl ResultSet {
     /// Columns holding PostGIS geometries; computed once per result set.
     pub fn geometry_columns(&self) -> &[usize] {
         self.geometry_cache.get_or_init(|| crate::geo::geometry_columns(self))
@@ -307,4 +329,21 @@ pub struct TableQuery {
     pub order: Option<(String, bool)>,
     pub limit: i64,
     pub offset: i64,
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+
+    #[test]
+    fn sorts_numbers_text_and_nulls() {
+        let row = |v: Option<&str>| vec![v.map(String::from)];
+        let mut rs = ResultSet { columns: vec!["a".into()], rows: vec![row(Some("10")), row(None), row(Some("9")), row(Some("100"))], ..Default::default() };
+        rs.sort_by_column(0, true);
+        let vals: Vec<_> = rs.rows.iter().map(|r| r[0].clone()).collect();
+        assert_eq!(vals, [Some("9".into()), Some("10".into()), Some("100".into()), None]);
+        rs.sort_by_column(0, false);
+        assert_eq!(rs.rows[0][0].as_deref(), Some("100"));
+        assert_eq!(rs.rows[3][0], None);
+    }
 }
