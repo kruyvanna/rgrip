@@ -9,6 +9,7 @@ pub mod format;
 pub mod geo;
 pub mod alter;
 pub mod import;
+pub mod layout;
 pub mod model;
 pub mod pairs;
 pub mod postgres;

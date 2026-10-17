@@ -7,6 +7,7 @@ mod import;
 mod table_edit;
 mod map;
 mod map_export;
+mod layout_tab;
 mod shaping;
 mod snapshot;
 mod widgets;

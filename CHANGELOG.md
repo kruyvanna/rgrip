@@ -6,6 +6,7 @@ All notable changes to rgrip are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Map layout: a tab for print maps. Right-click a table with a geometry column → **Add to map layout** (or a connection → **New map layout**) and add more tables from the tab. Set the page (A5–A2, Letter, Legal, Tabloid; portrait or landscape; margin), basemap and scale (1:N), pan and zoom the map on the page, and style each layer (color, line width, point size, fill, legend label, SQL filter). Drag the title, legend, scale bar and north arrow anywhere on the page; they snap to the frame's edges and center. Export as **PDF** (vector shapes and text) or **PNG** at 150, 300 or 600 dpi; the preview, the PNG and the PDF are drawn from the same page.
 - Export map: the **Export map** button on the map saves what you see as a PNG (or copies it), laid out like a printed map: an optional title, a legend (layer and selected features), a scale bar and a north arrow, with the basemap credit. Saved at screen resolution.
 
 ## [0.0.11-alpha] - 2026-10-16

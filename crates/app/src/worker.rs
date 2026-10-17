@@ -13,6 +13,9 @@ pub type TabId = u64;
 /// Related-row counts stop here ("1000+").
 pub const PROBE_CAP: usize = 1000;
 
+/// Most features a map layout layer loads.
+pub const LAYER_LIMIT: usize = 50_000;
+
 pub enum Cmd {
     Connect(ConnectionConfig),
     Disconnect(ConnId),
@@ -48,9 +51,14 @@ pub enum Cmd {
     Import { conn: ConnId, request: rgrip_core::import::ImportRequest },
     /// Run `sql` uncapped and write it to `path`.
     ExportAll { conn: ConnId, database: Option<String>, schema: Option<String>, sql: String, format: rgrip_core::export::Format, table: String, path: std::path::PathBuf },
+    /// A map layout layer's geometry (`sql` selects one geometry column).
+    LayerData { conn: ConnId, tab: TabId, layer: u64, sql: String },
 }
 
 pub enum Ev {
+    /// Map layout layer: its shapes in WGS84, then how many rows had a
+    /// geometry that couldn't be drawn, and whether the row limit was hit.
+    LayerData { tab: TabId, layer: u64, result: Result<(Vec<rgrip_core::geo::Geometry>, usize, bool), String> },
     /// `version` is a summary such as "PostgreSQL 16.4 · TLSv1.3 · SSH".
     Connected { conn: ConnId, version: String },
     ConnectFailed { conn: ConnId, error: String },
@@ -313,6 +321,27 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                 Err(e) => Err(e),
             };
             emit.send(Ev::EditsSaved { tab, result });
+        }
+        Cmd::LayerData { conn, tab, layer, sql } => {
+            let result = match get(&conns, &conn) {
+                Ok(c) => c.execute_capped(&sql, LAYER_LIMIT).await.map(|out| {
+                    let mut shapes = Vec::new();
+                    let (mut skipped, mut truncated) = (0, false);
+                    for rs in out.statements.into_iter().filter_map(|s| s.result) {
+                        truncated |= rs.truncated;
+                        for row in rs.rows {
+                            match row.first().and_then(|v| v.as_deref()).and_then(rgrip_core::geo::parse_hex).map(|g| g.to_wgs84()) {
+                                Some(Some(g)) => shapes.push(g),
+                                Some(None) => skipped += 1,
+                                None => {}
+                            }
+                        }
+                    }
+                    (shapes, skipped, truncated)
+                }),
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::LayerData { tab, layer, result });
         }
         Cmd::ExportAll { conn, database, schema, sql, format, table, path } => {
             let result = match get_db(&conns, &conn, database.as_deref()).await {

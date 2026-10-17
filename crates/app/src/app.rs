@@ -373,6 +373,7 @@ impl TableView {
 enum TabKind {
     Console(Console),
     Table(TableView),
+    Layout(Box<crate::layout_tab::LayoutTab>),
 }
 
 struct Tab {
@@ -433,6 +434,10 @@ enum Action {
     Import(usize, String, Option<String>),
     /// Edit a table's structure (columns, types, key, name).
     EditTable(usize, String, String),
+    /// Open a new map layout tab.
+    NewLayout(usize),
+    /// Add a table's geometry column to the connection's map layout.
+    AddToLayout(usize, String, String, String),
     LoadSchemas(usize),
     LoadTables(usize, String),
     LoadColumns(usize, String, String),
@@ -568,6 +573,8 @@ fn risky_items(sql: &str, production: bool) -> Vec<(String, String, bool)> {
 enum TabAction {
     /// Load the connection's schemas (for the console's schema picker).
     LoadSchemas,
+    /// Map layout: load these layers' geometry (layer id, SQL).
+    LoadLayers(Vec<(u64, String)>),
     /// Show a message in the status bar.
     Notify(String),
     /// Wrap the console's query to add `ST_Transform(col, 4326)` and re-run.
@@ -815,6 +822,11 @@ impl App {
                                 }
                             }
                         }
+                    }
+                }
+                Ev::LayerData { tab, layer, result } => {
+                    if let Some(Tab { kind: TabKind::Layout(l), .. }) = self.tab_mut(tab) {
+                        l.layer_loaded(layer, result);
                     }
                 }
                 Ev::QueryDone { tab, result } => {
@@ -1110,6 +1122,23 @@ impl App {
         self.tab_action(self.active, TabAction::Reload);
     }
 
+    /// Switch to the connection's map layout tab (the last one), or open a
+    /// new one when there's none or `new` is set. Returns its index.
+    fn open_layout(&mut self, ci: usize, new: bool) -> usize {
+        let conn = self.conns[ci].cfg.id.clone();
+        if !new
+            && let Some(i) = self.tabs.iter().rposition(|t| t.conn == conn && matches!(t.kind, TabKind::Layout(_)))
+        {
+            self.active = i;
+            return i;
+        }
+        let n = self.tabs.iter().filter(|t| t.conn == conn && matches!(t.kind, TabKind::Layout(_))).count();
+        let title = if n == 0 { "Map layout".to_string() } else { format!("Map layout ({})", n + 1) };
+        self.push_tab(conn, title, TabKind::Layout(Box::new(crate::layout_tab::LayoutTab::new(&self.egui_ctx))));
+        self.ensure_connected(ci);
+        self.tabs.len() - 1
+    }
+
     fn push_tab(&mut self, conn: ConnId, title: String, kind: TabKind) {
         self.tabs.push(Tab { id: self.next_tab, conn, title, kind });
         self.next_tab += 1;
@@ -1233,6 +1262,16 @@ impl App {
                 self.table_editor = Some(crate::table_edit::TableEditor::new(id.clone(), schema.clone(), table.clone(), cfg.color == ConnColor::Red));
                 self.worker.send(Cmd::TableDef { conn: id, schema, table });
             }
+            Action::NewLayout(ci) => {
+                self.open_layout(ci, true);
+            }
+            Action::AddToLayout(ci, schema, table, column) => {
+                let ti = self.open_layout(ci, false);
+                if let TabKind::Layout(l) = &mut self.tabs[ti].kind {
+                    let crate::layout_tab::Action::Load { layer, sql } = l.add_layer(&schema, &table, &column);
+                    self.tab_action(ti, TabAction::LoadLayers(vec![(layer, sql)]));
+                }
+            }
             Action::LoadSchemas(ci) => {
                 let c = &mut self.conns[ci];
                 c.schemas = Some(Load::Loading);
@@ -1339,11 +1378,19 @@ impl App {
         if let TabAction::OpenFiltered { schema, table, filter } = action {
             return self.open_table_filtered(ci, schema, table, filter);
         }
+        if let TabAction::LoadLayers(loads) = action {
+            let (conn, tab) = (self.tabs[ti].conn.clone(), self.tabs[ti].id);
+            self.ensure_connected(ci);
+            for (layer, sql) in loads {
+                self.worker.send(Cmd::LayerData { conn: conn.clone(), tab, layer, sql });
+            }
+            return;
+        }
         let connected = matches!(self.conns[ci].status, Status::Connected(_));
         let mut needs_connect = false;
         let database = match &self.tabs[ti].kind {
             TabKind::Console(c) => c.database.clone(),
-            TabKind::Table(_) => None,
+            TabKind::Table(_) | TabKind::Layout(_) => None,
         };
         let catalog = self.conns[ci].catalog_in(database.as_deref());
         let schemas = user_schemas(&self.conns[ci], database.as_deref());
@@ -1441,6 +1488,7 @@ impl App {
                         rgrip_core::postgres::table_select_sql(&t.query()),
                         format!("{}.{}", t.schema, t.table),
                     ),
+                    TabKind::Layout(_) => return,
                 };
                 self.toast = Some((format!("Exporting to {}…", path.display()), theme::MUTED(), Instant::now()));
                 self.worker.send(Cmd::ExportAll { conn: tab.conn.clone(), database, schema, sql, format, table, path });
@@ -1790,10 +1838,42 @@ impl App {
                 }
                 _ => false,
             },
+            Some(TabKind::Layout(_)) => true,
         };
         // `RGRIP_DEMO_IMPORT=<file>`: the import dialog with that file picked,
         // into the first `RGRIP_DEMO_EXPAND` schema.
         static IMPORT_OPENED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        // `RGRIP_DEMO_LAYOUT=demo.districts,demo.parcels`: a map layout with
+        // those tables as layers (`RGRIP_DEMO_LAYOUT_TITLE` sets the title).
+        static LAYOUT_OPENED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if let Some(specs) = env("RGRIP_DEMO_LAYOUT") {
+            if self.conns.first().is_some_and(|c| matches!(c.status, Status::Disconnected)) {
+                self.apply(Action::Connect(0));
+            }
+            let ready = self.conns.first().is_some_and(|c| !c.catalog.tables.is_empty());
+            if ready && !LAYOUT_OPENED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                for spec in specs.split(',').rev() {
+                    let Some((schema, table)) = spec.split_once('.') else { continue };
+                    let col = self.conns[0].catalog.tables.iter().find(|t| t.schema == schema && t.name == table).and_then(|t| {
+                        t.columns.iter().find(|(_, ty)| ty.starts_with("geometry")).map(|(n, _)| n.clone())
+                    });
+                    if let Some(col) = col {
+                        self.apply(Action::AddToLayout(0, schema.into(), table.into(), col));
+                    }
+                }
+                if let (Some(title), Some(TabKind::Layout(l))) = (env("RGRIP_DEMO_LAYOUT_TITLE"), self.tabs.get_mut(self.active).map(|t| &mut t.kind)) {
+                    l.layout.title = title;
+                }
+            }
+            // `RGRIP_DEMO_LAYOUT_EXPORT=/tmp/map.pdf|png`: export once loaded.
+            static EXPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if let (Some(path), Some(TabKind::Layout(l))) = (env("RGRIP_DEMO_LAYOUT_EXPORT"), self.tabs.get_mut(self.active).map(|t| &mut t.kind))
+                && !EXPORTED.load(std::sync::atomic::Ordering::Relaxed)
+                && l.demo_export(path.into())
+            {
+                EXPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         // `RGRIP_DEMO_EDIT_TABLE=demo.owners`: Edit table with a few edits.
         static EDIT_OPENED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
         if let Some((schema, table)) = env("RGRIP_DEMO_EDIT_TABLE").as_deref().and_then(|v| v.split_once('.'))
@@ -1861,7 +1941,7 @@ impl App {
     /// Returns true to run the next step in the same frame.
     ///
     /// Steps: `wait:<ms>`, `type:<text>` (into the console, `\n` = newline),
-    /// `keys:<text>` (keystrokes to the focused field), `key:[cmd+]Enter|Escape|/|A|Backspace`, `click:<x>,<y>`,
+    /// `keys:<text>` (keystrokes to the focused field), `key:[cmd+]Enter|Escape|/|A|Backspace`, `click:<x>,<y>`, `drag:<x1>,<y1>,<x2>,<y2>`,
     /// `run` (and wait for results), `view:map|grid`, `open:<schema.table>`
     /// (and wait for data), `select:<rows>`, `menu:<row>`,
     /// `related:<table>` (and wait), `editor:<row>:<col>`,
@@ -1945,6 +2025,25 @@ impl App {
                     return advance(self);
                 }
             }
+            "drag" => {
+                // `drag:x1,y1,x2,y2`: press, move over ten frames, release.
+                let v: Vec<f32> = arg.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+                if v.len() == 4 {
+                    let step = play.typed;
+                    play.typed += 1;
+                    let t = (step.min(10) as f32) / 10.0;
+                    let pos = egui::pos2(v[0] + (v[2] - v[0]) * t, v[1] + (v[3] - v[1]) * t);
+                    self.demo_input.push(egui::Event::PointerMoved(pos));
+                    if step == 0 || step == 11 {
+                        self.demo_input.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: step == 0, modifiers: Modifiers::NONE });
+                    }
+                    self.egui_ctx.request_repaint();
+                    if step < 11 {
+                        return false;
+                    }
+                }
+                return advance(self);
+            }
             "run" => {
                 let state = match self.tabs.get(active).map(|t| &t.kind) {
                     Some(TabKind::Console(c)) => (c.running.is_some(), c.output.is_some()),
@@ -1976,7 +2075,7 @@ impl App {
                             _ => Pane::Grid,
                         }
                     }
-                    None => {}
+                    Some(TabKind::Layout(_)) | None => {}
                 }
                 return advance(self);
             }
@@ -2501,7 +2600,7 @@ impl App {
         ui.add_space(4.0);
         let active_saved = self.tabs.get(self.active).and_then(|t| match &t.kind {
             TabKind::Console(c) => c.saved_id.clone(),
-            TabKind::Table(_) => None,
+            TabKind::Table(_) | TabKind::Layout(_) => None,
         });
         for (i, q) in self.saved.iter().enumerate() {
             if !filter.is_empty() && !q.name.to_lowercase().contains(filter) {
@@ -2870,6 +2969,16 @@ impl Tree<'_> {
                 actions.push(Action::EditTable(ci, schema.to_string(), t.name.clone()));
                 ui.close();
             }
+            // Tables with a geometry column can go on a map layout.
+            let geom = conn.catalog.tables.iter().find(|c| c.schema == schema && c.name == t.name).and_then(|c| {
+                c.columns.iter().find(|(_, ty)| ty.starts_with("geometry") || ty.starts_with("geography")).map(|(n, _)| n.clone())
+            });
+            if let Some(col) = geom
+                && crate::icons::menu_item(ui, Svg::Map, "Add to map layout", true).clicked()
+            {
+                actions.push(Action::AddToLayout(ci, schema.to_string(), t.name.clone(), col));
+                ui.close();
+            }
             if crate::icons::menu_item(ui, Svg::Copy, "Copy name", true).clicked() {
                 ui.ctx().copy_text(format!("{}.{}", sql::quote_ident(schema), sql::quote_ident(&t.name)));
                 ui.close();
@@ -2927,6 +3036,10 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
     menu_layout(ui);
     if crate::icons::menu_item(ui, Svg::Terminal, "New console", true).clicked() {
         actions.push(Action::NewConsole(ci));
+        ui.close();
+    }
+    if crate::icons::menu_item(ui, Svg::Map, "New map layout", true).clicked() {
+        actions.push(Action::NewLayout(ci));
         ui.close();
     }
     crate::icons::submenu(ui, Svg::Link, "Copy connection URL", |ui| {
@@ -2998,13 +3111,13 @@ impl App {
                                     TabKind::Console(c) => c.saved_id.as_ref().is_some_and(|id| {
                                         self.saved.iter().find(|q| &q.id == id).is_some_and(|q| q.sql != c.sql)
                                     }),
-                                    TabKind::Table(_) => false,
+                                    TabKind::Table(_) | TabKind::Layout(_) => false,
                                 };
                                 let style = match self.conn_index(&tab.conn).map(|ci| &self.conns[ci]) {
                                     Some(c) => TabStyle {
                                         title: match &tab.kind {
                                             TabKind::Console(k) => k.database.as_deref().and_then(|db| console_title(&tab.title, &c.cfg, db)),
-                                            TabKind::Table(_) => None,
+                                            TabKind::Table(_) | TabKind::Layout(_) => None,
                                         },
                                         color: theme::conn_color(c.cfg.color),
                                         tip: format!("{} · {}:{}/{}", c.cfg.display_name(), c.cfg.host, c.cfg.port, c.cfg.database),
@@ -3027,7 +3140,7 @@ impl App {
             let tab = self.tabs.get(self.active)?;
             let database = match &tab.kind {
                 TabKind::Console(c) => c.database.as_deref(),
-                TabKind::Table(_) => None,
+                TabKind::Table(_) | TabKind::Layout(_) => None,
             };
             match self.conn_index(&tab.conn).map(|ci| &self.conns[ci]) {
                 Some(c) => {
@@ -3043,7 +3156,7 @@ impl App {
         };
         let dirty = match &self.tabs.get(self.active)?.kind {
             TabKind::Console(c) => c.saved_id.as_ref().is_some_and(|id| self.saved.iter().any(|q| &q.id == id && q.sql != c.sql)),
-            TabKind::Table(_) => false,
+            TabKind::Table(_) | TabKind::Layout(_) => false,
         };
         let tab = self.tabs.get_mut(self.active)?;
         let id = tab.id;
@@ -3053,6 +3166,10 @@ impl App {
                 action.or(load_schemas.then_some(TabAction::LoadSchemas))
             }
             TabKind::Table(t) => table_ui(ui, id, t, read_only),
+            TabKind::Layout(l) => {
+                let loads: Vec<_> = l.ui(ui, &catalog).into_iter().map(|crate::layout_tab::Action::Load { layer, sql }| (layer, sql)).collect();
+                (!loads.is_empty()).then_some(TabAction::LoadLayers(loads))
+            }
         }
     }
 }
@@ -3145,6 +3262,7 @@ fn tab_button(
     let icon = match tab.kind {
         TabKind::Console(_) => Icon::Database(style.status, style.color),
         TabKind::Table(_) => Icon::Table,
+        TabKind::Layout(_) => Icon::Globe,
     };
     widgets::paint_icon(painter, egui::pos2(rect.left() + PAD_L + ICON / 2.0, cy), icon);
     painter.galley(egui::pos2(rect.left() + PAD_L + ICON + GAP, cy - galley.size().y / 2.0), galley, color);
@@ -4576,7 +4694,7 @@ impl App {
                     let tab = self.tabs.iter_mut().find(|t| t.id == tab_id);
                     match tab.and_then(|t| match &mut t.kind {
                         TabKind::Console(c) => Some((&mut t.title, c, t.conn.clone())),
-                        TabKind::Table(_) => None,
+                        TabKind::Table(_) | TabKind::Layout(_) => None,
                     }) {
                         Some((title, c, conn)) => config::create_query(&name, &c.sql, Some(conn)).map(|q| {
                             c.saved_id = Some(q.id.clone());

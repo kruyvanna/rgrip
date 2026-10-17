@@ -11,3 +11,8 @@ homepage = "https://yoouTaro.github.io/rgrip/"
 description = "A small native PostgreSQL client in Rust, with a built-in map for PostGIS data."
 keywords = ["postgres", "postgis", "database", "gui", "egui"]
 categories = ["database", "gui"]
+
+# Debug builds: optimize dependencies (image decoding and SVG rendering are
+# unusably slow unoptimized; the map layout preview renders tiles live).
+[profile.dev.package."*"]
+opt-level = 2

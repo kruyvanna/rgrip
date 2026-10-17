@@ -33,17 +33,29 @@ fn fallback(c: char, exclude: &[usvg::fontdb::ID], db: &mut Arc<usvg::fontdb::Da
         .map(|f| f.id)
 }
 
-/// Rasterise at 2× (less for huge tables) for a crisp image on HiDPI screens.
-pub fn render(svg: &str) -> Option<tiny_skia::Pixmap> {
-    let options = usvg::Options {
+fn options() -> usvg::Options<'static> {
+    usvg::Options {
         fontdb: fonts(),
         font_resolver: usvg::FontResolver {
             select_font: usvg::FontResolver::default_font_selector(),
             select_fallback: Box::new(fallback),
         },
         ..Default::default()
-    };
-    let tree = usvg::Tree::from_str(svg, &options).ok()?;
+    }
+}
+
+/// Rasterise at `scale` × the SVG's CSS-pixel size (96 per inch).
+pub fn render_at(svg: &str, scale: f32) -> Option<tiny_skia::Pixmap> {
+    let tree = usvg::Tree::from_str(svg, &options()).ok()?;
+    let size = tree.size();
+    let mut pixmap = tiny_skia::Pixmap::new((size.width() * scale).ceil() as u32, (size.height() * scale).ceil() as u32)?;
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    Some(pixmap)
+}
+
+/// Rasterise at 2× (less for huge tables) for a crisp image on HiDPI screens.
+pub fn render(svg: &str) -> Option<tiny_skia::Pixmap> {
+    let tree = usvg::Tree::from_str(svg, &options()).ok()?;
     let size = tree.size();
     let scale = 2.0_f32.min((MAX_PIXELS / (size.width() * size.height())).sqrt());
     let mut pixmap = tiny_skia::Pixmap::new((size.width() * scale).ceil() as u32, (size.height() * scale).ceil() as u32)?;
