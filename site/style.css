@@ -65,6 +65,7 @@ h1{margin:0 auto 22px;font-size:clamp(40px,6.4vw,76px);line-height:1.02;font-wei
   transform:perspective(1600px) rotateX(calc(var(--tilt,0) * 14deg)) scale(calc(1 - var(--tilt,0) * .04))}
 .shot-hero video{height:100%;object-fit:cover}
 .shot-import,.shot-map{max-width:880px;margin:56px auto 0}
+.shot-layout{max-width:1040px;margin:56px auto 0}
 
 /* Sections */
 .section{padding:120px 0 0}

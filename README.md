@@ -32,6 +32,12 @@ Load a CSV, TSV, GeoJSON or Shapefile into a new or existing table. You get a pr
 
 <p align="center"><img src="docs/screenshots/import-markets.png" alt="Import data dialog" width="700"></p>
 
+### Map layouts and export
+
+Put one or more tables on a page (A4, A3, Letter, portrait or landscape) and export it as a PDF or PNG. Drag the title, legend, scale bar and north arrow where you want them; they snap to the page and the frame. Color a layer by a column and rename the categories in the legend. Only the data in view is loaded, and the graticule labels sit outside the frame. The plain map view also has a quick PNG export.
+
+<p align="center"><img src="docs/screenshots/layout.png" alt="Map layout tab: provinces of Cambodia on an A4 page with a graticule, legend, scale bar and north arrow" width="900"></p>
+
 ## Also included
 
 - SQL console with autocomplete, a formatter and slash commands (editable, with your own templates)
@@ -42,8 +48,7 @@ Load a CSV, TSV, GeoJSON or Shapefile into a new or existing table. You get a pr
 - Production safety: colored connections, read-only connections, confirmation before risky statements
 - SSL up to `verify-full`, SSH tunnels, passwords in the macOS Keychain
 - Export to CSV, TSV, JSON, GeoJSON, Markdown, SQL INSERT and SVG; copy rows as an image or for an AI agent
-- Export the map as a PNG with a title, legend, scale bar and north arrow
-- Map layouts: several tables on a page (A4, A3, Letter…), with a title, legend, scale bar and north arrow you drag into place; export as PDF or PNG
+- Sort query results by clicking a column header
 - Dark, light and system themes, and in-app updates
 
 <table>

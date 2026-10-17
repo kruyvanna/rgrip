@@ -13,9 +13,11 @@ out=${RGRIP_SHOTS_OUT:-docs/screenshots}
 mkdir -p "$out" target
 cargo build -q -p rgrip
 swiftc -O scripts/winid.swift -o target/winid 2>/dev/null
+printf "import CoreGraphics\nCGWarpMouseCursorPosition(CGPoint(x: 4, y: 4))\n" > target/park.swift && swiftc -O target/park.swift -o target/park 2>/dev/null && target/park  # no hover tooltips
 
 scene() { # name, then env assignments
   name=$1; shift
+  wait=0; case $1 in wait=*) wait=${1#wait=}; shift ;; esac
   [ "$only" = "  " ] || case "$only" in *" $name "*) ;; *) return 0 ;; esac
   ready=$(mktemp -u)
   env RGRIP_DEMO_CONN="rgrip dev (PostGIS)" RGRIP_DEMO_ONLY=1 RGRIP_DEMO_THEME=dark RGRIP_DEMO_PALETTE="rgrip Dark" RGRIP_DEMO_SIZE=1440x900 \
@@ -23,6 +25,7 @@ scene() { # name, then env assignments
   pid=$!
   i=0
   while [ ! -f "$ready" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -f "$ready" ] && sleep "$wait"
   if [ -f "$ready" ] && wid=$(target/winid $pid | cut -d" " -f1); then
     screencapture -x -o -l "$wid" "$out/$name.png"
     echo "$out/$name.png"
@@ -57,6 +60,7 @@ scene goto RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_SORT=
 scene rowmenu RGRIP_DEMO_EXPAND=legacy RGRIP_DEMO_TABLE=legacy.customers RGRIP_DEMO_ROW_MENU=1
 scene inferred RGRIP_DEMO_EXPAND=legacy RGRIP_DEMO_TABLE=legacy.customers RGRIP_DEMO_SELECT=1 RGRIP_DEMO_RELATED=orders
 scene commands RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_TABLE=demo.parcels RGRIP_DEMO_COMMANDS="parcels 3857"
+scene layout wait=5 RGRIP_DEMO_EXPAND=demo RGRIP_DEMO_LAYOUT=public.cambodia RGRIP_DEMO_LAYOUT_TITLE="Cambodia, provinces" RGRIP_DEMO_LAYOUT_GRID=1
 [ "$only" = "  " ] || case "$only" in *" copy-image "*) only="  " ;; *) exit 0 ;; esac
 rm -f "$out/copy-image.png"
 scene copy-image-window RGRIP_DEMO_TABLE=demo.owners RGRIP_DEMO_SELECT=0,1,2,3,4,5 RGRIP_DEMO_COPY_IMAGE="$PWD/$out/copy-image.png"
