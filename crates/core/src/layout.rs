@@ -572,18 +572,48 @@ impl Layout {
         let text = |s: &mut String, x: f64, y: f64, anchor: &str, inside: bool, label: &str| {
             let _ = write!(s, r##"<text x="{}" y="{}" font-size="{size}" fill="#333" text-anchor="{anchor}"{}>{}</text>"##, n(x), n(y), if inside { halo } else { "" }, esc(label));
         };
+        // Skip labels that would run past the frame's ends (they'd meet the
+        // labels of the next side at the corners).
+        let fits = |c: f64, lo: f64, len: f64, label: &str| {
+            let half = text_w(label, size) / 2.0;
+            c - half >= lo + 1.0 && c + half <= lo + len - 1.0
+        };
         for (v, x) in &lons {
             let label = coord_label(*v, true, g.dms);
+            if !fits(*x, f.x, f.w, &label) {
+                continue;
+            }
             let (top, bottom) = (mt >= 5.0, mb >= 5.0);
             text(s, *x, if top { f.y - 1.2 } else { f.y + size + 1.0 }, "middle", !top, &label);
             text(s, *x, if bottom { f.y + f.h + size + 1.0 } else { f.y + f.h - 1.2 }, "middle", !bottom, &label);
         }
+        // Left and right: turned to run up the frame edge (as printed maps
+        // do), so they fit a narrow margin; inside only when there's no room.
         for (v, y) in &lats {
             let label = coord_label(*v, false, g.dms);
-            let room = text_w(&label, size) + 2.0;
-            let (left, right) = (ml >= room, mr >= room);
-            text(s, if left { f.x - 1.0 } else { f.x + 1.0 }, y + size * 0.35, if left { "end" } else { "start" }, !left, &label);
-            text(s, if right { f.x + f.w + 1.0 } else { f.x + f.w - 1.0 }, y + size * 0.35, if right { "start" } else { "end" }, !right, &label);
+            if !fits(*y, f.y, f.h, &label) {
+                continue;
+            }
+            for (left, margin) in [(true, ml), (false, mr)] {
+                let outside = margin >= size + 1.8;
+                // Rotated -90°, the glyphs sit on the left of the baseline.
+                let x = match (left, outside) {
+                    (true, true) => f.x - 1.2,
+                    (true, false) => f.x + 1.2 + size * 0.8,
+                    (false, true) => f.x + f.w + 1.2 + size * 0.8,
+                    (false, false) => f.x + f.w - 1.2,
+                };
+                let _ = write!(
+                    s,
+                    r##"<text x="{}" y="{}" transform="rotate(-90 {} {})" font-size="{size}" fill="#333" text-anchor="middle"{}>{}</text>"##,
+                    n(x),
+                    n(*y),
+                    n(x),
+                    n(*y),
+                    if outside { "" } else { halo },
+                    esc(&label)
+                );
+            }
         }
     }
 
@@ -1299,6 +1329,9 @@ mod tests {
         assert_eq!(step_label(0.05), "0.05°");
         let svg = l.svg(&mut |_, _, _| None, 150.0);
         assert!(svg.contains("°E") && svg.contains("°N"), "{svg}");
+        // Latitude labels run up the frame edges, outside a 10 mm margin.
+        assert!(svg.contains("rotate(-90"), "{svg}");
+        assert!(!svg.contains(r##"°N</text>"##) || svg.matches("paint-order").count() < 10);
         l.graticule.interval = Some(1.0 / 60.0);
         l.graticule.dms = true;
         let svg = l.svg(&mut |_, _, _| None, 150.0);
