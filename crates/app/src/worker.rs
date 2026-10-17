@@ -16,6 +16,22 @@ pub const PROBE_CAP: usize = 1000;
 /// Most features a map layout layer loads.
 pub const LAYER_LIMIT: usize = 50_000;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LayerQuery {
+    /// Geometry (WGS84 hex) and, optionally, a category value per row.
+    Data,
+    /// One WGS84 geometry: the layer's extent.
+    Extent,
+    /// Category values and counts.
+    Classes,
+}
+
+pub enum LayerResult {
+    Data { shapes: Vec<rgrip_core::geo::Geometry>, values: Vec<Option<String>>, truncated: bool },
+    Extent(Option<(rgrip_core::geo::Coord, rgrip_core::geo::Coord)>),
+    Classes(Vec<(Option<String>, i64)>),
+}
+
 pub enum Cmd {
     Connect(ConnectionConfig),
     Disconnect(ConnId),
@@ -51,14 +67,12 @@ pub enum Cmd {
     Import { conn: ConnId, request: rgrip_core::import::ImportRequest },
     /// Run `sql` uncapped and write it to `path`.
     ExportAll { conn: ConnId, database: Option<String>, schema: Option<String>, sql: String, format: rgrip_core::export::Format, table: String, path: std::path::PathBuf },
-    /// A map layout layer's geometry (`sql` selects one geometry column).
-    LayerData { conn: ConnId, tab: TabId, layer: u64, sql: String },
+    /// A map layout layer query; `seq` comes back so stale answers can be dropped.
+    LayerQuery { conn: ConnId, tab: TabId, layer: u64, seq: u64, kind: LayerQuery, sql: String },
 }
 
 pub enum Ev {
-    /// Map layout layer: its shapes in WGS84, then how many rows had a
-    /// geometry that couldn't be drawn, and whether the row limit was hit.
-    LayerData { tab: TabId, layer: u64, result: Result<(Vec<rgrip_core::geo::Geometry>, usize, bool), String> },
+    LayerResult { tab: TabId, layer: u64, seq: u64, result: Result<LayerResult, String> },
     /// `version` is a summary such as "PostgreSQL 16.4 · TLSv1.3 · SSH".
     Connected { conn: ConnId, version: String },
     ConnectFailed { conn: ConnId, error: String },
@@ -322,26 +336,45 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::EditsSaved { tab, result });
         }
-        Cmd::LayerData { conn, tab, layer, sql } => {
+        Cmd::LayerQuery { conn, tab, layer, seq, kind, sql } => {
             let result = match get(&conns, &conn) {
                 Ok(c) => c.execute_capped(&sql, LAYER_LIMIT).await.map(|out| {
-                    let mut shapes = Vec::new();
-                    let (mut skipped, mut truncated) = (0, false);
-                    for rs in out.statements.into_iter().filter_map(|s| s.result) {
-                        truncated |= rs.truncated;
-                        for row in rs.rows {
-                            match row.first().and_then(|v| v.as_deref()).and_then(rgrip_core::geo::parse_hex).map(|g| g.to_wgs84()) {
-                                Some(Some(g)) => shapes.push(g),
-                                Some(None) => skipped += 1,
-                                None => {}
+                    let rows: Vec<_> = out.statements.into_iter().filter_map(|s| s.result).flat_map(|rs| {
+                        let truncated = rs.truncated;
+                        rs.rows.into_iter().map(move |r| (r, truncated))
+                    }).collect();
+                    let truncated = rows.iter().any(|(_, t)| *t);
+                    let geom = |v: Option<&Option<String>>| v.and_then(|v| v.as_deref()).and_then(rgrip_core::geo::parse_hex).and_then(|g| g.to_wgs84());
+                    match kind {
+                        LayerQuery::Data => {
+                            let (mut shapes, mut values) = (Vec::with_capacity(rows.len()), Vec::with_capacity(rows.len()));
+                            for (row, _) in &rows {
+                                if let Some(g) = geom(row.first()) {
+                                    shapes.push(g);
+                                    values.push(row.get(1).cloned().flatten());
+                                }
                             }
+                            LayerResult::Data { shapes, values, truncated }
                         }
+                        LayerQuery::Extent => {
+                            let mut lo = [f64::MAX; 2];
+                            let mut hi = [f64::MIN; 2];
+                            if let Some(g) = rows.first().and_then(|(r, _)| geom(r.first())) {
+                                g.for_each_coord(&mut |c| {
+                                    lo = [lo[0].min(c[0]), lo[1].min(c[1])];
+                                    hi = [hi[0].max(c[0]), hi[1].max(c[1])];
+                                });
+                            }
+                            LayerResult::Extent((lo[0] <= hi[0]).then_some((lo, hi)))
+                        }
+                        LayerQuery::Classes => LayerResult::Classes(
+                            rows.into_iter().map(|(r, _)| (r.first().cloned().flatten(), r.get(1).cloned().flatten().and_then(|n| n.parse().ok()).unwrap_or(0))).collect(),
+                        ),
                     }
-                    (shapes, skipped, truncated)
                 }),
                 Err(e) => Err(e),
             };
-            emit.send(Ev::LayerData { tab, layer, result });
+            emit.send(Ev::LayerResult { tab, layer, seq, result });
         }
         Cmd::ExportAll { conn, database, schema, sql, format, table, path } => {
             let result = match get_db(&conns, &conn, database.as_deref()).await {

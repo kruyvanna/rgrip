@@ -130,8 +130,41 @@ pub struct Layer {
     pub point: f64,
     pub fill_opacity: f64,
     pub visible: bool,
+    pub style: Style,
     /// Loaded geometries, WGS84 (shared: layouts are cloned for each render).
     pub shapes: std::sync::Arc<Vec<Geometry>>,
+    /// The category column's value for each shape (empty without categories).
+    pub values: std::sync::Arc<Vec<Option<String>>>,
+    /// The whole layer's extent in lon/lat (for Fit).
+    pub extent: Option<(Coord, Coord)>,
+    /// The area (lon/lat bbox) and scale the shapes were loaded for.
+    pub loaded: Option<([f64; 4], f64)>,
+}
+
+/// How a layer is colored.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Style {
+    /// One color for every feature.
+    Single,
+    /// A color per value of `column`; `more` when there were more values than classes.
+    Categories { column: String, classes: Vec<Class>, more: bool },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Class {
+    pub value: Option<String>,
+    /// Legend label (starts as the value).
+    pub label: String,
+    pub color: [u8; 3],
+    pub visible: bool,
+    pub count: i64,
+}
+
+/// One row of the legend: a swatch (layer kind and color) or a heading.
+pub struct LegendRow {
+    pub label: String,
+    pub swatch: Option<(Kind, [u8; 3])>,
+    pub indent: bool,
 }
 
 impl Layer {
@@ -148,16 +181,96 @@ impl Layer {
             point: 1.2,
             fill_opacity: 0.35,
             visible: true,
+            style: Style::Single,
             shapes: Default::default(),
+            values: Default::default(),
+            extent: None,
+            loaded: None,
         }
     }
 
-    /// The query that loads this layer's geometry.
-    pub fn sql(&self, limit: usize) -> String {
-        let q = crate::sql::quote_ident;
-        let filter = self.filter.trim();
-        let filter = if filter.is_empty() { String::new() } else { format!(" where {filter}") };
-        format!("select {} from {}.{}{filter} limit {limit}", q(&self.column), q(&self.schema), q(&self.table))
+    fn table_ref(&self) -> String {
+        format!("{}.{}", crate::sql::quote_ident(&self.schema), crate::sql::quote_ident(&self.table))
+    }
+
+    fn geom(&self) -> String {
+        format!("{}::geometry", crate::sql::quote_ident(&self.column))
+    }
+
+    fn filter_and(&self) -> String {
+        let f = self.filter.trim();
+        if f.is_empty() { String::new() } else { format!(" and ({f})") }
+    }
+
+    pub fn category_column(&self) -> Option<&str> {
+        match &self.style {
+            Style::Categories { column, .. } => Some(column),
+            Style::Single => None,
+        }
+    }
+
+    /// The features inside `bbox` (lon/lat), in WGS84 and simplified to
+    /// about 0.15 mm at `scale`, plus the category column's value. PostGIS
+    /// does the reprojection, so any SRID works; the bbox uses the index.
+    pub fn data_sql(&self, bbox: [f64; 4], scale: f64, limit: usize) -> String {
+        let (t, g) = (self.table_ref(), self.geom());
+        let tol = scale / 1000.0 * 0.15 / 111_320.0;
+        let cat = self.category_column().map_or(String::new(), |c| format!(", ({})::text", crate::sql::quote_ident(c)));
+        let [x0, y0, x1, y1] = [bbox[0].max(-180.0), bbox[1].max(-85.0), bbox[2].min(180.0), bbox[3].min(85.0)];
+        format!(
+            "with s as (select ST_SRID({g}) as srid from {t} where {g} is not null limit 1) \
+             select ST_SimplifyPreserveTopology(case when ST_SRID({g}) = 0 then ST_SetSRID({g}, 4326) else ST_Transform({g}, 4326) end, {tol:e}){cat} \
+             from {t} where {g} is not null \
+             and ((select srid from s) = 0 or {g} && ST_Transform(ST_MakeEnvelope({x0}, {y0}, {x1}, {y1}, 4326), (select srid from s))){} limit {limit}",
+            self.filter_and()
+        )
+    }
+
+    /// The whole layer's extent, as a WGS84 geometry.
+    pub fn extent_sql(&self) -> String {
+        let (t, g) = (self.table_ref(), self.geom());
+        let f = self.filter.trim();
+        let filter = if f.is_empty() { String::new() } else { format!(" where {f}") };
+        format!(
+            "with s as (select coalesce(nullif(ST_SRID({g}), 0), 4326) as srid from {t} where {g} is not null limit 1) \
+             select ST_Transform(ST_SetSRID(ST_Extent({g})::geometry, (select srid from s)), 4326) from {t}{filter}"
+        )
+    }
+
+    /// The most common values of `column`, with counts.
+    pub fn classes_sql(&self, column: &str, limit: usize) -> String {
+        let f = self.filter.trim();
+        let filter = if f.is_empty() { String::new() } else { format!(" where {f}") };
+        format!(
+            "select ({})::text, count(*) from {}{filter} group by 1 order by 2 desc, 1 limit {limit}",
+            crate::sql::quote_ident(column),
+            self.table_ref()
+        )
+    }
+
+    /// Whether the loaded shapes no longer cover `view` (lon/lat) or were
+    /// simplified for a very different scale.
+    pub fn needs_reload(&self, view: [f64; 4], scale: f64) -> bool {
+        match self.loaded {
+            None => true,
+            Some((b, s)) => view[0] < b[0] || view[1] < b[1] || view[2] > b[2] || view[3] > b[3] || scale < s / 2.0 || scale > s * 2.0,
+        }
+    }
+
+    /// Legend rows for this layer.
+    fn legend_rows(&self, out: &mut Vec<LegendRow>) {
+        match &self.style {
+            Style::Single => out.push(LegendRow { label: self.label.clone(), swatch: Some((self.kind(), self.color)), indent: false }),
+            Style::Categories { classes, more, .. } => {
+                out.push(LegendRow { label: self.label.clone(), swatch: None, indent: false });
+                for c in classes.iter().filter(|c| c.visible) {
+                    out.push(LegendRow { label: c.label.clone(), swatch: Some((self.kind(), c.color)), indent: true });
+                }
+                if *more {
+                    out.push(LegendRow { label: "Other".into(), swatch: Some((self.kind(), self.color)), indent: true });
+                }
+            }
+        }
     }
 
     pub fn kind(&self) -> Kind {
@@ -211,8 +324,8 @@ impl Element {
 pub struct Layout {
     pub page: PageSize,
     pub landscape: bool,
-    /// Page margin around the map frame, mm.
-    pub margin: f64,
+    /// Page margins around the map frame, mm: top, right, bottom, left.
+    pub margin: [f64; 4],
     /// Map center, lon/lat.
     pub center: Coord,
     /// Map scale 1:N, true at the center's latitude.
@@ -231,7 +344,7 @@ impl Default for Layout {
         let mut l = Self {
             page: PageSize::A4,
             landscape: true,
-            margin: 10.0,
+            margin: [10.0; 4],
             center: [104.92, 11.56],
             scale: 50_000.0,
             basemap: Basemap::Light,
@@ -262,7 +375,26 @@ impl Layout {
 
     pub fn frame(&self) -> Rect {
         let (w, h) = self.page_mm();
-        Rect { x: self.margin, y: self.margin, w: w - 2.0 * self.margin, h: h - 2.0 * self.margin }
+        let [t, r, b, l] = self.margin;
+        Rect { x: l, y: t, w: (w - l - r).max(10.0), h: (h - t - b).max(10.0) }
+    }
+
+    /// The map frame's extent in lon/lat (min lon, min lat, max lon, max
+    /// lat), grown by `pad` × its size on every side.
+    pub fn view_bbox(&self, pad: f64) -> [f64; 4] {
+        let f = self.frame();
+        let (dx, dy) = (f.w * pad, f.h * pad);
+        let nw = self.from_page([f.x - dx, f.y - dy]);
+        let se = self.from_page([f.x + f.w + dx, f.y + f.h + dy]);
+        [nw[0], se[1], se[0], nw[1]]
+    }
+
+    pub fn legend_rows(&self) -> Vec<LegendRow> {
+        let mut rows = Vec::new();
+        for l in self.layers.iter().filter(|l| l.visible) {
+            l.legend_rows(&mut rows);
+        }
+        rows
     }
 
     /// The usual spots: title top center, north arrow top right, legend
@@ -346,15 +478,20 @@ impl Layout {
     pub fn fit(&mut self) {
         let mut lo = [f64::MAX; 2];
         let mut hi = [f64::MIN; 2];
+        let mut add = |c: Coord| {
+            if c[0].is_finite() && c[1].is_finite() {
+                let m = merc(c);
+                lo = [lo[0].min(m[0]), lo[1].min(m[1])];
+                hi = [hi[0].max(m[0]), hi[1].max(m[1])];
+            }
+        };
         for l in self.layers.iter().filter(|l| l.visible) {
-            for g in l.shapes.iter() {
-                g.for_each_coord(&mut |c| {
-                    if c[0].is_finite() && c[1].is_finite() {
-                        let m = merc(c);
-                        lo = [lo[0].min(m[0]), lo[1].min(m[1])];
-                        hi = [hi[0].max(m[0]), hi[1].max(m[1])];
-                    }
-                });
+            match l.extent {
+                Some((a, b)) => {
+                    add(a);
+                    add(b);
+                }
+                None => l.shapes.iter().for_each(|g| g.for_each_coord(&mut add)),
             }
         }
         if lo[0] > hi[0] {
@@ -375,8 +512,9 @@ impl Layout {
         let ts = self.title_size * PT;
         let title = if self.title.trim().is_empty() { "Map title" } else { self.title.trim() };
         let title = Rect { x: at(Element::Title)[0], y: at(Element::Title)[1], w: text_w(title, ts) + 4.0, h: ts * 1.5 };
-        let rows = self.layers.iter().filter(|l| l.visible).count().max(1);
-        let label_w = self.layers.iter().filter(|l| l.visible).map(|l| text_w(&l.label, LEGEND_TEXT)).fold(0.0, f64::max);
+        let legend_rows = self.legend_rows();
+        let rows = legend_rows.len().max(1);
+        let label_w = legend_rows.iter().map(|r| text_w(&r.label, LEGEND_TEXT) + if r.indent { 3.0 } else { 0.0 }).fold(0.0, f64::max);
         let head_w = text_w(&self.legend_title, LEGEND_TITLE);
         let legend = Rect {
             x: at(Element::Legend)[0],
@@ -490,8 +628,29 @@ impl Layout {
     }
 
     fn layer_svg(&self, s: &mut String, l: &Layer) {
+        match &l.style {
+            Style::Single => self.group_svg(s, l, l.shapes.iter(), l.color),
+            Style::Categories { classes, .. } => {
+                let index: std::collections::HashMap<Option<&str>, usize> = classes.iter().enumerate().map(|(i, c)| (c.value.as_deref(), i)).collect();
+                let mut groups: Vec<Vec<&Geometry>> = vec![Vec::new(); classes.len() + 1];
+                for (i, g) in l.shapes.iter().enumerate() {
+                    let v = l.values.get(i).and_then(|v| v.as_deref());
+                    groups[index.get(&v).copied().unwrap_or(classes.len())].push(g);
+                }
+                // Values without a class ("Other") go underneath, in the layer color.
+                self.group_svg(s, l, groups[classes.len()].iter().copied(), l.color);
+                for (c, g) in classes.iter().zip(&groups) {
+                    if c.visible {
+                        self.group_svg(s, l, g.iter().copied(), c.color);
+                    }
+                }
+            }
+        }
+    }
+
+    fn group_svg<'a>(&self, s: &mut String, l: &Layer, shapes: impl Iterator<Item = &'a Geometry>, color: [u8; 3]) {
         let f = self.frame();
-        let color = format!("#{:02x}{:02x}{:02x}", l.color[0], l.color[1], l.color[2]);
+        let color = format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
         // Skip what's well outside the frame, and points closer than 0.05 mm.
         let (lo, hi) = ([f.x - 20.0, f.y - 20.0], [f.x + f.w + 20.0, f.y + f.h + 20.0]);
         let mut fills = String::new();
@@ -530,7 +689,7 @@ impl Layout {
                 }
             }
         };
-        for g in l.shapes.iter() {
+        for g in shapes {
             add(g, &mut fills, &mut lines, &mut dots);
         }
         let w = n(l.width);
@@ -569,11 +728,22 @@ impl Layout {
             let b = boxes[Element::Legend as usize];
             let _ = write!(s, r#"<rect x="{}" y="{}" width="{}" height="{}" rx="1" {card}/>"#, n(b.x), n(b.y), n(b.w), n(b.h));
             let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="#111">{}</text>"##, n(b.x + 4.0), n(b.y + 6.0), n(LEGEND_TITLE), esc(&self.legend_title));
-            for (i, l) in self.layers.iter().filter(|l| l.visible).enumerate() {
+            // Style per row comes from its layer (line width, fill, point size).
+            let mut layer_of_row = Vec::new();
+            for l in self.layers.iter().filter(|l| l.visible) {
+                let mut rows = Vec::new();
+                l.legend_rows(&mut rows);
+                layer_of_row.extend(std::iter::repeat_n(l, rows.len()));
+            }
+            for (i, (row, l)) in self.legend_rows().iter().zip(layer_of_row).enumerate() {
                 let y = b.y + 9.0 + i as f64 * 6.0;
-                let (sx, sy) = (b.x + 4.0, y + 1.0);
-                let color = format!("#{:02x}{:02x}{:02x}", l.color[0], l.color[1], l.color[2]);
-                match l.kind() {
+                let (sx, sy) = (b.x + 4.0 + if row.indent { 3.0 } else { 0.0 }, y + 1.0);
+                let Some((kind, c)) = row.swatch else {
+                    let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" font-weight="600" fill="#333">{}</text>"##, n(sx), n(sy + 3.0), n(LEGEND_TEXT), esc(&row.label));
+                    continue;
+                };
+                let color = format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+                match kind {
                     Kind::Polygon => {
                         let _ = write!(s, r#"<rect x="{}" y="{}" width="5" height="3.6" fill="{color}" fill-opacity="{}" stroke="{color}" stroke-width="{}"/>"#, n(sx), n(sy), n(l.fill_opacity), n(l.width));
                     }
@@ -584,7 +754,7 @@ impl Layout {
                         let _ = write!(s, r##"<circle cx="{}" cy="{}" r="{}" fill="{color}" stroke="#fff" stroke-width="0.3"/>"##, n(sx + 2.5), n(sy + 1.8), n(l.point.min(2.0)));
                     }
                 }
-                let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" fill="#222">{}</text>"##, n(sx + 8.0), n(sy + 3.0), n(LEGEND_TEXT), esc(&l.label));
+                let _ = write!(s, r##"<text x="{}" y="{}" font-size="{}" fill="#222">{}</text>"##, n(sx + 8.0), n(sy + 3.0), n(LEGEND_TEXT), esc(&row.label));
             }
         }
         if self.item(Element::ScaleBar).visible {
@@ -791,6 +961,9 @@ mod tests {
         assert_eq!(l.page_mm(), (297.0, 210.0));
         l.landscape = false;
         assert_eq!(l.frame(), Rect { x: 10.0, y: 10.0, w: 190.0, h: 277.0 });
+        // Each side on its own: top, right, bottom, left.
+        l.margin = [20.0, 5.0, 30.0, 15.0];
+        assert_eq!(l.frame(), Rect { x: 15.0, y: 20.0, w: 190.0, h: 247.0 });
     }
 
     #[test]
@@ -887,6 +1060,23 @@ mod tests {
     }
 
     #[test]
+    fn categories_color_and_label_features() {
+        let mut l = layout_with(vec![Geometry::Point([104.91, 11.56]), Geometry::Point([104.92, 11.56]), Geometry::Point([104.93, 11.56])]);
+        l.layers[0].values = vec![Some("garden".to_string()), Some("public".to_string()), None].into();
+        let class = |v: &str, label: &str, color| Class { value: Some(v.into()), label: label.into(), color, visible: true, count: 1 };
+        l.layers[0].style = Style::Categories { column: "land_use".into(), classes: vec![class("garden", "Gardens", [0, 200, 0]), class("public", "Public land", [0, 0, 200])], more: true };
+        let svg = l.svg(&mut |_, _, _| None, 150.0);
+        assert!(svg.contains("#00c800") && svg.contains("#0000c8"));
+        assert!(svg.contains("Gardens") && svg.contains("Public land") && svg.contains(">Other<"));
+        // A hidden class is neither drawn nor listed.
+        if let Style::Categories { classes, .. } = &mut l.layers[0].style {
+            classes[1].visible = false;
+        }
+        let svg = l.svg(&mut |_, _, _| None, 150.0);
+        assert!(!svg.contains("#0000c8") && !svg.contains("Public land"));
+    }
+
+    #[test]
     fn overlapping_polygons_dont_cut_each_other() {
         let square = |x: f64| Geometry::Polygon(vec![vec![[x, 11.55], [x + 0.02, 11.55], [x + 0.02, 11.57], [x, 11.57], [x, 11.55]]]);
         let l = layout_with(vec![square(104.90), square(104.91)]);
@@ -910,9 +1100,20 @@ mod tests {
     #[test]
     fn layer_sql_and_base64() {
         let mut layer = Layer::new(1, "demo", "parcels", "geom", [0, 0, 0]);
-        assert_eq!(layer.sql(100), "select \"geom\" from \"demo\".\"parcels\" limit 100");
+        let sql = layer.data_sql([104.8, 11.5, 105.0, 11.7], 50_000.0, 100);
+        assert!(sql.contains("ST_MakeEnvelope(104.8, 11.5, 105, 11.7, 4326)"), "{sql}");
+        assert!(sql.contains("ST_Transform(\"geom\"::geometry, 4326)") && sql.ends_with("limit 100"), "{sql}");
         layer.filter = "land_use = 'garden'".into();
-        assert_eq!(layer.sql(5), "select \"geom\" from \"demo\".\"parcels\" where land_use = 'garden' limit 5");
+        layer.style = Style::Categories { column: "land_use".into(), classes: Vec::new(), more: false };
+        let sql = layer.data_sql([0.0, 0.0, 1.0, 1.0], 1000.0, 5);
+        assert!(sql.contains(", (\"land_use\")::text from") && sql.contains(" and (land_use = 'garden') limit 5"), "{sql}");
+        assert!(layer.extent_sql().contains("ST_Extent(\"geom\"::geometry)"));
+        assert_eq!(layer.classes_sql("land_use", 20), "select (\"land_use\")::text, count(*) from \"demo\".\"parcels\" where land_use = 'garden' group by 1 order by 2 desc, 1 limit 20");
+        // Reload when the view leaves what's loaded, or the scale moves a lot.
+        layer.loaded = Some(([0.0, 0.0, 10.0, 10.0], 10_000.0));
+        assert!(!layer.needs_reload([1.0, 1.0, 9.0, 9.0], 12_000.0));
+        assert!(layer.needs_reload([1.0, 1.0, 11.0, 9.0], 12_000.0));
+        assert!(layer.needs_reload([1.0, 1.0, 9.0, 9.0], 4_000.0));
         assert_eq!(base64(b"Man"), "TWFu");
         assert_eq!(base64(b"Ma"), "TWE=");
         assert_eq!(base64(b"M"), "TQ==");

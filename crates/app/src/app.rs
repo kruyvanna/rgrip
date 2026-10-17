@@ -573,8 +573,8 @@ fn risky_items(sql: &str, production: bool) -> Vec<(String, String, bool)> {
 enum TabAction {
     /// Load the connection's schemas (for the console's schema picker).
     LoadSchemas,
-    /// Map layout: load these layers' geometry (layer id, SQL).
-    LoadLayers(Vec<(u64, String)>),
+    /// Map layout: run these layer queries.
+    LoadLayers(Vec<crate::layout_tab::Action>),
     /// Show a message in the status bar.
     Notify(String),
     /// Wrap the console's query to add `ST_Transform(col, 4326)` and re-run.
@@ -824,9 +824,9 @@ impl App {
                         }
                     }
                 }
-                Ev::LayerData { tab, layer, result } => {
+                Ev::LayerResult { tab, layer, seq, result } => {
                     if let Some(Tab { kind: TabKind::Layout(l), .. }) = self.tab_mut(tab) {
-                        l.layer_loaded(layer, result);
+                        l.layer_result(layer, seq, result);
                     }
                 }
                 Ev::QueryDone { tab, result } => {
@@ -1268,8 +1268,8 @@ impl App {
             Action::AddToLayout(ci, schema, table, column) => {
                 let ti = self.open_layout(ci, false);
                 if let TabKind::Layout(l) = &mut self.tabs[ti].kind {
-                    let crate::layout_tab::Action::Load { layer, sql } = l.add_layer(&schema, &table, &column);
-                    self.tab_action(ti, TabAction::LoadLayers(vec![(layer, sql)]));
+                    let loads = l.add_layer(&schema, &table, &column);
+                    self.tab_action(ti, TabAction::LoadLayers(loads));
                 }
             }
             Action::LoadSchemas(ci) => {
@@ -1381,8 +1381,8 @@ impl App {
         if let TabAction::LoadLayers(loads) = action {
             let (conn, tab) = (self.tabs[ti].conn.clone(), self.tabs[ti].id);
             self.ensure_connected(ci);
-            for (layer, sql) in loads {
-                self.worker.send(Cmd::LayerData { conn: conn.clone(), tab, layer, sql });
+            for a in loads {
+                self.worker.send(Cmd::LayerQuery { conn: conn.clone(), tab, layer: a.layer, seq: a.seq, kind: a.kind, sql: a.sql });
             }
             return;
         }
@@ -1864,6 +1864,27 @@ impl App {
                 if let (Some(title), Some(TabKind::Layout(l))) = (env("RGRIP_DEMO_LAYOUT_TITLE"), self.tabs.get_mut(self.active).map(|t| &mut t.kind)) {
                     l.layout.title = title;
                 }
+            }
+            // `RGRIP_DEMO_LAYOUT_SCALE=10000`: zoom in once the layers have loaded.
+            static SCALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if let Some(scale) = env("RGRIP_DEMO_LAYOUT_SCALE").and_then(|v| v.parse::<f64>().ok())
+                && let Some(TabKind::Layout(l)) = self.tabs.iter_mut().find(|t| matches!(t.kind, TabKind::Layout(_))).map(|t| &mut t.kind)
+                && l.layout.layers.iter().all(|x| x.loaded.is_some())
+                && !l.layout.layers.is_empty()
+                && !SCALED.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                l.demo_zoom(scale);
+            }
+            // `RGRIP_DEMO_LAYOUT_COLOR_BY=land_use`: categories on the top layer.
+            static COLORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if let Some(col) = env("RGRIP_DEMO_LAYOUT_COLOR_BY")
+                && LAYOUT_OPENED.load(std::sync::atomic::Ordering::Relaxed)
+                && !COLORED.swap(true, std::sync::atomic::Ordering::Relaxed)
+                && let Some(ti) = self.tabs.iter().position(|t| matches!(t.kind, TabKind::Layout(_)))
+                && let TabKind::Layout(l) = &mut self.tabs[ti].kind
+            {
+                let loads = l.demo_color_by(&col);
+                self.tab_action(ti, TabAction::LoadLayers(loads));
             }
             // `RGRIP_DEMO_LAYOUT_EXPORT=/tmp/map.pdf|png`: export once loaded.
             static EXPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -3167,7 +3188,7 @@ impl App {
             }
             TabKind::Table(t) => table_ui(ui, id, t, read_only),
             TabKind::Layout(l) => {
-                let loads: Vec<_> = l.ui(ui, &catalog).into_iter().map(|crate::layout_tab::Action::Load { layer, sql }| (layer, sql)).collect();
+                let loads = l.ui(ui, &catalog);
                 (!loads.is_empty()).then_some(TabAction::LoadLayers(loads))
             }
         }
