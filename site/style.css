@@ -21,7 +21,7 @@ code,kbd{font:500 .86em var(--mono);background:var(--raise-2);border:1px solid v
 .skip:focus{left:8px}
 .wrap{max-width:1080px;margin:0 auto;padding:0 28px}
 .wrap-wide{max-width:1240px}
-.narrow{max-width:620px}
+.narrow{max-width:820px}
 .center{text-align:center}
 .ico{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
 
@@ -166,3 +166,17 @@ h2{margin:0 0 16px;font-size:clamp(30px,3.6vw,44px);line-height:1.08;font-weight
   .shot-hero{transform:none}
   .js .rise{opacity:1;transform:none;filter:none;transition:none}
 }
+
+/* Install command */
+.cmd{display:flex;align-items:stretch;max-width:760px;margin:0 auto;background:var(--raise);border:1px solid var(--line-2);border-radius:10px;text-align:left}
+.cmd-text{display:block;flex:1;min-width:0;overflow-x:auto;white-space:nowrap;padding:13px 4px 13px 16px;font:500 13px/1.5 var(--mono);background:none;border:0;border-radius:10px 0 0 10px;color:var(--text);scrollbar-width:none}
+.cmd-text::-webkit-scrollbar{display:none}
+.cmd-text::before{content:"$ ";color:var(--faint)}
+.cmd-copy{flex:none;width:46px;display:grid;place-items:center;background:none;border:0;border-left:1px solid var(--line);border-radius:0 10px 10px 0;color:var(--muted);cursor:pointer;transition:color .2s,background-color .2s}
+.cmd-copy:hover{color:var(--text);background:var(--raise-2)}
+.cmd-copy .ico-check,.cmd-copy.done .ico-copy{display:none}
+.cmd-copy.done{color:var(--accent)}
+.cmd-copy.done .ico-check{display:block}
+.alt{margin:20px auto 0;max-width:30em;color:var(--faint);font-size:14px}
+.get .alt a{color:var(--text);text-decoration-color:var(--line-2);text-underline-offset:3px}
+.get .alt a:hover{text-decoration-color:var(--text)}

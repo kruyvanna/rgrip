@@ -81,3 +81,20 @@ if (toc.length) {
   }, { rootMargin: "-30% 0px -60% 0px" });
   document.querySelectorAll(".group").forEach((g) => spy.observe(g));
 }
+
+// Command blocks: the copy button puts the command on the clipboard and
+// shows a check for a moment.
+document.querySelectorAll("[data-copy]").forEach((btn) => {
+  let timer;
+  btn.addEventListener("click", () => {
+    navigator.clipboard.writeText(btn.dataset.copy).then(() => {
+      btn.classList.add("done");
+      btn.setAttribute("aria-label", "Copied");
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        btn.classList.remove("done");
+        btn.setAttribute("aria-label", "Copy command");
+      }, 1500);
+    }).catch(() => {});
+  });
+});
