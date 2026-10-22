@@ -9,7 +9,10 @@
 //! - `X_id` → `X.id` (`X` may be plural: `Xs`, `Xes`, `Xies`). The target
 //!   needs an `id` column; it doesn't have to be declared unique.
 //! - A column named after a table (`building.parcel`) → that table's unique
-//!   `id`.
+//!   `id`/`globalid`, else its `code` or `id` (coded lookups such as
+//!   `parcel.land_use` → `land_use.code`, often not declared unique). The
+//!   first one with a compatible type wins.
+//! - `T.col` → table `T_col` the same way (`parcel.status` → `parcel_status`).
 //! - `[prefix_]X_<key>` (`parcel_globalid`, `original_parcel_globalid`,
 //!   `new_parcel_id`) → `X.<key>` when `<key>` is a key of `X`.
 //! - Shared key name: a distinctively named key of this table (`parcel_code`,
@@ -109,14 +112,42 @@ const IDENTITY_KEYS: &[&str] = &["id", "globalid", "guid", "uuid"];
 /// by the naming rules in the module docs, plus other keys it may hold
 /// instead (bare table-name references only).
 fn target(col: &str, t: &CatalogTable) -> Option<(String, Vec<String>)> {
-    let main = target_main(col, t)?;
     let c = col.to_lowercase();
+    let Some(main) = target_main(col, t) else {
+        // `land_use` → land_use.code: coded lookup tables often have no
+        // unique index on their code (or id).
+        return names_table(&c, t).then(|| lookup_keys(t)).and_then(|mut v| (!v.is_empty()).then(|| (v.remove(0), v)));
+    };
     let alternatives = if names_table(&c, t) {
-        t.keys.iter().filter(|k| !k.eq_ignore_ascii_case(&main) && IDENTITY_KEYS.contains(&k.to_lowercase().as_str())).cloned().collect()
+        let mut v: Vec<String> = t.keys.iter().filter(|k| !k.eq_ignore_ascii_case(&main) && IDENTITY_KEYS.contains(&k.to_lowercase().as_str())).cloned().collect();
+        for k in lookup_keys(t) {
+            if !k.eq_ignore_ascii_case(&main) && !v.iter().any(|x| x.eq_ignore_ascii_case(&k)) {
+                v.push(k);
+            }
+        }
+        v
     } else {
         Vec::new()
     };
     Some((main, alternatives))
+}
+
+/// Columns a coded lookup table is referenced by, unique or not.
+const LOOKUP_KEYS: &[&str] = &["code", "id"];
+
+fn lookup_keys(t: &CatalogTable) -> Vec<String> {
+    LOOKUP_KEYS.iter().filter_map(|k| column(t, k).map(|(c, _)| c.clone())).collect()
+}
+
+/// [`target`], also trying `table_col` as the name (`parcel.status` →
+/// `parcel_status`). The first of the main key and its alternatives whose
+/// type `fits` becomes the main key.
+fn target_fitting(table: &str, col: &str, t: &CatalogTable, fits: impl Fn(&str) -> bool) -> Option<(String, Vec<String>)> {
+    let pick = |(main, alts): (String, Vec<String>)| {
+        let mut all: Vec<String> = std::iter::once(main).chain(alts).filter(|k| fits(k)).collect();
+        (!all.is_empty()).then(|| (all.remove(0), all))
+    };
+    target(col, t).and_then(pick).or_else(|| target(&format!("{table}_{col}"), t).filter(|_| names_table(&format!("{table}_{col}").to_lowercase(), t)).and_then(pick))
 }
 
 fn target_main(col: &str, t: &CatalogTable) -> Option<String> {
@@ -201,9 +232,8 @@ pub fn infer(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalo
             .iter()
             .filter(|t| !(t.schema == schema && t.name == table) || !col.name.eq_ignore_ascii_case("id"))
             .filter_map(|t| {
-                let (there, alts) = target(&col.name, t)?;
-                let fits = |c: &str| ty_of(t, c).is_some_and(|ty| compatible(&col.data_type, &ty));
-                fits(&there).then(|| (*t, there, alts.into_iter().filter(|a| fits(a)).collect()))
+                let (there, alts) = target_fitting(table, &col.name, t, |c| ty_of(t, c).is_some_and(|ty| compatible(&col.data_type, &ty)))?;
+                Some((*t, there, alts))
             })
             .collect();
         let same: Vec<_> = matches.iter().filter(|(t, _, _)| t.schema == schema).collect();
@@ -225,17 +255,15 @@ pub fn infer(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalo
                     continue;
                 }
             }
-            let here = target(c, &me).or_else(|| {
+            let fits = |k: &str| ty_of(&me, k).is_some_and(|here_ty| compatible(&here_ty, ty));
+            let here = target_fitting(&t.name, c, &me, fits).or_else(|| {
                 // Shared distinctive key name.
                 keys.iter()
-                    .find(|k| k.eq_ignore_ascii_case(c) && k.len() >= 3 && !GENERIC_KEYS.contains(&k.to_lowercase().as_str()))
+                    .find(|k| k.eq_ignore_ascii_case(c) && k.len() >= 3 && !GENERIC_KEYS.contains(&k.to_lowercase().as_str()) && fits(k))
                     .map(|k| (k.to_string(), Vec::new()))
             });
-            let fits = |k: &str| ty_of(&me, k).is_some_and(|here_ty| compatible(&here_ty, ty));
-            if let Some((here, alts)) = here
-                && fits(&here)
-            {
-                let alts = alts.into_iter().filter(|a| fits(a)).map(|a| (a, c.clone())).collect();
+            if let Some((here, alts)) = here {
+                let alts = alts.into_iter().map(|a| (a, c.clone())).collect();
                 add(false, t, &here, c, alts);
             }
         }
@@ -245,6 +273,28 @@ pub fn infer(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalo
     out.sort_by(|a, b| (!a.outgoing, elsewhere(a), &a.other_table, &a.other_schema, &a.columns).cmp(&(!b.outgoing, elsewhere(b), &b.other_table, &b.other_schema, &b.columns)));
     out.truncate(MAX);
     out
+}
+
+/// Where a query result column is read from: (schema, table, column).
+pub type Origin = (String, String, String);
+
+/// An outgoing relation of `schema.table` as seen from a query result:
+/// each local column renamed to the result column that reads it (`origins[i]`
+/// is where `names[i]` comes from). `None` for incoming relations, and when a
+/// column of the key isn't in the result (or its name is ambiguous there).
+pub fn on_result(rel: &Relation, schema: &str, table: &str, origins: &[Option<Origin>], names: &[String]) -> Option<Relation> {
+    if !rel.outgoing {
+        return None;
+    }
+    let find = |col: &str| {
+        let i = origins.iter().position(|o| o.as_ref().is_some_and(|(s, t, c)| s == schema && t == table && c == col))?;
+        let name = names.get(i)?;
+        // Repeats are fine when they read the same column (`select a, *`).
+        names.iter().zip(origins).filter(|(n, _)| *n == name).all(|(_, o)| *o == origins[i]).then(|| name.clone())
+    };
+    let columns = rel.columns.iter().map(|(here, there)| Some((find(here)?, there.clone()))).collect::<Option<Vec<_>>>()?;
+    let alternatives = rel.alternatives.iter().filter_map(|(here, there)| Some((find(here)?, there.clone()))).collect();
+    Some(Relation { columns, alternatives, ..rel.clone() })
 }
 
 #[cfg(test)]
@@ -391,5 +441,60 @@ mod tests {
         assert_eq!(brief(out.clone()), ["→ parcel.id=parcel"]);
         // A bare name may hold either identity key: globalid is an alternative.
         assert_eq!(out[0].alternatives, [("parcel".to_string(), "globalid".to_string())]);
+    }
+
+    #[test]
+    fn coded_lookups() {
+        let keyed = |name: &str, cols: &[(&str, &str)], keys: &[&str]| CatalogTable {
+            keys: keys.iter().map(|k| k.to_string()).collect(),
+            ..table("mlmupc", name, cols)
+        };
+        let lookup = |name: &str| keyed(name, &[("objectid", "integer"), ("code", "integer"), ("globalid", "character varying(38)")], &["objectid", "globalid"]);
+        let cat = Catalog {
+            tables: vec![
+                keyed("parcel", &[("objectid", "integer"), ("land_use", "integer"), ("status", "integer"), ("field_info", "character varying"), ("pi_status", "integer")], &["objectid"]),
+                lookup("land_use"),
+                lookup("parcel_status"),
+                keyed("field_info", &[("objectid", "integer"), ("id", "character varying(38)"), ("globalid", "character varying(38)")], &["objectid", "globalid"]),
+            ],
+        };
+        let cols = |t: &CatalogTable| t.columns.iter().map(|(n, ty)| col(n, ty, false)).collect::<Vec<_>>();
+        let brief = |rs: Vec<Relation>| rs.iter().map(|r| format!("{} {}.{}={}", if r.outgoing { "→" } else { "←" }, r.other_table, r.columns[0].1, r.columns[0].0)).collect::<Vec<_>>();
+        let out = infer("mlmupc", "parcel", &cols(&cat.tables[0]), &cat, &[]);
+        // Integer columns skip the text globalid for the code; text keeps globalid.
+        assert_eq!(brief(out.clone()), ["→ field_info.globalid=field_info", "→ land_use.code=land_use", "→ parcel_status.code=status"]);
+        assert_eq!(out[0].alternatives, [("field_info".to_string(), "id".to_string())]);
+        // And back: the lookup sees who uses it.
+        assert_eq!(brief(infer("mlmupc", "land_use", &cols(&cat.tables[1]), &cat, &[])), ["← parcel.land_use=code"]);
+        assert_eq!(brief(infer("mlmupc", "parcel_status", &cols(&cat.tables[2]), &cat, &[])), ["← parcel.status=code"]);
+    }
+
+    #[test]
+    fn relation_on_result_columns() {
+        let rel = Relation {
+            name: "posts_user_fk".into(),
+            outgoing: true,
+            other_schema: "public".into(),
+            other_table: "users".into(),
+            columns: vec![("user_id".into(), "id".into())],
+            inferred: false,
+            alternatives: Vec::new(),
+        };
+        let o = |t: &str, c: &str| Some(("public".to_string(), t.to_string(), c.to_string()));
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Aliased: the relation follows the result column's name.
+        let r = on_result(&rel, "public", "posts", &[o("posts", "id"), o("posts", "user_id")], &names(&["id", "author"])).unwrap();
+        assert_eq!(r.columns, [("author".to_string(), "id".to_string())]);
+        // Not selected, computed, from another table, or ambiguous: no relation.
+        assert!(on_result(&rel, "public", "posts", &[o("posts", "id")], &names(&["id"])).is_none());
+        assert!(on_result(&rel, "public", "posts", &[None], &names(&["user_id"])).is_none());
+        assert!(on_result(&rel, "public", "posts", &[o("comments", "user_id")], &names(&["user_id"])).is_none());
+        assert!(on_result(&rel, "public", "posts", &[o("posts", "user_id"), o("comments", "user_id")], &names(&["user_id", "user_id"])).is_none());
+        // The same column twice (`select user_id, *`): still one relation.
+        let r = on_result(&rel, "public", "posts", &[o("posts", "user_id"), o("posts", "id"), o("posts", "user_id")], &names(&["user_id", "id", "user_id"])).unwrap();
+        assert_eq!(r.columns, [("user_id".to_string(), "id".to_string())]);
+        // Incoming relations stay out.
+        let incoming = Relation { outgoing: false, ..rel };
+        assert!(on_result(&incoming, "public", "posts", &[o("posts", "user_id")], &names(&["user_id"])).is_none());
     }
 }

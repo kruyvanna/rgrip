@@ -454,8 +454,17 @@ impl MapView {
         if !geom_cols.contains(&self.column) {
             self.column = geom_cols[0];
         }
-        // Re-decode only when the result or column changes.
-        let key = rs as *const ResultSet as usize ^ rs.rows.len().rotate_left(17) ^ self.column.rotate_left(41);
+        // Re-decode only when the result or column changes. A reloaded page
+        // can reuse the address and row count: the end rows tell them apart.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (rs as *const ResultSet as usize, rs.rows.len(), self.column).hash(&mut h);
+            for row in [rs.rows.first(), rs.rows.last()].into_iter().flatten() {
+                row.get(self.column).hash(&mut h);
+            }
+            h.finish() as usize
+        };
         if self.cache.as_ref().is_none_or(|(k, _)| *k != key) {
             // New data: prefer a reprojected `*_4326` column (from /con_4326 etc.).
             if let Some(&i) = geom_cols.iter().find(|&&i| rs.columns[i].ends_with("_4326")) {
@@ -630,7 +639,7 @@ impl MapView {
             if link.area_filter.is_some() {
                 if ui
                     .selectable_label(self.area_tool, "Filter by area")
-                    .on_hover_text("Drag a box on the map to filter the table to it (or hold ⇧ and drag)")
+                    .on_hover_text("Drag a box on the map to keep only the rows inside it (or hold ⇧ and drag)")
                     .clicked()
                 {
                     self.area_tool = !self.area_tool;

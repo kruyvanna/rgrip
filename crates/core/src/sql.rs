@@ -43,17 +43,23 @@ pub fn split_statements(sql: &str) -> Vec<Statement> {
 }
 
 /// The statement under a byte cursor. When the cursor sits in whitespace
-/// after a statement, the preceding statement is returned.
+/// after a statement, the preceding statement is returned only if the cursor
+/// is still on its last line, or nothing follows it. A cursor on a blank line
+/// between two statements is ambiguous and gives `None`.
 pub fn statement_at(sql: &str, cursor: usize) -> Option<Range<usize>> {
     let stmts = split_statements(sql);
     let mut best = None;
-    for s in &stmts {
+    for (i, s) in stmts.iter().enumerate() {
         if s.trimmed.start > cursor {
             break;
         }
         best = Some(s.trimmed.clone());
         if cursor < s.raw.end {
             break;
+        }
+        let next_started = stmts.get(i + 1).map(|n| n.trimmed.start <= cursor);
+        if next_started == Some(false) && sql[s.raw.end..cursor.min(sql.len())].contains('\n') {
+            return None;
         }
     }
     best.or_else(|| stmts.first().map(|s| s.trimmed.clone()))
@@ -65,13 +71,11 @@ pub fn quote_ident(ident: &str) -> String {
 
 const PAGE_PREFIX: &str = "select * from (";
 
-/// Wrap a single read-only query so one page can be fetched server-side.
-/// Returns the SQL and how many chars were prepended (to map error
-/// positions back). `None` for anything that isn't safely wrappable.
-pub fn paged_query(stmt: &str, limit: usize, offset: usize) -> Option<(String, usize)> {
-    // Cut at the end of the statement so a trailing `;` and any comments
-    // after it stay out of the subquery. Leading text is kept as-is so
-    // error positions only shift by the prefix.
+/// The text of a single read-only query that can sit inside a subquery.
+/// Cut at the end of the statement so a trailing `;` and any comments
+/// after it stay out. Leading text is kept as-is so error positions only
+/// shift by the wrapper's prefix.
+fn wrappable_body(stmt: &str) -> Option<&str> {
     let [s] = &split_statements(stmt)[..] else { return None };
     let body = &stmt[..s.trimmed.end];
     let words = crate::complete::words(body);
@@ -84,6 +88,21 @@ pub fn paged_query(stmt: &str, limit: usize, offset: usize) -> Option<(String, u
     if words.iter().any(|w| BLOCK.contains(&w.as_str())) {
         return None;
     }
+    Some(body)
+}
+
+/// `select count(*)` over `stmt`, for the total of a paged result. `None`
+/// for anything `paged_query` wouldn't wrap.
+pub fn count_query(stmt: &str) -> Option<String> {
+    let body = wrappable_body(stmt)?;
+    Some(format!("select count(*) from (\n{body}\n) as _rgrip_count"))
+}
+
+/// Wrap a single read-only query so one page can be fetched server-side.
+/// Returns the SQL and how many chars were prepended (to map error
+/// positions back). `None` for anything that isn't safely wrappable.
+pub fn paged_query(stmt: &str, limit: usize, offset: usize) -> Option<(String, usize)> {
+    let body = wrappable_body(stmt)?;
     // Newline before `)` so a trailing line comment can't swallow it.
     let sql = format!("{PAGE_PREFIX}{body}\n) as _rgrip_page limit {limit} offset {offset}");
     Some((sql, PAGE_PREFIX.len()))
@@ -97,6 +116,13 @@ pub fn sorted_query(stmt: &str, column: &str, ascending: bool) -> Option<String>
     let body = &stmt[..s.trimmed.end];
     let dir = if ascending { "asc nulls last" } else { "desc nulls last" };
     Some(format!("select * from (\n{body}\n) as _rgrip_sort order by {} {dir}", quote_ident(column)))
+}
+
+/// `stmt` keeping only the rows matching `filter` (a WHERE condition on its
+/// result columns). `None` for anything `paged_query` wouldn't wrap.
+pub fn filtered_query(stmt: &str, filter: &str) -> Option<String> {
+    let body = wrappable_body(stmt)?;
+    Some(format!("select * from (\n{body}\n) as _rgrip_filter where {filter}"))
 }
 
 /// Compact display form of verbose Postgres type names.
@@ -228,13 +254,36 @@ mod tests {
     }
 
     #[test]
+    fn filter_wrapper() {
+        assert_eq!(filtered_query("select * from t;", "a > 1").unwrap(), "select * from (\nselect * from t\n) as _rgrip_filter where a > 1");
+        assert_eq!(filtered_query("delete from t", "a > 1"), None);
+    }
+
+    #[test]
+    fn count_wrapper() {
+        assert_eq!(count_query("select * from t where a = 1;").unwrap(), "select count(*) from (\nselect * from t where a = 1\n) as _rgrip_count");
+        // A trailing line comment can't swallow the closing paren.
+        assert!(count_query("select 1 -- note").unwrap().contains("-- note\n)"));
+        assert_eq!(count_query("update t set a = 1"), None);
+        assert_eq!(count_query("select 1; select 2"), None);
+        assert_eq!(count_query("select * into x from t"), None);
+    }
+
+    #[test]
     fn statement_under_cursor() {
         let sql = "select 1;\n\nselect 2;\n";
         assert_eq!(&sql[statement_at(sql, 3).unwrap()], "select 1");
-        // In whitespace after the first statement → first statement.
-        assert_eq!(&sql[statement_at(sql, 10).unwrap()], "select 1");
+        // Right after the `;`, on the same line → first statement.
+        assert_eq!(&sql[statement_at(sql, 9).unwrap()], "select 1");
+        // On the blank line between two statements → ambiguous, nothing.
+        assert_eq!(statement_at(sql, 10), None);
         assert_eq!(&sql[statement_at(sql, 13).unwrap()], "select 2");
+        // Below the last statement → still the last statement.
         assert_eq!(&sql[statement_at(sql, sql.len()).unwrap()], "select 2");
+        assert_eq!(&sql[statement_at("select 1;\n\n\n", 11).unwrap()], "select 1");
+        // Before the first statement → first statement.
+        let lead = "\n\nselect 1;";
+        assert_eq!(&lead[statement_at(lead, 0).unwrap()], "select 1");
         assert_eq!(statement_at("", 0), None);
     }
 

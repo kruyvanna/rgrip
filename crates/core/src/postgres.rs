@@ -1,4 +1,5 @@
 use crate::model::*;
+use crate::relations::Origin;
 use crate::sql::quote_ident;
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -25,6 +26,8 @@ pub struct PgConn {
     /// Held from setting `search_path` to the end of the query, so consoles
     /// sharing this connection can't change each other's schema in between.
     schema_lock: tokio::sync::Mutex<()>,
+    /// When [`PgConn::alive`] last vouched for the connection.
+    checked: std::sync::Mutex<std::time::Instant>,
 }
 
 fn tls_err(what: &str) -> impl Fn(rustls::Error) -> String + '_ {
@@ -185,6 +188,8 @@ impl PgConn {
             .user(&cfg.user)
             .application_name("rgrip")
             .connect_timeout(Duration::from_secs(10))
+            // Notice a dead socket (laptop slept, network changed) on its own.
+            .keepalives_idle(Duration::from_secs(30))
             .ssl_mode(match cfg.ssl {
                 SslMode::Disable => tokio_postgres::config::SslMode::Disable,
                 SslMode::Prefer => tokio_postgres::config::SslMode::Prefer,
@@ -212,7 +217,7 @@ impl PgConn {
             client.batch_execute("set session characteristics as transaction read only").await.map_err(|e| format_error(&e, None))?;
         }
         let cancel = client.cancel_token();
-        Ok(Self { client, cancel, tls, tunnel, schema_lock: Default::default() })
+        Ok(Self { client, cancel, tls, tunnel, schema_lock: Default::default(), checked: std::sync::Mutex::new(std::time::Instant::now()) })
     }
 
     pub async fn server_info(&self) -> Result<ServerInfo, String> {
@@ -235,6 +240,27 @@ impl PgConn {
 
     pub fn is_closed(&self) -> bool {
         self.client.is_closed()
+    }
+
+    /// Open, and after a quiet minute also answering a ping within 5 s: a
+    /// socket that died while the laptop slept can still look open.
+    pub async fn alive(&self) -> bool {
+        const QUIET: Duration = Duration::from_secs(60);
+        if self.is_closed() {
+            return false;
+        }
+        {
+            let mut checked = self.checked.lock().unwrap();
+            if checked.elapsed() < QUIET {
+                *checked = std::time::Instant::now();
+                return true;
+            }
+        }
+        let ok = matches!(tokio::time::timeout(Duration::from_secs(5), self.client.simple_query("")).await, Ok(Ok(_)));
+        if ok {
+            *self.checked.lock().unwrap() = std::time::Instant::now();
+        }
+        ok
     }
 
     pub async fn schemas(&self) -> Result<Vec<String>, String> {
@@ -433,6 +459,74 @@ impl PgConn {
         })
     }
 
+    /// The tables of `schema` with their columns and foreign keys, plus
+    /// guessed links against the whole database's catalog.
+    pub async fn schema_diagram(&self, schema: &str) -> Result<crate::diagram::Diagram, String> {
+        let rows = self
+            .client
+            .query(
+                "select c.relname::text, c.relkind::text, a.attname::text,
+                        format_type(a.atttypid, a.atttypmod), not a.attnotnull,
+                        exists (select 1 from pg_index i
+                                where i.indrelid = a.attrelid and i.indisprimary
+                                  and a.attnum = any(i.indkey))
+                 from pg_class c
+                 join pg_namespace n on n.oid = c.relnamespace
+                 join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+                 where n.nspname = $1 and c.relkind in ('r','p','v','m','f') and not c.relispartition
+                 order by c.relname, a.attnum",
+                &[&schema],
+            )
+            .await
+            .map_err(|e| format_error(&e, None))?;
+        let mut tables: Vec<crate::diagram::DiagramTable> = Vec::new();
+        for r in &rows {
+            let name: String = r.get(0);
+            if tables.last().is_none_or(|t| t.name != name) {
+                tables.push(crate::diagram::DiagramTable { name, kind: TableKind::from_relkind(r.get::<_, &str>(1)), columns: Vec::new() });
+            }
+            tables.last_mut().unwrap().columns.push(ColumnInfo { name: r.get(2), data_type: r.get(3), nullable: r.get(4), default: None, primary_key: r.get(5) });
+        }
+        let rows = self
+            .client
+            .query(
+                "select src.relname::text, con.conname::text, n.nspname::text, c.relname::text,
+                        array(select a.attname::text from unnest(con.conkey) with ordinality k(num, i)
+                              join pg_attribute a on a.attrelid = con.conrelid and a.attnum = k.num order by k.i),
+                        array(select a.attname::text from unnest(con.confkey) with ordinality k(num, i)
+                              join pg_attribute a on a.attrelid = con.confrelid and a.attnum = k.num order by k.i)
+                 from pg_constraint con
+                 join pg_class src on src.oid = con.conrelid
+                 join pg_namespace sn on sn.oid = src.relnamespace
+                 join pg_class c on c.oid = con.confrelid
+                 join pg_namespace n on n.oid = c.relnamespace
+                 where con.contype = 'f' and sn.nspname = $1
+                 order by src.relname, con.conname",
+                &[&schema],
+            )
+            .await
+            .map_err(|e| format_error(&e, None))?;
+        let fks = rows
+            .iter()
+            .map(|r| {
+                let here: Vec<String> = r.get(4);
+                let there: Vec<String> = r.get(5);
+                let rel = Relation {
+                    name: r.get(1),
+                    outgoing: true,
+                    other_schema: r.get(2),
+                    other_table: r.get(3),
+                    columns: here.into_iter().zip(there).collect(),
+                    inferred: false,
+                    alternatives: Vec::new(),
+                };
+                (r.get::<_, String>(0), rel)
+            })
+            .collect();
+        let catalog = self.catalog().await?;
+        Ok(crate::diagram::assemble(schema, tables, fks, &catalog))
+    }
+
     /// Run one or more statements through the simple query protocol.
     /// All values come back as text, which is exactly what a grid needs.
     /// Result sets are capped at [`PAGE_SIZE`] rows.
@@ -502,6 +596,54 @@ impl PgConn {
         let _guard = self.schema_lock.lock().await;
         self.set_schema(schema).await?;
         self.execute_page(stmt, offset).await
+    }
+
+    /// Where each column of a single read-only `stmt` is read from, found by
+    /// preparing it (nothing runs). `None` for computed columns.
+    pub async fn column_origins_in(&self, schema: Option<&str>, stmt: &str) -> Result<Vec<Option<Origin>>, String> {
+        let prepared = {
+            let _guard = self.schema_lock.lock().await;
+            self.set_schema(schema).await?;
+            self.client.prepare(stmt).await.map_err(|e| format_error(&e, None))?
+        };
+        let (mut index, mut oids, mut nums) = (Vec::<i32>::new(), Vec::<i64>::new(), Vec::<i16>::new());
+        for (i, c) in prepared.columns().iter().enumerate() {
+            if let (Some(oid), Some(num)) = (c.table_oid().filter(|o| *o != 0), c.column_id()) {
+                index.push(i as i32);
+                oids.push(oid as i64);
+                nums.push(num);
+            }
+        }
+        let mut out = vec![None; prepared.columns().len()];
+        if index.is_empty() {
+            return Ok(out);
+        }
+        let rows = self
+            .client
+            .query(
+                "select k.i, n.nspname::text, c.relname::text, a.attname::text
+                 from unnest($1::int4[], $2::int8[], $3::int2[]) k(i, oid, num)
+                 join pg_attribute a on a.attrelid = k.oid::oid and a.attnum = k.num
+                 join pg_class c on c.oid = a.attrelid
+                 join pg_namespace n on n.oid = c.relnamespace",
+                &[&index, &oids, &nums],
+            )
+            .await
+            .map_err(|e| format_error(&e, None))?;
+        for r in &rows {
+            out[r.get::<_, i32>(0) as usize] = Some((r.get(1), r.get(2), r.get(3)));
+        }
+        Ok(out)
+    }
+
+    /// How many rows `stmt` returns. Meant for a connection of its own: it
+    /// can run long, so it gives up after a minute.
+    pub async fn count_rows_in(&self, schema: Option<&str>, stmt: &str) -> Result<i64, String> {
+        let sql = crate::sql::count_query(stmt).ok_or("This statement can't be counted")?;
+        self.set_schema(schema).await?;
+        self.client.batch_execute("set statement_timeout = 60000").await.map_err(|e| format_error(&e, None))?;
+        let row = self.client.query_one(&sql, &[]).await.map_err(|e| format_error(&e, None))?;
+        Ok(row.get(0))
     }
 
     /// One page of a read-only query, fetched server-side with LIMIT/OFFSET.

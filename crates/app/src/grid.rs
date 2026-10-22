@@ -87,6 +87,8 @@ pub enum GridEvent {
     Follow { relation: usize, rows: Vec<usize> },
     /// The row menu opened for `rows`: a chance to count related rows.
     RowsMenu { rows: Vec<usize> },
+    /// The lookup icon of a relation column: show the table it references.
+    Lookup { relation: usize },
 }
 
 /// Inline editing, for table tabs whose rows have a primary key.
@@ -279,19 +281,16 @@ pub fn show(
                         if let Some((c, a)) = flash && c == i {
                             ui.painter().rect_filled(rect, 0.0, theme::ACCENT().gamma_multiply(0.4 * a));
                         }
+                        // The whole cell takes clicks; the lookup icon, added later, sits on top.
+                        let r = ui.interact(rect, id.with(("header", salt, i)), Sense::click());
                         ui.add_space(PAD);
-                        // Keep the right edge free for the sort indicator.
-                        let label_w = if sortable { rect.width() - PAD - 22.0 } else { rect.width() - PAD };
-                        let r = ui
-                            .allocate_ui_with_layout(egui::vec2(label_w.max(8.0), rect.height()), Layout::left_to_right(Align::Center), |ui| {
-                                ui.add(
-                                    Label::new(RichText::new(name).size(12.5).color(theme::TEXT()))
-                                        .truncate()
-                                        .selectable(false)
-                                        .sense(Sense::click()),
-                                )
-                            })
-                            .inner;
+                        // The outgoing relation this column is part of: gets a lookup icon.
+                        let lookup = source.relations.iter().position(|r| r.outgoing && r.columns.iter().any(|(here, _)| here == name));
+                        // Keep the right edge free for the sort indicator and lookup icon.
+                        let label_w = rect.width() - PAD - if sortable { 22.0 } else { 0.0 } - if lookup.is_some() { 20.0 } else { 0.0 };
+                        ui.allocate_ui_with_layout(egui::vec2(label_w.max(8.0), rect.height()), Layout::left_to_right(Align::Center), |ui| {
+                            ui.add(Label::new(RichText::new(name).size(12.5).color(theme::TEXT())).truncate().selectable(false));
+                        });
                         if let Some(s) = sort.as_ref() {
                             let c = egui::pos2(rect.right() - 13.0, rect.center().y);
                             if s.column == name {
@@ -302,6 +301,18 @@ pub fn show(
                         }
                         if r.clicked() {
                             event = Some(GridEvent::HeaderClicked(i));
+                        }
+                        if let Some(ri) = lookup {
+                            let x = rect.right() - if sortable { 34.0 } else { 13.0 };
+                            let icon = egui::Rect::from_center_size(egui::pos2(x, rect.center().y), egui::vec2(16.0, 16.0));
+                            let hit = ui.interact(icon.expand(2.0), id.with(("lookup", salt, i)), Sense::click());
+                            let tint = if hit.hovered() { theme::ACCENT() } else { theme::FAINT() };
+                            crate::icons::paint(ui, crate::icons::Svg::Search, icon.shrink(1.5), tint);
+                            let rel = &source.relations[ri];
+                            let other = if rel.other_schema == "public" { rel.other_table.clone() } else { format!("{}.{}", rel.other_schema, rel.other_table) };
+                            if hit.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Look up in {other}")).clicked() {
+                                event = Some(GridEvent::Lookup { relation: ri });
+                            }
                         }
                         let is_frozen = frozen.contains(&i);
                         r.context_menu(|ui| {
@@ -646,8 +657,8 @@ fn copy_column_items(ui: &mut Ui, rs: &ResultSet, rows: &[usize], col: usize, la
         ui.ctx().copy_text(column_distinct(rs, rows, col).join("\n"));
         ui.close();
     }
-    if crate::icons::menu_item(ui, crate::icons::Svg::Table, "Copy as SQL list", true)
-        .on_hover_text("Distinct values for  where col in (…)")
+    if crate::icons::menu_item(ui, crate::icons::Svg::Table, "Copy as IN ('a', 'b')", true)
+        .on_hover_text("Distinct values, quoted, for  where col in ('a', 'b')")
         .clicked()
     {
         ui.ctx().copy_text(column_sql_list(rs, rows, col));
@@ -665,12 +676,11 @@ fn column_distinct<'a>(rs: &'a ResultSet, rows: &[usize], col: usize) -> Vec<&'a
     rows.iter().filter_map(|&r| rs.rows.get(r)?[col].as_deref()).filter(|v| seen.insert(*v)).collect()
 }
 
-/// `'a', 'b'`, or `1, 2` when every value is a plain number.
+/// `('a', 'b')`: always quoted, since Postgres reads a quoted literal as
+/// the column's type, so it works for text and number columns alike.
 fn column_sql_list(rs: &ResultSet, rows: &[usize], col: usize) -> String {
-    let values = column_distinct(rs, rows, col);
-    let numeric = !values.is_empty() && values.iter().all(|v| !v.is_empty() && v.parse::<f64>().is_ok() && !v.starts_with('0') || *v == "0");
-    let items: Vec<String> = values.iter().map(|v| if numeric { v.to_string() } else { format!("'{}'", v.replace('\'', "''")) }).collect();
-    items.join(", ")
+    let items: Vec<String> = column_distinct(rs, rows, col).iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect();
+    format!("({})", items.join(", "))
 }
 
 /// Copy / export actions for the given rows.
@@ -1295,11 +1305,10 @@ mod tests {
         let all = [0, 1, 2, 3];
         assert_eq!(column_lines(&rs, &all, 1), "{23F7220B-490C}\nNULL\nO'Neil\n{23F7220B-490C}");
         assert_eq!(column_distinct(&rs, &all, 1), ["{23F7220B-490C}", "O'Neil"]);
-        assert_eq!(column_sql_list(&rs, &all, 1), "'{23F7220B-490C}', 'O''Neil'");
-        assert_eq!(column_sql_list(&rs, &[0, 2], 0), "1, 3");
-        // Leading zeros are codes, not numbers.
+        assert_eq!(column_sql_list(&rs, &all, 1), "('{23F7220B-490C}', 'O''Neil')");
+        assert_eq!(column_sql_list(&rs, &[0, 2], 0), "('1', '3')");
         let codes = ResultSet { columns: vec!["zip".into()], rows: vec![vec![s("012")], vec![s("7")]], ..Default::default() };
-        assert_eq!(column_sql_list(&codes, &[0, 1], 0), "'012', '7'");
+        assert_eq!(column_sql_list(&codes, &[0, 1], 0), "('012', '7')");
     }
 
     #[test]

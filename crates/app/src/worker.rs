@@ -30,6 +30,9 @@ pub enum LayerResult {
     Extent(Option<(rgrip_core::geo::Coord, rgrip_core::geo::Coord)>, Option<i64>),
 }
 
+/// A table a query result reads from: schema, name, columns, foreign keys.
+pub type SourceTable = (String, String, Vec<ColumnInfo>, Vec<Relation>);
+
 pub enum Cmd {
     Connect(ConnectionConfig),
     Disconnect(ConnId),
@@ -40,9 +43,16 @@ pub enum Cmd {
     Tables(ConnId, String),
     Columns(ConnId, String, String),
     Catalog(ConnId, Option<String>),
+    /// Tables, columns and links of a schema, for its diagram tab.
+    Diagram { conn: ConnId, schema: String },
     /// `database`: `None` = the connection's own database.
     /// `page: Some(offset)` fetches one page of a read-only query.
     Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize>, schema: Option<String>, database: Option<String> },
+    /// Where the columns of a console statement come from, with their tables'
+    /// columns and foreign keys (for relations in the result grid).
+    QueryOrigins { conn: ConnId, tab: TabId, run: u64, sql: String, schema: Option<String> },
+    /// Count the rows of a paged console statement (own connection, so paging stays quick).
+    CountRows { conn: ConnId, tab: TabId, run: u64, sql: String, schema: Option<String>, database: Option<String> },
     /// `modal`: for the tab's related-rows popup rather than the tab itself.
     TableData { conn: ConnId, tab: TabId, query: TableQuery, modal: bool },
     /// Count matches of related-row filters (schema, table, filter) for the
@@ -80,7 +90,13 @@ pub enum Ev {
     Tables { conn: ConnId, schema: String, result: Result<Vec<TableInfo>, String> },
     Columns { conn: ConnId, schema: String, table: String, result: Result<Vec<ColumnInfo>, String> },
     Catalog { conn: ConnId, database: Option<String>, result: Result<Catalog, String> },
+    Diagram { conn: ConnId, schema: String, result: Result<rgrip_core::diagram::Diagram, String> },
     QueryDone { tab: TabId, result: Result<QueryOutput, String> },
+    /// Per result column of `sql`, its source column; then per source table
+    /// (schema, table) its columns and foreign keys.
+    QueryOrigins { tab: TabId, run: u64, sql: String, origins: Vec<Option<rgrip_core::relations::Origin>>, tables: Vec<SourceTable> },
+    /// Total rows of `sql`, or why it couldn't be counted.
+    QueryCount { tab: TabId, run: u64, sql: String, result: Result<i64, String> },
     /// `columns`: the table's columns (primary key and types, for editing).
     /// `relations`: foreign keys from and to the table.
     TablePage { tab: TabId, modal: bool, result: Result<ResultSet, String>, columns: Vec<ColumnInfo>, relations: Vec<Relation> },
@@ -172,35 +188,44 @@ impl Worker {
     }
 }
 
-fn get(conns: &Conns, id: &str) -> Result<Arc<PgConn>, String> {
-    match conns.main.lock().unwrap().get(id) {
-        Some(c) if !c.is_closed() => Ok(c.clone()),
-        Some(_) => Err("Connection closed".into()),
-        None => Err("Not connected".into()),
+/// The main connection of `id`, reconnected if it died (e.g. the laptop
+/// slept): refreshing then just works, no disconnect/connect needed.
+async fn get(conns: &Conns, id: &str) -> Result<Arc<PgConn>, String> {
+    let current = conns.main.lock().unwrap().get(id).cloned();
+    let Some(c) = current else { return Err("Not connected".into()) };
+    if c.alive().await {
+        return Ok(c);
     }
+    let Some(cfg) = conns.cfgs.lock().unwrap().get(id).cloned() else { return Err("Connection closed".into()) };
+    let fresh = Arc::new(PgConn::connect(&cfg).await.map_err(|e| format!("Connection lost, reconnecting failed: {e}"))?);
+    // Still ours (not disconnected meanwhile): swap it in; its other databases' connections died with it.
+    if conns.cfgs.lock().unwrap().contains_key(id) {
+        conns.main.lock().unwrap().insert(id.to_string(), fresh.clone());
+        conns.extra.lock().unwrap().retain(|(c, _), _| c != id);
+    }
+    Ok(fresh)
+}
+
+/// The main connection as is, without checking or reconnecting.
+fn current(conns: &Conns, id: &str) -> Option<Arc<PgConn>> {
+    conns.main.lock().unwrap().get(id).filter(|c| !c.is_closed()).cloned()
 }
 
 /// The connection serving `database` of `id`, connecting to it if needed.
 async fn get_db(conns: &Conns, id: &str, database: Option<&str>) -> Result<Arc<PgConn>, String> {
-    let main = get(conns, id)?;
+    let main = get(conns, id).await?;
     let Some(cfg) = conns.cfgs.lock().unwrap().get(id).cloned() else { return Ok(main) };
     let Some(key) = extra_key(id, database, &cfg.database) else { return Ok(main) };
-    if let Some(c) = conns.extra.lock().unwrap().get(&key)
-        && !c.is_closed()
+    let existing = conns.extra.lock().unwrap().get(&key).cloned();
+    if let Some(c) = existing
+        && c.alive().await
     {
-        return Ok(c.clone());
+        return Ok(c);
     }
     let cfg = ConnectionConfig { database: key.1.clone(), ..cfg };
     let c = Arc::new(PgConn::connect(&cfg).await.map_err(|e| format!("Could not connect to database {}: {e}", key.1))?);
-    let mut extra = conns.extra.lock().unwrap();
-    // A concurrent run may have connected meanwhile: share that one.
-    match extra.get(&key) {
-        Some(other) if !other.is_closed() => Ok(other.clone()),
-        _ => {
-            extra.insert(key, c.clone());
-            Ok(c)
-        }
-    }
+    conns.extra.lock().unwrap().insert(key, c.clone());
+    Ok(c)
 }
 
 /// Drop every connection of `id`; dropping a client closes it.
@@ -245,21 +270,21 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             emit.send(Ev::Schemas { conn, database, result });
         }
         Cmd::Databases(conn) => {
-            let result = match get(&conns, &conn) {
+            let result = match get(&conns, &conn).await {
                 Ok(c) => c.databases().await,
                 Err(e) => Err(e),
             };
             emit.send(Ev::Databases { conn, result });
         }
         Cmd::Tables(conn, schema) => {
-            let result = match get(&conns, &conn) {
+            let result = match get(&conns, &conn).await {
                 Ok(c) => c.tables(&schema).await,
                 Err(e) => Err(e),
             };
             emit.send(Ev::Tables { conn, schema, result });
         }
         Cmd::Columns(conn, schema, table) => {
-            let result = match get(&conns, &conn) {
+            let result = match get(&conns, &conn).await {
                 Ok(c) => c.columns(&schema, &table).await,
                 Err(e) => Err(e),
             };
@@ -272,6 +297,13 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::Catalog { conn, database, result });
         }
+        Cmd::Diagram { conn, schema } => {
+            let result = match get(&conns, &conn).await {
+                Ok(c) => c.schema_diagram(&schema).await,
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::Diagram { conn, schema, result });
+        }
         Cmd::Query { conn, tab, sql, page, schema, database } => {
             let result = match (get_db(&conns, &conn, database.as_deref()).await, page) {
                 (Ok(c), Some(offset)) => c.execute_page_in(schema.as_deref(), &sql, offset).await,
@@ -280,8 +312,43 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             };
             emit.send(Ev::QueryDone { tab, result });
         }
+        Cmd::QueryOrigins { conn, tab, run, sql, schema } => {
+            // Quiet on any failure: the grid just has no relations.
+            let Ok(c) = get(&conns, &conn).await else { return };
+            let Ok(origins) = c.column_origins_in(schema.as_deref(), &sql).await else { return };
+            let mut names: Vec<(String, String)> = Vec::new();
+            for (s, t, _) in origins.iter().flatten() {
+                if !names.iter().any(|(a, b)| a == s && b == t) {
+                    names.push((s.clone(), t.clone()));
+                }
+            }
+            let mut tables = Vec::new();
+            // Schema-qualified, so the run's search_path doesn't matter here.
+            for (s, t) in names {
+                let columns = c.columns(&s, &t).await.unwrap_or_default();
+                let relations = c.relations(&s, &t).await.unwrap_or_default();
+                tables.push((s, t, columns, relations));
+            }
+            emit.send(Ev::QueryOrigins { tab, run, sql, origins, tables });
+        }
+        Cmd::CountRows { conn, tab, run, sql, schema, database } => {
+            let cfg = conns.cfgs.lock().unwrap().get(&conn).cloned();
+            let result = match cfg {
+                None => Err("Not connected".to_string()),
+                Some(mut cfg) => {
+                    if let Some(db) = database {
+                        cfg.database = db;
+                    }
+                    match PgConn::connect(&cfg).await {
+                        Ok(c) => c.count_rows_in(schema.as_deref(), &sql).await,
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+            emit.send(Ev::QueryCount { tab, run, sql, result });
+        }
         Cmd::TableData { conn, tab, query, modal } => {
-            let c = match get(&conns, &conn) {
+            let c = match get(&conns, &conn).await {
                 Ok(c) => c,
                 Err(e) => return emit.send(Ev::TablePage { tab, modal, result: Err(e), columns: Vec::new(), relations: Vec::new() }),
             };
@@ -296,7 +363,7 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             }
         }
         Cmd::ProbeRelations { conn, tab, modal, key, probes } => {
-            let Ok(c) = get(&conns, &conn) else { return };
+            let Ok(c) = get(&conns, &conn).await else { return };
             let mut counts = Vec::with_capacity(probes.len());
             for (schema, table, filter) in &probes {
                 counts.push(c.count_capped(schema, table, filter, PROBE_CAP).await.ok());
@@ -304,7 +371,7 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             emit.send(Ev::RelationProbe { tab, modal, key, counts });
         }
         Cmd::TableDef { conn, schema, table } => {
-            let result = match get(&conns, &conn) {
+            let result = match get(&conns, &conn).await {
                 Ok(c) => match c.columns(&schema, &table).await {
                     Ok(cols) => c.primary_key_name(&schema, &table).await.map(|pk| (cols, pk)),
                     Err(e) => Err(e),
@@ -314,28 +381,28 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             emit.send(Ev::TableDef { conn, schema, table, result });
         }
         Cmd::AlterTable { conn, schema, table, new_name, statements } => {
-            let result = match get(&conns, &conn) {
+            let result = match get(&conns, &conn).await {
                 Ok(c) => c.alter(&statements.join(";\n")).await,
                 Err(e) => Err(e),
             };
             emit.send(Ev::TableAltered { conn, schema, table, new_name, result });
         }
         Cmd::AddKey { conn, tab, sql } => {
-            let result = match get(&conns, &conn) {
+            let result = match get(&conns, &conn).await {
                 Ok(c) => c.alter(&sql).await,
                 Err(e) => Err(e),
             };
             emit.send(Ev::KeyAdded { tab, result });
         }
         Cmd::SaveEdits { conn, tab, statements } => {
-            let result = match get(&conns, &conn) {
+            let result = match get(&conns, &conn).await {
                 Ok(c) => c.apply_updates(&statements).await,
                 Err(e) => Err(e),
             };
             emit.send(Ev::EditsSaved { tab, result });
         }
         Cmd::LayerQuery { conn, tab, layer, seq, kind, sql } => {
-            let result = match get(&conns, &conn) {
+            let result = match get(&conns, &conn).await {
                 Ok(c) => c.execute_capped(&sql, LAYER_LIMIT).await.map(|out| {
                     let rows: Vec<_> = out.statements.into_iter().filter_map(|s| s.result).flat_map(|rs| {
                         let truncated = rs.truncated;
@@ -414,7 +481,7 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
             let default = conns.cfgs.lock().unwrap().get(&conn).map(|c| c.database.clone()).unwrap_or_default();
             let target = match extra_key(&conn, database.as_deref(), &default) {
                 Some(k) => conns.extra.lock().unwrap().get(&k).cloned(),
-                None => get(&conns, &conn).ok(),
+                None => current(&conns, &conn),
             };
             if let Some(c) = target {
                 let _ = c.cancel().await;

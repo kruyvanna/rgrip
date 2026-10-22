@@ -1,4 +1,5 @@
 mod app;
+mod diagram_tab;
 mod completion;
 mod grid;
 mod highlight;

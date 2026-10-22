@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod complete;
+pub mod diagram;
 pub mod config;
 pub mod conn_string;
 pub mod datetime;

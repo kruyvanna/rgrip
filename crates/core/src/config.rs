@@ -199,10 +199,16 @@ pub struct SavedQuery {
     pub name: String,
     pub sql: String,
     pub connection: Option<String>,
+    /// Database picked in the console (`None`: the connection's default).
+    pub database: Option<String>,
+    /// Schemas picked in the console, main one first (empty: the default).
+    pub schemas: Vec<String>,
     pub path: PathBuf,
 }
 
 const CONNECTION_TAG: &str = "-- rgrip-connection: ";
+const DATABASE_TAG: &str = "-- rgrip-database: ";
+const SCHEMA_TAG: &str = "-- rgrip-schema: ";
 
 pub fn queries_dir() -> Option<PathBuf> {
     config_path().map(|p| p.with_file_name("queries"))
@@ -211,21 +217,38 @@ pub fn queries_dir() -> Option<PathBuf> {
 fn parse_query(path: &Path) -> Option<SavedQuery> {
     let text = std::fs::read_to_string(path).ok()?;
     let name = path.file_stem()?.to_string_lossy().to_string();
-    let (connection, sql) = match text.strip_prefix(CONNECTION_TAG) {
-        Some(rest) => {
-            let (id, body) = rest.split_once('\n').unwrap_or((rest, ""));
-            (Some(id.trim().to_string()).filter(|s| !s.is_empty()), body.to_string())
+    let (mut connection, mut database, mut schemas) = (None, None, Vec::new());
+    let mut sql = text.as_str();
+    // Leading tag lines, in any order.
+    loop {
+        let (line, body) = sql.split_once('\n').unwrap_or((sql, ""));
+        let value = |rest: &str| Some(rest.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(rest) = line.strip_prefix(CONNECTION_TAG) {
+            connection = value(rest);
+        } else if let Some(rest) = line.strip_prefix(DATABASE_TAG) {
+            database = value(rest);
+        } else if let Some(rest) = line.strip_prefix(SCHEMA_TAG) {
+            schemas = rest.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
+        } else {
+            break;
         }
-        None => (None, text),
-    };
-    Some(SavedQuery { id: name.clone(), name, sql, connection, path: path.to_path_buf() })
+        sql = body;
+    }
+    Some(SavedQuery { id: name.clone(), name, sql: sql.to_string(), connection, database, schemas, path: path.to_path_buf() })
 }
 
 fn file_text(q: &SavedQuery) -> String {
-    match &q.connection {
-        Some(c) => format!("{CONNECTION_TAG}{c}\n{}", q.sql),
-        None => q.sql.clone(),
+    let mut out = String::new();
+    if let Some(c) = &q.connection {
+        out.push_str(&format!("{CONNECTION_TAG}{c}\n"));
     }
+    if let Some(d) = &q.database {
+        out.push_str(&format!("{DATABASE_TAG}{d}\n"));
+    }
+    if !q.schemas.is_empty() {
+        out.push_str(&format!("{SCHEMA_TAG}{}\n", q.schemas.join(", ")));
+    }
+    out + &q.sql
 }
 
 /// File-name-safe version of a query name.
@@ -266,11 +289,11 @@ pub fn load_queries_in(dir: &Path) -> Vec<SavedQuery> {
     out
 }
 
-pub fn create_query_in(dir: &Path, name: &str, sql: &str, connection: Option<String>) -> Result<SavedQuery, String> {
+pub fn create_query_in(dir: &Path, name: &str, sql: &str, connection: Option<String>, database: Option<String>, schemas: Vec<String>) -> Result<SavedQuery, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = free_path(dir, name, None);
     let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-    let q = SavedQuery { id: stem.clone(), name: stem, sql: sql.to_string(), connection, path };
+    let q = SavedQuery { id: stem.clone(), name: stem, sql: sql.to_string(), connection, database, schemas, path };
     std::fs::write(&q.path, file_text(&q)).map_err(|e| e.to_string())?;
     Ok(q)
 }
@@ -323,7 +346,7 @@ fn migrate_queries_toml(dir: &Path) {
         return;
     };
     for q in old.queries {
-        let _ = create_query_in(dir, &q.name, &q.sql, q.connection);
+        let _ = create_query_in(dir, &q.name, &q.sql, q.connection, None, Vec::new());
     }
     let _ = std::fs::rename(&old_path, old_path.with_extension("toml.migrated"));
 }
@@ -334,8 +357,8 @@ pub fn load_queries() -> Vec<SavedQuery> {
     load_queries_in(&dir)
 }
 
-pub fn create_query(name: &str, sql: &str, connection: Option<String>) -> Result<SavedQuery, String> {
-    create_query_in(&queries_dir().ok_or("no config directory")?, name, sql, connection)
+pub fn create_query(name: &str, sql: &str, connection: Option<String>, database: Option<String>, schemas: Vec<String>) -> Result<SavedQuery, String> {
+    create_query_in(&queries_dir().ok_or("no config directory")?, name, sql, connection, database, schemas)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,6 +436,35 @@ pub fn reset_commands() -> Result<(), String> {
     }
 }
 
+fn diagrams_path() -> Option<PathBuf> {
+    config_path().map(|p| p.with_file_name("diagrams.toml"))
+}
+
+/// Saved box positions of diagrams: diagram key → table → [x, y].
+type DiagramFile = std::collections::BTreeMap<String, std::collections::BTreeMap<String, [f32; 2]>>;
+
+/// Missing file: empty. A file that doesn't parse is an error, so saving
+/// never overwrites other diagrams' positions.
+fn read_diagrams() -> Result<DiagramFile, String> {
+    let Some(path) = diagrams_path() else { return Ok(DiagramFile::new()) };
+    match std::fs::read_to_string(&path) {
+        Ok(s) => toml::from_str(&s).map_err(|e| format!("diagrams.toml: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DiagramFile::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Where the boxes of diagram `key` were left (table → [x, y]).
+pub fn load_diagram(key: &str) -> std::collections::BTreeMap<String, [f32; 2]> {
+    read_diagrams().ok().and_then(|mut d| d.remove(key)).unwrap_or_default()
+}
+
+pub fn save_diagram(key: &str, positions: std::collections::BTreeMap<String, [f32; 2]>) -> Result<(), String> {
+    let mut all = read_diagrams()?;
+    all.insert(key.to_string(), positions);
+    write_toml(&diagrams_path().ok_or("no config directory")?, &all)
+}
+
 fn write_toml(path: &std::path::Path, value: &impl Serialize) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -460,16 +512,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let sql = "-- note\nselect 'ភ្នំពេញ', $$x$$\nfrom t;\n";
-        let a = create_query_in(&dir, "Khmer: report/2024", sql, Some("local".into())).unwrap();
+        let a = create_query_in(&dir, "Khmer: report/2024", sql, Some("local".into()), None, Vec::new()).unwrap();
         assert_eq!(a.name, "Khmer- report-2024");
         assert!(a.path.ends_with("Khmer- report-2024.sql"));
         let raw = std::fs::read_to_string(&a.path).unwrap();
         assert!(raw.starts_with("-- rgrip-connection: local\n-- note\n"));
 
         // Same name → numbered; no connection → plain SQL file.
-        let b = create_query_in(&dir, "Khmer: report/2024", "select 1", None).unwrap();
+        let b = create_query_in(&dir, "Khmer: report/2024", "select 1", None, None, Vec::new()).unwrap();
         assert_eq!(b.name, "Khmer- report-2024 2");
         assert_eq!(std::fs::read_to_string(&b.path).unwrap(), "select 1");
+
+        let c = create_query_in(&dir, "scoped", "select 3", Some("local".into()), Some("gis".into()), vec!["land".into(), "public".into()]).unwrap();
+        assert_eq!(std::fs::read_to_string(&c.path).unwrap(), "-- rgrip-connection: local\n-- rgrip-database: gis\n-- rgrip-schema: land, public\nselect 3");
+        let back = parse_query(&c.path).unwrap();
+        assert_eq!((back.sql.as_str(), back.database.as_deref(), back.schemas.as_slice()), ("select 3", Some("gis"), &["land".to_string(), "public".to_string()][..]));
+        delete_query(&c).unwrap();
 
         let all = load_queries_in(&dir);
         assert_eq!(all.len(), 2);

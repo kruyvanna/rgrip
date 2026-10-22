@@ -1,6 +1,6 @@
 use crate::grid::{self, GridEvent, GridState, Sort};
 use crate::icons::Svg;
-use crate::worker::{Cmd, ConnId, Ev, TabId, Worker};
+use crate::worker::{Cmd, ConnId, Ev, SourceTable, TabId, Worker};
 use crate::widgets::{self, Icon, TreeRow};
 use crate::{highlight, theme};
 use eframe::egui::{
@@ -142,6 +142,8 @@ struct Console {
     paged: Option<String>,
     /// The statement as run, before a sort wrapped it.
     paged_base: Option<String>,
+    /// Map area filter on the result (WHERE text), empty for none.
+    area: String,
     /// Result sort: which result, column, ascending.
     order: Option<(usize, String, bool)>,
     /// The rows of an in-memory sorted result in their original order.
@@ -162,6 +164,23 @@ struct Console {
     database: Option<String>,
     /// Database the last run used (like `run_schema`).
     run_database: Option<String>,
+    /// Outgoing relations of the tables the result reads from, named after
+    /// the result's columns (found after the run, once the server answers).
+    relations: Vec<Relation>,
+    /// What `relations` is computed from (again when the catalog arrives).
+    sources: Option<(Vec<Option<rgrip_core::relations::Origin>>, Vec<SourceTable>)>,
+    /// Related-row counts for the rows the row menu was opened on.
+    probe: Option<Probe>,
+    /// Related rows (and column lookups) shown in a popup over the tab.
+    related: Option<Related>,
+    /// Rows of the whole paged result, once counted.
+    total: Option<i64>,
+    /// The count was asked for (once per run, even if it fails).
+    count_asked: bool,
+    /// The column origins were asked for (once per run).
+    origins_asked: bool,
+    /// Bumped on every Run: answers from an older run are dropped.
+    run: u64,
 }
 
 /// Schemas a console can pick in `database`: the connection's, without system ones.
@@ -193,11 +212,30 @@ impl Console {
         (self.schema.is_some() || !schemas.is_empty()).then(|| self.search_list(schemas).join("\n"))
     }
 
+    /// The picked schemas to save with a query, main one first.
+    fn picked_schemas(&self) -> Vec<String> {
+        self.schema.iter().chain(&self.more_schemas).cloned().collect()
+    }
+
     /// Every schema this console searches, main one first.
     fn search_list(&self, schemas: &[String]) -> Vec<String> {
         let mut list = vec![self.schema_or_default(schemas).to_string()];
         list.extend(self.more_schemas.iter().filter(|s| !list.contains(s)).cloned().collect::<Vec<_>>());
         list
+    }
+
+    /// The paged statement with the map area filter applied (before sorting).
+    fn filtered_base(&self) -> Option<String> {
+        let base = self.paged_base.clone()?;
+        Some(if self.area.is_empty() { base } else { sql::filtered_query(&base, &self.area).unwrap_or(base) })
+    }
+
+    /// `base` with the current result sort applied.
+    fn sorted(&self, base: String) -> Option<String> {
+        match &self.order {
+            Some((_, name, asc)) => sql::sorted_query(&base, name, *asc).or(Some(base)),
+            None => Some(base),
+        }
     }
 }
 
@@ -217,6 +255,7 @@ impl Console {
             ddl: false,
             paged: None,
             paged_base: None,
+            area: String::new(),
             order: None,
             unsorted: None,
             offset: 0,
@@ -228,6 +267,14 @@ impl Console {
             more_schemas: Vec::new(),
             database: None,
             run_database: None,
+            relations: Vec::new(),
+            sources: None,
+            probe: None,
+            related: None,
+            total: None,
+            count_asked: false,
+            origins_asked: false,
+            run: 0,
         }
     }
 }
@@ -383,6 +430,18 @@ enum TabKind {
     Console(Console),
     Table(TableView),
     Layout(Box<crate::layout_tab::LayoutTab>),
+    Diagram(Box<crate::diagram_tab::DiagramTab>),
+}
+
+impl TabKind {
+    /// The related-rows popup and row-menu counts of a console or table tab.
+    fn related_slots(&mut self) -> Option<(&mut Option<Related>, &mut Option<Probe>)> {
+        match self {
+            TabKind::Console(c) => Some((&mut c.related, &mut c.probe)),
+            TabKind::Table(t) => Some((&mut t.related, &mut t.probe)),
+            TabKind::Layout(_) | TabKind::Diagram(_) => None,
+        }
+    }
 }
 
 struct Tab {
@@ -438,6 +497,8 @@ enum Action {
     Delete(usize),
     Refresh(usize),
     NewConsole(usize),
+    /// Open (or switch to) the ER diagram of a schema.
+    OpenDiagram(usize, String),
     OpenTable(usize, String, String),
     /// Import a file into a schema, or into one of its tables.
     Import(usize, String, Option<String>),
@@ -588,6 +649,8 @@ enum TabAction {
     Notify(String),
     /// Wrap the console's query to add `ST_Transform(col, 4326)` and re-run.
     Reproject(String),
+    /// Filter the console's result to a map area (WHERE text), or clear it.
+    ResultArea(Option<String>),
     /// Save the console's SQL (asks for a name the first time).
     Save,
     /// Write every row of the current query/table to a file.
@@ -600,6 +663,10 @@ enum TabAction {
     AddKey,
     /// Open `schema.table` filtered with `filter` (following a foreign key).
     OpenFiltered { schema: String, table: String, filter: String },
+    /// Open `schema.table` (from a diagram box).
+    OpenTable { schema: String, table: String },
+    /// Diagram: load the schema again.
+    ReloadDiagram,
     /// Show related rows in the tab's popup (stacking on an open one).
     ShowRelated(RelatedTarget),
     /// Count related rows for the row menu (`modal`: the popup's rows).
@@ -768,6 +835,9 @@ impl App {
                                 t.loading = false;
                                 t.data = Some(Err(error.clone()));
                             }
+                            TabKind::Diagram(d) if matches!(d.state, crate::diagram_tab::State::Pending) => {
+                                d.state = crate::diagram_tab::State::Failed(error.clone());
+                            }
                             _ => {}
                         }
                     }
@@ -832,7 +902,26 @@ impl App {
                                     rel.relations = with_inferred(&rel.target.schema, &rel.target.table, &rel.columns, &rel.fk_relations, &catalog);
                                 }
                             }
+                            if let TabKind::Console(c) = &mut tab.kind {
+                                if let Some(rel) = &mut c.related {
+                                    rel.relations = with_inferred(&rel.target.schema, &rel.target.table, &rel.columns, &rel.fk_relations, &catalog);
+                                }
+                                // Run on the connection's own database: its catalog.
+                                if c.run_database.is_none()
+                                    && let Some((origins, tables)) = &c.sources
+                                    && let Some(Ok(out)) = &c.output
+                                    && let Some(rs) = out.statements.iter().find_map(|s| s.result.as_ref())
+                                {
+                                    c.relations = result_relations(origins, tables, &rs.columns, &catalog);
+                                    c.probe = None;
+                                }
+                            }
                         }
+                    }
+                }
+                Ev::Diagram { conn, schema, result } => {
+                    if let Some(Tab { kind: TabKind::Diagram(d), .. }) = self.tabs.iter_mut().find(|t| t.conn == conn && matches!(&t.kind, TabKind::Diagram(d) if d.schema == schema)) {
+                        d.loaded(result);
                     }
                 }
                 Ev::LayerResult { tab, layer, seq, result } => {
@@ -842,16 +931,37 @@ impl App {
                 }
                 Ev::QueryDone { tab, result } => {
                     let mut refresh = None;
+                    let mut origins = None;
+                    let mut count = None;
                     if let Some(Tab { kind: TabKind::Console(c), conn, .. }) = self.tab_mut(tab) {
+                        if let Ok(out) = &result {
+                            let truncated = out.statements.iter().any(|s| s.result.as_ref().is_some_and(|r| r.truncated));
+                            let args = (conn.clone(), tab, c.run, c.last_sql.clone(), c.run_schema.clone());
+                            // The count covers the area filter too.
+                            let counted = c.filtered_base().unwrap_or_else(|| c.last_sql.clone());
+                            // First page of a single read-only statement on the connection's own database.
+                            if c.paged_base.is_some() && c.offset == 0 && c.run_database.is_none() && !c.origins_asked {
+                                c.origins_asked = true;
+                                origins = Some(args.clone());
+                            }
+                            // More pages exist: count them in the background (once per run).
+                            if c.paged_base.is_some() && truncated && !c.count_asked {
+                                c.count_asked = true;
+                                let (conn, tab, run, _, schema) = args.clone();
+                                count = Some(((conn, tab, run, counted, schema), c.run_database.clone()));
+                            }
+                        }
                         if std::mem::take(&mut c.ddl) && result.is_ok() {
                             refresh = Some((conn.clone(), c.run_database.clone()));
                         }
                         c.running = None;
                         c.grid = GridState::fresh(&c.grid);
                         c.view = match &result {
-                            Ok(out) => match out.statements.iter().filter(|s| s.result.is_some()).count() {
-                                0 => View::Output,
-                                n => View::Result(n - 1),
+                            Ok(out) => match (out.statements.iter().filter(|s| s.result.is_some()).count(), c.view) {
+                                (0, _) => View::Output,
+                                // On the map (an area filter, a page, a sort): stay there.
+                                (n, v @ (View::Map(i) | View::Split(i))) if i < n => v,
+                                (n, _) => View::Result(n - 1),
                             },
                             Err(_) => View::Output,
                         };
@@ -860,11 +970,40 @@ impl App {
                     if let Some((conn, database)) = refresh {
                         self.worker.send(Cmd::Catalog(conn, database));
                     }
+                    if let Some((conn, tab, run, sql, schema)) = origins {
+                        self.worker.send(Cmd::QueryOrigins { conn, tab, run, sql, schema });
+                    }
+                    if let Some(((conn, tab, run, sql, schema), database)) = count {
+                        self.worker.send(Cmd::CountRows { conn, tab, run, sql, schema, database });
+                    }
+                }
+                Ev::QueryOrigins { tab, run, sql, origins, tables } => {
+                    let catalog = self.tab_catalog(tab);
+                    if let Some(Tab { kind: TabKind::Console(c), .. }) = self.tab_mut(tab)
+                        && c.run == run
+                        && c.running.is_none()
+                        && c.last_sql == sql
+                        && let Some(Ok(out)) = &c.output
+                        && let Some(rs) = out.statements.iter().find_map(|s| s.result.as_ref())
+                    {
+                        c.relations = result_relations(&origins, &tables, &rs.columns, &catalog);
+                        c.sources = Some((origins, tables));
+                        c.probe = None;
+                    }
+                }
+                Ev::QueryCount { tab, run, sql, result } => {
+                    if let Some(Tab { kind: TabKind::Console(c), .. }) = self.tab_mut(tab)
+                        && c.run == run
+                        && c.filtered_base().unwrap_or_else(|| c.last_sql.clone()) == sql
+                    {
+                        c.total = result.ok();
+                    }
                 }
                 Ev::TablePage { tab, modal: true, result, columns, relations } => {
                     let catalog = self.tab_catalog(tab);
-                    if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab)
-                        && let Some(rel) = &mut t.related
+                    if let Some(tab) = self.tab_mut(tab)
+                        && let Some((related, _)) = tab.kind.related_slots()
+                        && let Some(rel) = related
                     {
                         rel.relations = with_inferred(&rel.target.schema, &rel.target.table, &columns, &relations, &catalog);
                         (rel.columns, rel.fk_relations) = (columns, relations);
@@ -892,8 +1031,10 @@ impl App {
                     }
                 }
                 Ev::RelationProbe { tab, modal, key, counts } => {
-                    if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab) {
-                        let probe = if modal { t.related.as_mut().and_then(|r| r.probe.as_mut()) } else { t.probe.as_mut() };
+                    if let Some(tab) = self.tab_mut(tab)
+                        && let Some((related, probe)) = tab.kind.related_slots()
+                    {
+                        let probe = if modal { related.as_mut().and_then(|r| r.probe.as_mut()) } else { probe.as_mut() };
                         if let Some(p) = probe.filter(|p| p.rows == key) {
                             p.counts = counts;
                         }
@@ -1028,12 +1169,14 @@ impl App {
                     }
                 },
                 Ev::TableCount { tab, modal, result } => {
-                    if let Some(Tab { kind: TabKind::Table(t), .. }) = self.tab_mut(tab) {
-                        match (modal, &mut t.related) {
-                            (true, Some(rel)) => rel.total = result.ok(),
-                            (true, None) => {}
-                            (false, _) => t.total = result.ok(),
+                    match self.tab_mut(tab).map(|t| &mut t.kind) {
+                        Some(TabKind::Table(t)) if !modal => t.total = result.ok(),
+                        Some(kind) if modal => {
+                            if let Some((Some(rel), _)) = kind.related_slots() {
+                                rel.total = result.ok();
+                            }
                         }
+                        _ => {}
                     }
                 }
             }
@@ -1058,6 +1201,10 @@ impl App {
                         query: t.query(),
                         modal: false,
                     });
+                }
+                TabKind::Diagram(d) if matches!(d.state, crate::diagram_tab::State::Pending) => {
+                    d.state = crate::diagram_tab::State::Loading;
+                    self.worker.send(Cmd::Diagram { conn: tab.conn.clone(), schema: d.schema.clone() });
                 }
                 _ => {}
             }
@@ -1150,6 +1297,23 @@ impl App {
         self.tabs.len() - 1
     }
 
+    /// Switch to the diagram of `schema`, or open it and ask for its data.
+    fn open_diagram(&mut self, ci: usize, schema: String) {
+        let conn = self.conns[ci].cfg.id.clone();
+        if let Some(i) = self.tabs.iter().position(|t| t.conn == conn && matches!(&t.kind, TabKind::Diagram(d) if d.schema == schema)) {
+            self.active = i;
+            return;
+        }
+        let cfg = &self.conns[ci].cfg;
+        let key = format!("{}/{}/{schema}", cfg.id, cfg.database);
+        let mut tab = crate::diagram_tab::DiagramTab::new(&schema, key);
+        if self.ensure_connected(ci) {
+            tab.state = crate::diagram_tab::State::Loading;
+            self.worker.send(Cmd::Diagram { conn: conn.clone(), schema: schema.clone() });
+        }
+        self.push_tab(conn, format!("Diagram · {schema}"), TabKind::Diagram(Box::new(tab)));
+    }
+
     fn push_tab(&mut self, conn: ConnId, title: String, kind: TabKind) {
         self.tabs.push(Tab { id: self.next_tab, conn, title, kind });
         self.next_tab += 1;
@@ -1214,6 +1378,10 @@ impl App {
             if let TabKind::Console(c) = &mut tab.kind {
                 c.sql = q.sql.clone();
                 c.saved_id = Some(q.id.clone());
+                c.database = q.database.clone();
+                let mut schemas = q.schemas.clone();
+                c.schema = (!schemas.is_empty()).then(|| schemas.remove(0));
+                c.more_schemas = schemas;
             }
         }
     }
@@ -1256,6 +1424,7 @@ impl App {
                 self.worker.send(Cmd::Catalog(self.conns[ci].cfg.id.clone(), None));
             }
             Action::NewConsole(ci) => self.open_console(ci),
+            Action::OpenDiagram(ci, schema) => self.open_diagram(ci, schema),
             Action::OpenTable(ci, s, t) => self.open_table(ci, s, t),
             Action::Import(ci, schema, table) => {
                 if !matches!(self.conns[ci].tables.get(&schema), Some(Load::Ready(_) | Load::Loading)) {
@@ -1386,6 +1555,22 @@ impl App {
 
     fn tab_action(&mut self, ti: usize, action: TabAction) {
         let Some(ci) = self.conn_index(&self.tabs[ti].conn) else { return };
+        if let TabAction::OpenTable { schema, table } = action {
+            return self.open_table(ci, schema, table);
+        }
+        if let TabAction::ReloadDiagram = action {
+            let conn = self.tabs[ti].conn.clone();
+            let TabKind::Diagram(d) = &mut self.tabs[ti].kind else { return };
+            let schema = d.schema.clone();
+            if matches!(self.conns[ci].status, Status::Connected(_)) {
+                d.state = crate::diagram_tab::State::Loading;
+                self.worker.send(Cmd::Diagram { conn, schema });
+            } else {
+                d.state = crate::diagram_tab::State::Pending;
+                self.ensure_connected(ci);
+            }
+            return;
+        }
         if let TabAction::OpenFiltered { schema, table, filter } = action {
             return self.open_table_filtered(ci, schema, table, filter);
         }
@@ -1401,7 +1586,7 @@ impl App {
         let mut needs_connect = false;
         let database = match &self.tabs[ti].kind {
             TabKind::Console(c) => c.database.clone(),
-            TabKind::Table(_) | TabKind::Layout(_) => None,
+            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
         };
         let catalog = self.conns[ci].catalog_in(database.as_deref());
         let schemas = user_schemas(&self.conns[ci], database.as_deref());
@@ -1418,11 +1603,8 @@ impl App {
                 } else if c.cursor.start != c.cursor.end {
                     let b = sql::char_to_byte(&c.sql, c.cursor.end);
                     c.sql[at..b].to_string()
-                } else if let Some((_, line)) = rgrip_core::commands::command_line_at(&c.sql, at) {
-                    // A command line is its own statement (it has no `;`).
-                    line.to_string()
                 } else {
-                    sql::statement_at(&c.sql, at).map(|r| c.sql[r].to_string()).unwrap_or_default()
+                    run_range(&c.sql, at).map(|r| c.sql[r].to_string()).unwrap_or_default()
                 };
                 // Slash commands are ours, not SQL: expand before sending.
                 let text = match rgrip_core::commands::expand_all(&text, &catalog, c.schema_or_default(&schemas)) {
@@ -1433,6 +1615,9 @@ impl App {
                     }
                 };
                 if text.trim().is_empty() {
+                    if !all && !c.sql.trim().is_empty() {
+                        self.toast = Some(("Put the cursor on the statement to run".into(), theme::WARN(), Instant::now()));
+                    }
                     return;
                 }
                 let cfg = &self.conns[ci].cfg;
@@ -1455,8 +1640,12 @@ impl App {
                 c.run_database = c.database.clone();
                 c.paged = sql::paged_query(&text, 1, 0).map(|_| text.clone());
                 c.paged_base = c.paged.clone();
+                c.area.clear();
                 c.order = None;
                 c.unsorted = None;
+                (c.relations, c.sources, c.probe, c.related, c.total) = (Vec::new(), None, None, None, None);
+                (c.count_asked, c.origins_asked) = (false, false);
+                c.run += 1;
                 let page = c.paged.is_some().then_some(0);
                 if connected {
                     self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql: text, page, schema: c.run_schema.clone(), database: c.run_database.clone() });
@@ -1469,6 +1658,7 @@ impl App {
                 if c.running.is_some() {
                     return;
                 }
+                let base = c.filtered_base();
                 let Some(Ok(out)) = &mut c.output else { return };
                 let Some(rs) = out.statements.iter_mut().filter_map(|s| s.result.as_mut()).nth(n) else { return };
                 let Some(name) = rs.columns.get(col).cloned() else { return };
@@ -1478,13 +1668,10 @@ impl App {
                     Some((m, c2, false)) if m == n && c2 == name => None,
                     _ => Some((n, name.clone(), true)),
                 };
-                match (&c.paged_base, connected) {
+                match (base, connected) {
                     // Paged: sort on the server, so every page is in order.
                     (Some(base), true) => {
-                        c.paged = match &c.order {
-                            Some((_, name, asc)) => sql::sorted_query(base, name, *asc).or(Some(base.clone())),
-                            None => Some(base.clone()),
-                        };
+                        c.paged = c.sorted(base);
                         c.offset = 0;
                         c.running = Some(Instant::now());
                         let sql = c.paged.clone().unwrap_or_default();
@@ -1508,6 +1695,19 @@ impl App {
                     }
                 }
             }
+            (TabAction::ResultArea(area), TabKind::Console(c)) => {
+                if c.running.is_some() || !connected {
+                    return;
+                }
+                c.area = area.unwrap_or_default();
+                let Some(base) = c.filtered_base() else { return };
+                c.paged = c.sorted(base);
+                c.offset = 0;
+                (c.total, c.count_asked) = (None, false);
+                c.running = Some(Instant::now());
+                let sql = c.paged.clone().unwrap_or_default();
+                self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql, page: Some(0), schema: c.run_schema.clone(), database: c.run_database.clone() });
+            }
             (TabAction::Page(forward), TabKind::Console(c)) => {
                 let Some(sql) = c.paged.clone().filter(|_| c.running.is_none() && connected) else { return };
                 let size = PAGE_SIZE as usize;
@@ -1521,6 +1721,7 @@ impl App {
                     Some(q) => {
                         q.sql = c.sql.clone();
                         q.connection = Some(tab.conn.clone());
+                        (q.database, q.schemas) = (c.database.clone(), c.picked_schemas());
                         let (name, result) = (q.name.clone(), config::update_query(q));
                         if result.is_ok() {
                             self.toast = Some((format!("Saved “{name}”"), theme::OK(), Instant::now()));
@@ -1545,7 +1746,7 @@ impl App {
                         rgrip_core::postgres::table_select_sql(&t.query()),
                         format!("{}.{}", t.schema, t.table),
                     ),
-                    TabKind::Layout(_) => return,
+                    TabKind::Layout(_) | TabKind::Diagram(_) => return,
                 };
                 self.toast = Some((format!("Exporting to {}…", path.display()), theme::MUTED(), Instant::now()));
                 self.worker.send(Cmd::ExportAll { conn: tab.conn.clone(), database, schema, sql, format, table, path });
@@ -1641,8 +1842,9 @@ impl App {
                 t.saving = true;
                 self.worker.send(Cmd::AddKey { conn: tab.conn.clone(), tab: tab.id, sql });
             }
-            (TabAction::ShowRelated(target), TabKind::Table(t)) => {
-                match &mut t.related {
+            (TabAction::ShowRelated(target), kind) => {
+                let Some((related, _)) = kind.related_slots() else { return };
+                match related {
                     Some(rel) => {
                         let prev = std::mem::replace(&mut rel.target, target);
                         rel.back.push(prev);
@@ -1650,7 +1852,7 @@ impl App {
                         rel.total = None;
                     }
                     None => {
-                        t.related = Some(Related {
+                        *related = Some(Related {
                             target,
                             back: Vec::new(),
                             data: None,
@@ -1663,25 +1865,26 @@ impl App {
                         })
                     }
                 }
-                let query = t.related.as_ref().unwrap().query();
+                let query = related.as_ref().unwrap().query();
                 if connected {
                     self.worker.send(Cmd::TableData { conn: tab.conn.clone(), tab: tab.id, query, modal: true });
                 }
             }
-            (TabAction::Probe { modal, rows, probes, map }, TabKind::Table(t)) => {
+            (TabAction::Probe { modal, rows, probes, map }, kind) => {
+                let Some((related, slot)) = kind.related_slots() else { return };
                 if !connected || probes.is_empty() {
                     return;
                 }
                 let probe = Probe { rows: rows.clone(), map, counts: Vec::new() };
-                match (modal, &mut t.related) {
+                match (modal, related) {
                     (true, Some(rel)) => rel.probe = Some(probe),
                     (true, None) => return,
-                    (false, _) => t.probe = Some(probe),
+                    (false, _) => *slot = Some(probe),
                 }
                 self.worker.send(Cmd::ProbeRelations { conn: tab.conn.clone(), tab: tab.id, modal, key: rows, probes });
             }
-            (TabAction::RelatedBack, TabKind::Table(t)) => {
-                let Some(rel) = &mut t.related else { return };
+            (TabAction::RelatedBack, kind) => {
+                let Some((Some(rel), _)) = kind.related_slots() else { return };
                 let Some(prev) = rel.back.pop() else { return };
                 rel.target = prev;
                 rel.data = None;
@@ -1895,7 +2098,7 @@ impl App {
                 }
                 _ => false,
             },
-            Some(TabKind::Layout(_)) => true,
+            Some(TabKind::Layout(_) | TabKind::Diagram(_)) => true,
         };
         // `RGRIP_DEMO_IMPORT=<file>`: the import dialog with that file picked,
         // into the first `RGRIP_DEMO_EXPAND` schema.
@@ -2161,7 +2364,7 @@ impl App {
                             _ => Pane::Grid,
                         }
                     }
-                    Some(TabKind::Layout(_)) | None => {}
+                    Some(TabKind::Layout(_) | TabKind::Diagram(_)) | None => {}
                 }
                 return advance(self);
             }
@@ -2512,14 +2715,19 @@ impl App {
         let mut errors = Vec::new();
         for tab in &self.tabs {
             let TabKind::Console(c) = &tab.kind else { continue };
-            let (Some(id), Some(at)) = (&c.saved_id, c.last_edit) else { continue };
-            let Some(q) = self.saved.iter_mut().find(|q| &q.id == id).filter(|q| q.sql != c.sql) else { continue };
-            if at.elapsed() < IDLE {
+            let Some(id) = &c.saved_id else { continue };
+            // A new database or schema pick saves too, not just SQL edits.
+            let picked = c.picked_schemas();
+            let Some(q) = self.saved.iter_mut().find(|q| &q.id == id).filter(|q| q.sql != c.sql || q.database != c.database || q.schemas != picked) else { continue };
+            if let Some(at) = c.last_edit
+                && at.elapsed() < IDLE
+            {
                 self.egui_ctx.request_repaint_after(IDLE - at.elapsed());
                 continue;
             }
             q.sql = c.sql.clone();
             q.connection = Some(tab.conn.clone());
+            (q.database, q.schemas) = (c.database.clone(), picked);
             if let Err(e) = config::update_query(q) {
                 errors.push(format!("Could not save “{}”: {e}", q.name));
             }
@@ -2686,7 +2894,7 @@ impl App {
         ui.add_space(4.0);
         let active_saved = self.tabs.get(self.active).and_then(|t| match &t.kind {
             TabKind::Console(c) => c.saved_id.clone(),
-            TabKind::Table(_) | TabKind::Layout(_) => None,
+            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
         });
         for (i, q) in self.saved.iter().enumerate() {
             if !filter.is_empty() && !q.name.to_lowercase().contains(filter) {
@@ -3008,6 +3216,10 @@ impl Tree<'_> {
         let (resp, open) = self.row(ui, &key, 1, true, Icon::Schema, schema, count.as_deref(), actions);
         resp.context_menu(|ui| {
             menu_layout(ui);
+            if crate::icons::menu_item(ui, Svg::GitBranch, "Open diagram", true).clicked() {
+                actions.push(Action::OpenDiagram(ci, schema.to_string()));
+                ui.close();
+            }
             if crate::icons::menu_item(ui, Svg::Upload, "Import data…", !conn.cfg.read_only).clicked() {
                 actions.push(Action::Import(ci, schema.to_string(), None));
                 ui.close();
@@ -3197,13 +3409,13 @@ impl App {
                                     TabKind::Console(c) => c.saved_id.as_ref().is_some_and(|id| {
                                         self.saved.iter().find(|q| &q.id == id).is_some_and(|q| q.sql != c.sql)
                                     }),
-                                    TabKind::Table(_) | TabKind::Layout(_) => false,
+                                    TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => false,
                                 };
                                 let style = match self.conn_index(&tab.conn).map(|ci| &self.conns[ci]) {
                                     Some(c) => TabStyle {
                                         title: match &tab.kind {
                                             TabKind::Console(k) => k.database.as_deref().and_then(|db| console_title(&tab.title, &c.cfg, db)),
-                                            TabKind::Table(_) | TabKind::Layout(_) => None,
+                                            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
                                         },
                                         color: theme::conn_color(c.cfg.color),
                                         tip: format!("{} · {}:{}/{}", c.cfg.display_name(), c.cfg.host, c.cfg.port, c.cfg.database),
@@ -3226,7 +3438,7 @@ impl App {
             let tab = self.tabs.get(self.active)?;
             let database = match &tab.kind {
                 TabKind::Console(c) => c.database.as_deref(),
-                TabKind::Table(_) | TabKind::Layout(_) => None,
+                TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
             };
             match self.conn_index(&tab.conn).map(|ci| &self.conns[ci]) {
                 Some(c) => {
@@ -3242,7 +3454,7 @@ impl App {
         };
         let dirty = match &self.tabs.get(self.active)?.kind {
             TabKind::Console(c) => c.saved_id.as_ref().is_some_and(|id| self.saved.iter().any(|q| &q.id == id && q.sql != c.sql)),
-            TabKind::Table(_) | TabKind::Layout(_) => false,
+            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => false,
         };
         let tab = self.tabs.get_mut(self.active)?;
         let id = tab.id;
@@ -3255,6 +3467,13 @@ impl App {
             TabKind::Layout(l) => {
                 let loads = l.ui(ui, &catalog);
                 (!loads.is_empty()).then_some(TabAction::LoadLayers(loads))
+            }
+            TabKind::Diagram(d) => {
+                let out = d.ui(ui);
+                match out.open {
+                    Some(table) => Some(TabAction::OpenTable { schema: d.schema.clone(), table }),
+                    None => out.reload.then_some(TabAction::ReloadDiagram),
+                }
             }
         }
     }
@@ -3349,6 +3568,7 @@ fn tab_button(
         TabKind::Console(_) => Icon::Database(style.status, style.color),
         TabKind::Table(_) => Icon::Table,
         TabKind::Layout(_) => Icon::Globe,
+        TabKind::Diagram(_) => Icon::Schema,
     };
     widgets::paint_icon(painter, egui::pos2(rect.left() + PAD_L + ICON / 2.0, cy), icon);
     painter.galley(egui::pos2(rect.left() + PAD_L + ICON + GAP, cy - galley.size().y / 2.0), galley, color);
@@ -3585,6 +3805,7 @@ fn console_ui(
                         .layouter(&mut layouter)
                         .show(ui);
                     crate::shaping::paint_runs(ui, &out.galley, out.galley_pos, &khmer);
+                    paint_run_marker(ui, &out);
                     paint_line_numbers(ui, &out);
                     let previous = c.cursor.clone();
                     if let Some(r) = out.cursor_range {
@@ -3613,7 +3834,9 @@ fn console_ui(
                 });
         });
 
-    let Console { running, output, view, grid, paged, offset, map, last_sql, order, .. } = c;
+    let Console { running, output, view, grid, paged, offset, map, last_sql, order, relations, probe, related, total, area, .. } = c;
+    // Only a paged (wrappable) statement can be filtered to an area.
+    let area_filter = paged.is_some().then_some(area.as_str());
     if let Some(started) = running {
         centered(ui, |ui| {
             ui.horizontal(|ui| {
@@ -3691,8 +3914,12 @@ fn console_ui(
                             }
                             let to = *offset + rs.rows.len();
                             let from = if rs.rows.is_empty() { 0 } else { *offset + 1 };
-                            let more = if rs.truncated { " +" } else { "" };
-                            format!("rows {from}–{to}{more}  ·  {ms:.0} ms")
+                            let more = match (rs.truncated, total) {
+                                (true, Some(total)) => format!(" of {}", group_thousands(*total)),
+                                (true, None) => " +".to_string(),
+                                _ => String::new(),
+                            };
+                            format!("rows {}–{}{more}  ·  {ms:.0} ms", group_thousands(from as i64), group_thousands(to as i64))
                         }
                         Some(rs) => {
                             let more = if rs.truncated { " (first 1,000 shown)" } else { "" };
@@ -3706,10 +3933,19 @@ fn console_ui(
             match *view {
                 View::Result(n) if n < sets.len() => {
                     let row_offset = if paged.is_some() { *offset } else { 0 };
-                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations: &[], counts: &[] };
+                    let menu_rows: Vec<usize> = grid.selection.iter().copied().collect();
+                    let counts = probe.as_ref().map(|p| p.best(&menu_rows, relations.len())).unwrap_or_default();
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts };
                     let sort = order.as_ref().filter(|(m, _, _)| *m == n).map(|(_, c, asc)| grid::Sort { column: c, ascending: *asc });
-                    if let Some(grid::GridEvent::HeaderClicked(i)) = grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, None) {
-                        action = Some(TabAction::SortResult(n, i));
+                    match grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, None) {
+                        Some(grid::GridEvent::HeaderClicked(i)) => action = Some(TabAction::SortResult(n, i)),
+                        Some(GridEvent::Follow { relation, rows }) => {
+                            let only = probe.as_ref().map(|p| p.matched(&rows, relation)).unwrap_or_default();
+                            action = relations.get(relation).map(|r| follow(r, sets[n], &rows, &only));
+                        }
+                        Some(GridEvent::RowsMenu { rows }) => action = probe_action(relations, sets[n], rows, false),
+                        Some(GridEvent::Lookup { relation }) => action = relations.get(relation).map(lookup),
+                        _ => {}
                     }
                 }
                 View::Map(n) if n < sets.len() => {
@@ -3717,16 +3953,21 @@ fn console_ui(
                     if cols.is_empty() {
                         centered(ui, |ui| muted(ui, "No geometry columns in this result"));
                     } else {
-                        let link = crate::map::Link { selection: &mut grid.selection, reveal: &mut grid.reveal, layer: None, area_filter: None };
-                        if let Some(col) = map.show(ui, sets[n], &cols, paged.is_some(), link).reproject {
+                        let link = crate::map::Link { selection: &mut grid.selection, reveal: &mut grid.reveal, layer: None, area_filter };
+                        let out = map.show(ui, sets[n], &cols, paged.is_some(), link);
+                        if let Some(col) = out.reproject {
                             action = Some(TabAction::Reproject(col));
+                        } else if let Some(a) = out.area {
+                            action = Some(area_action(a));
                         }
                     }
                 }
                 View::Split(n) if n < sets.len() => {
                     let cols = sets[n].geometry_columns().to_vec();
                     let row_offset = if paged.is_some() { *offset } else { 0 };
-                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations: &[], counts: &[] };
+                    let menu_rows: Vec<usize> = grid.selection.iter().copied().collect();
+                    let counts = probe.as_ref().map(|p| p.best(&menu_rows, relations.len())).unwrap_or_default();
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts };
                     let can_reproject = paged.is_some();
                     let mut sort_click = None;
                     let reproject = &mut action;
@@ -3735,15 +3976,25 @@ fn console_ui(
                         Id::new(("split", tab_id)),
                         grid,
                         |ui, g| {
-                            let link = crate::map::Link { selection: &mut g.selection, reveal: &mut g.reveal, layer: None, area_filter: None };
-                            if let Some(col) = map.show(ui, sets[n], &cols, can_reproject, link).reproject {
+                            let link = crate::map::Link { selection: &mut g.selection, reveal: &mut g.reveal, layer: None, area_filter };
+                            let out = map.show(ui, sets[n], &cols, can_reproject, link);
+                            if let Some(col) = out.reproject {
                                 *reproject = Some(TabAction::Reproject(col));
+                            } else if let Some(a) = out.area {
+                                *reproject = Some(area_action(a));
                             }
                         },
                         |ui, g| {
                             let sort = order.as_ref().filter(|(m, _, _)| *m == n).map(|(_, c, asc)| grid::Sort { column: c, ascending: *asc });
-                            if let Some(grid::GridEvent::HeaderClicked(i)) = grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], g, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, None) {
-                                sort_click = Some(TabAction::SortResult(n, i));
+                            match grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], g, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, None) {
+                                Some(grid::GridEvent::HeaderClicked(i)) => sort_click = Some(TabAction::SortResult(n, i)),
+                                Some(GridEvent::Follow { relation, rows }) => {
+                                    let only = probe.as_ref().map(|p| p.matched(&rows, relation)).unwrap_or_default();
+                                    sort_click = relations.get(relation).map(|r| follow(r, sets[n], &rows, &only));
+                                }
+                                Some(GridEvent::RowsMenu { rows }) => sort_click = probe_action(relations, sets[n], rows, false),
+                                Some(GridEvent::Lookup { relation }) => sort_click = relations.get(relation).map(lookup),
+                                _ => {}
                             }
                         },
                     );
@@ -3754,6 +4005,9 @@ fn console_ui(
                 _ => output_log(ui, out),
             }
         }
+    }
+    if let Some(a) = related_ui(ui, tab_id, related) {
+        action = Some(a);
     }
     action
 }
@@ -3934,6 +4188,44 @@ fn export_menu(ui: &mut Ui, rs: &ResultSet, table: &str, can_export_all: bool) -
     action
 }
 
+/// What Run executes for a byte cursor with no selection: a command line,
+/// else the statement under the cursor.
+fn run_range(sql: &str, at: usize) -> Option<std::ops::Range<usize>> {
+    match rgrip_core::commands::command_line_at(sql, at) {
+        // A command line is its own statement (it has no `;`).
+        Some((r, _)) => Some(r),
+        None => sql::statement_at(sql, at),
+    }
+}
+
+/// A bar in the gutter beside the lines Run will execute.
+fn paint_run_marker(ui: &Ui, out: &egui::text_edit::TextEditOutput) {
+    let Some(r) = out.cursor_range else { return };
+    if r.primary.index != r.secondary.index {
+        return;
+    }
+    let text = out.galley.text();
+    let Some(range) = run_range(text, sql::char_to_byte(text, r.primary.index)) else { return };
+    let first = text[..range.start].matches('\n').count() + 1;
+    let last = first + text[range].matches('\n').count();
+    let mut line = 1;
+    let (mut top, mut bottom) = (None, None);
+    for row in &out.galley.rows {
+        if (first..=last).contains(&line) {
+            let rect = row.rect().translate(out.galley_pos.to_vec2());
+            top.get_or_insert(rect.top());
+            bottom = Some(rect.bottom());
+        }
+        if row.row.ends_with_newline {
+            line += 1;
+        }
+    }
+    if let (Some(top), Some(bottom)) = (top, bottom) {
+        let x = out.galley_pos.x - 8.0;
+        ui.painter().rect_filled(egui::Rect::from_x_y_ranges(x..=x + 2.0, top..=bottom), 1.0, theme::ACCENT());
+    }
+}
+
 fn paint_line_numbers(ui: &Ui, out: &egui::text_edit::TextEditOutput) {
     let cursor_line = out.cursor_range.map(|r| {
         out.galley.text()[..sql::char_to_byte(out.galley.text(), r.primary.index)].matches('\n').count() + 1
@@ -4002,6 +4294,27 @@ fn with_inferred(schema: &str, table: &str, columns: &[ColumnInfo], fks: &[Relat
     all
 }
 
+fn area_action(e: crate::map::AreaEvent) -> TabAction {
+    match e {
+        crate::map::AreaEvent::Set(sql) => TabAction::ResultArea(Some(sql)),
+        crate::map::AreaEvent::Clear => TabAction::ResultArea(None),
+    }
+}
+
+/// Relations of a query result: those of each source table, real and
+/// inferred, renamed to the result's columns.
+fn result_relations(origins: &[Option<rgrip_core::relations::Origin>], tables: &[SourceTable], names: &[String], catalog: &Catalog) -> Vec<Relation> {
+    tables
+        .iter()
+        .flat_map(|(schema, table, columns, fks)| {
+            with_inferred(schema, table, columns, fks, catalog)
+                .iter()
+                .filter_map(|r| rgrip_core::relations::on_result(r, schema, table, origins, names))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Show the rows related to `rows` through `r` in the popup.
 /// `only`: the variants known to match (empty: try them all).
 fn follow(r: &Relation, rs: &ResultSet, rows: &[usize], only: &[usize]) -> TabAction {
@@ -4024,8 +4337,12 @@ fn follow(r: &Relation, rs: &ResultSet, rows: &[usize], only: &[usize]) -> TabAc
     }
 }
 
-/// WHERE for the other side of `r`, matching the given rows' key values.
-/// `None` when every key is NULL (nothing related) or a column is missing.
+/// Show the whole table `r` points at in the popup (the lookup icon).
+fn lookup(r: &Relation) -> TabAction {
+    let other = if r.other_schema == "public" { r.other_table.clone() } else { format!("{}.{}", r.other_schema, r.other_table) };
+    TabAction::ShowRelated(RelatedTarget { schema: r.other_schema.clone(), table: r.other_table.clone(), filter: String::new(), label: other })
+}
+
 /// The column pairs a relation may join on: the main pairs, then each
 /// alternative key on its own.
 fn relation_variants(r: &Relation) -> Vec<Vec<(String, String)>> {
@@ -4325,6 +4642,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                 Some(GridEvent::RowsMenu { rows }) => {
                     action = probe_action(&t.relations, rs, rows, false);
                 }
+                Some(GridEvent::Lookup { relation }) => action = Some(lookup(&t.relations[relation])),
                 // Sorting reloads the page, which would drop pending edits.
                 Some(GridEvent::HeaderClicked(_)) if !t.changes.is_empty() => {
                     action = Some(TabAction::Notify("Save or discard your changes first".into()));
@@ -4344,7 +4662,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
             }
         }
     }
-    if let Some(a) = related_ui(ui, tab_id, t) {
+    if let Some(a) = related_ui(ui, tab_id, &mut t.related) {
         action = Some(a);
     }
     action
@@ -4352,8 +4670,8 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
 
 /// The related-rows popup: a read-only grid of the rows on the other side
 /// of a foreign key, which can follow further relations.
-fn related_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction> {
-    let rel = t.related.as_mut()?;
+fn related_ui(ui: &mut Ui, tab_id: TabId, related: &mut Option<Related>) -> Option<TabAction> {
+    let rel = related.as_mut()?;
     let mut action = None;
     let mut close = false;
     let screen = ui.ctx().content_rect();
@@ -4396,7 +4714,7 @@ fn related_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction
                 Some(Err(e)) => {
                     ui.label(RichText::new(e.as_str()).monospace().color(theme::ERROR()));
                 }
-                Some(Ok(rs)) if rs.rows.is_empty() => centered(ui, |ui| muted(ui, "no related rows")),
+                Some(Ok(rs)) if rs.rows.is_empty() => centered(ui, |ui| muted(ui, if rel.target.filter.is_empty() { "no rows" } else { "no related rows" })),
                 Some(Ok(rs)) => {
                     let name = format!("{}.{}", rel.target.schema, rel.target.table);
                     let menu_rows: Vec<usize> = rel.grid.selection.iter().copied().collect();
@@ -4409,6 +4727,7 @@ fn related_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction
                             action = Some(follow(&rel.relations[relation], rs, &rows, &only));
                         }
                         Some(GridEvent::RowsMenu { rows }) => action = probe_action(&rel.relations, rs, rows, true),
+                        Some(GridEvent::Lookup { relation }) => action = Some(lookup(&rel.relations[relation])),
                         _ => {}
                     }
                 }
@@ -4416,7 +4735,7 @@ fn related_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView) -> Option<TabAction
         });
     });
     if close || modal.should_close() {
-        t.related = None;
+        *related = None;
     }
     action
 }
@@ -4790,9 +5109,9 @@ impl App {
                     let tab = self.tabs.iter_mut().find(|t| t.id == tab_id);
                     match tab.and_then(|t| match &mut t.kind {
                         TabKind::Console(c) => Some((&mut t.title, c, t.conn.clone())),
-                        TabKind::Table(_) | TabKind::Layout(_) => None,
+                        TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
                     }) {
-                        Some((title, c, conn)) => config::create_query(&name, &c.sql, Some(conn)).map(|q| {
+                        Some((title, c, conn)) => config::create_query(&name, &c.sql, Some(conn), c.database.clone(), c.picked_schemas()).map(|q| {
                             c.saved_id = Some(q.id.clone());
                             *title = q.name.clone();
                             q.name
@@ -5222,6 +5541,19 @@ fn hint(text: &str) -> RichText {
     RichText::new(text).color(theme::FAINT())
 }
 
+/// `12345` as `12,345`.
+fn group_thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
 pub(crate) fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
 }
@@ -5262,6 +5594,15 @@ mod tests {
         assert_eq!(console_title("prod@app (2)", &cfg, "other").as_deref(), Some("prod@other (2)"));
         assert_eq!(console_title("my saved query", &cfg, "other"), None);
         assert_eq!(console_title("prod@app2", &cfg, "other"), None);
+    }
+
+    #[test]
+    fn thousands_grouped() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1000), "1,000");
+        assert_eq!(group_thousands(12345), "12,345");
+        assert_eq!(group_thousands(1234567), "1,234,567");
     }
 
     #[test]

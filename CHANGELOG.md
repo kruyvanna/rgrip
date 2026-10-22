@@ -5,6 +5,24 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.0.13-alpha] - 2026-10-22
+
+### Added
+- Schema diagram: right-click a schema → **Open diagram** for an ER diagram of its tables. Foreign keys are solid lines from the column to the key it points at; for databases that declare none, links guessed from column names are dashed. Drag the boxes, pan and zoom; positions are remembered per connection and schema.
+- Relations in query results: a console result knows which table each column comes from, so the row menu's **Related** works there too, and a column that references another table gets a lookup icon in its header that shows the referenced table's rows.
+- Total rows of a console result: a paged query shows its total count next to the pager.
+- Saved queries remember the console's database and schemas, and reopen with them.
+
+### Changed
+- **Copy as IN ('a', 'b')** (was "Copy as SQL list") copies the distinct values of the selected rows quoted and in brackets, ready to paste after `where col in`.
+- Sort and the column menu work anywhere on a column header, not just on its name.
+
+### Fixed
+- A connection that died while the laptop slept (or the network changed) reconnects by itself on the next action; refreshing no longer needs a disconnect and connect.
+- Changing only the database or schema of a saved query's console now saves too.
+- The map's area filter works on query results and reloaded pages.
+- A lookup no longer gives up on a column that appears twice in a result (`select name, person_category, *`).
+
 ## [0.0.12-alpha] - 2026-10-17
 
 ### Added
@@ -151,7 +169,8 @@ First alpha: a minimal DataGrip-style PostgreSQL client written in Rust.
 - Khmer typed into the SQL editor is not shaped yet.
 - Only macOS on Apple silicon is published; other platforms can build from source.
 
-[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.12-alpha...HEAD
+[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.13-alpha...HEAD
+[0.0.13-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.13-alpha
 [0.0.12-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.12-alpha
 [0.0.11-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.11-alpha
 [0.0.10-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.10-alpha
