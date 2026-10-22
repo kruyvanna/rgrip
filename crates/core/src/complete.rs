@@ -427,9 +427,10 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, schema: &str, force
         return None;
     }
     if let Some((replace, prefix)) = slash_command_at(sql, cursor) {
-        let items: Vec<Suggestion> = crate::commands::active()
+        let prefix_lc = prefix.to_ascii_lowercase();
+        let mut items: Vec<Suggestion> = crate::commands::active()
             .iter()
-            .filter(|c| c.name.starts_with(&prefix.to_ascii_lowercase()))
+            .filter(|c| c.name.starts_with(&prefix_lc))
             .map(|c| Suggestion {
                 label: format!("/{} {}", c.name, c.args()).trim_end().to_string(),
                 insert: format!("/{} ", c.name),
@@ -438,6 +439,16 @@ pub fn complete(sql: &str, cursor: usize, catalog: &Catalog, schema: &str, force
                 replace: None,
             })
             .collect();
+        // Last, and only once typed toward: it isn't a query.
+        if !prefix_lc.is_empty() && crate::commands::NEW.starts_with(&prefix_lc) {
+            items.push(Suggestion {
+                label: format!("/{} [name]", crate::commands::NEW),
+                insert: format!("/{} ", crate::commands::NEW),
+                kind: ItemKind::Command,
+                detail: "Create a slash command".into(),
+                replace: None,
+            });
+        }
         return (!items.is_empty()).then(|| Completion { replace, prefix: format!("/{prefix}"), items });
     }
     // Arguments of a slash command aren't SQL: no suggestions, so Tab expands.
@@ -1009,6 +1020,8 @@ mod tests {
         // Just the slash lists everything; division doesn't.
         assert_eq!(complete("/", 1, &catalog(), "public", false).unwrap().items.len(), crate::commands::defaults().len());
         assert!(complete("select a/b", 9, &catalog(), "public", false).is_none_or(|c| c.items.iter().all(|s| s.kind != ItemKind::Command)));
+        let new = complete("/ne", 3, &catalog(), "public", false).unwrap();
+        assert_eq!(new.items.last().unwrap().insert, "/new ");
         // No SQL suggestions while typing a command's arguments.
         assert!(complete("/con_4326 us", 12, &catalog(), "public", false).is_none());
     }

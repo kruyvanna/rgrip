@@ -40,7 +40,70 @@ pub struct GridState {
     pub demo_menu: Option<usize>,
     /// Column briefly highlighted after a jump, with the time it started.
     flash: Option<(usize, f64)>,
+    /// The value popup (double-click a JSON cell, or "View value").
+    viewer: Option<Viewer>,
     cache: Option<Cache>,
+}
+
+struct Viewer {
+    /// Column name and 1-based row number, for the title.
+    column: String,
+    row: usize,
+    text: String,
+    /// Pretty-printed, when the value is a JSON object or array.
+    json: Option<String>,
+}
+
+impl Viewer {
+    fn new(column: &str, row: usize, text: &str) -> Self {
+        Self { column: column.to_string(), row, text: text.to_string(), json: rgrip_core::format::pretty_json(text) }
+    }
+}
+
+/// The value popup: the whole value, JSON indented and colored, selectable.
+fn viewer_ui(ctx: &egui::Context, viewer: &mut Option<Viewer>) {
+    let Some(v) = viewer.as_ref() else { return };
+    let mut close = false;
+    let screen = ctx.content_rect();
+    let modal = egui::Modal::new(Id::new("grid-value-viewer"))
+        .frame(egui::Frame::new().fill(theme::SURFACE()).stroke(Stroke::new(1.0_f32, theme::BORDER())).corner_radius(12).inner_margin(egui::Margin::same(16)))
+        .show(ctx, |ui| {
+            ui.set_width((screen.width() * 0.6).clamp(420.0, 900.0));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&v.column).strong().color(theme::TEXT()));
+                ui.label(RichText::new(format!("row {}{}", v.row, if v.json.is_some() { " · JSON" } else { "" })).size(12.0).color(theme::MUTED()));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                    if v.json.is_some() && ui.button("Copy compact").on_hover_text("The value as stored, on one line").clicked() {
+                        ui.ctx().copy_text(v.text.clone());
+                    }
+                    if crate::icons::menu_item(ui, crate::icons::Svg::Copy, "Copy", true).clicked() {
+                        ui.ctx().copy_text(v.json.clone().unwrap_or_else(|| v.text.clone()));
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            egui::Frame::new().fill(theme::BG()).corner_radius(8).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                egui::ScrollArea::both().max_height((screen.height() * 0.7).max(200.0)).auto_shrink([false, true]).show(ui, |ui| {
+                    let font = TextStyle::Monospace.resolve(ui.style());
+                    // Coloring is per frame: skip it for huge values.
+                    let job = match v.json.as_ref().filter(|j| j.len() < 200_000) {
+                        Some(j) => crate::highlight::json(j, font),
+                        None => {
+                            let mut job = egui::text::LayoutJob::simple(v.json.clone().unwrap_or_else(|| v.text.clone()), font, theme::TEXT(), ui.available_width());
+                            job.wrap.max_width = ui.available_width();
+                            job
+                        }
+                    };
+                    ui.add(Label::new(job).selectable(true));
+                });
+            });
+        });
+    if close || modal.should_close() {
+        *viewer = None;
+    }
 }
 
 struct Goto {
@@ -210,6 +273,11 @@ pub fn show(
     let mut menu_row = None;
     let geom = !rs.geometry_columns().is_empty();
     let mut menu_col = state.menu_col;
+    // A cell to show in the value popup: (row, column).
+    let mut view: Option<(usize, usize)> = None;
+    // Row of the last plain click: a double-click's first click selects it,
+    // so quick clicks on two rows don't count as one.
+    let anchor = state.anchor;
     let demo_menu = state.demo_menu.take();
     // Frozen columns (by name) that exist in this result, in freeze order.
     let frozen: Vec<usize> = state.frozen.iter().filter_map(|n| rs.columns.iter().position(|c| c == n)).collect();
@@ -384,11 +452,15 @@ pub fn show(
                                 None => cell(ui, cache, i, col, value),
                             }
                         });
-                        if cell_resp.double_clicked()
-                            && !cache.geom_cols.contains(&col)
-                            && let Some(e) = edit.as_mut()
-                        {
-                            *e.editor = Some(CellEditor::open(i, col, value));
+                        // Double-click: JSON (or any value, read-only) opens the
+                        // value popup; other editable cells open the editor.
+                        if cell_resp.double_clicked() && !cache.geom_cols.contains(&col) {
+                            let json = value.is_some_and(|v| matches!(v.trim_start().as_bytes().first(), Some(b'{' | b'[')));
+                            match edit.as_mut() {
+                                Some(e) if !json => *e.editor = Some(CellEditor::open(i, col, value)),
+                                _ if value.is_some() && anchor == Some(i) => view = Some((i, col)),
+                                _ => {}
+                            }
                         }
                         if cell_resp.secondary_clicked() {
                             menu_col = Some(col);
@@ -419,6 +491,10 @@ pub fn show(
                             let shown = changes.and_then(|c| c.get(&(i, col))).map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
                             if crate::icons::menu_item(ui, crate::icons::Svg::Copy, "Copy value", shown.is_some()).clicked() {
                                 ui.ctx().copy_text(shown.unwrap_or_default().to_string());
+                                ui.close();
+                            }
+                            if crate::icons::menu_item(ui, crate::icons::Svg::Search, "View value", shown.is_some()).on_hover_text("JSON indented; or double-click a JSON cell").clicked() {
+                                view = Some((i, col));
                                 ui.close();
                             }
                             if rows.len() > 1 {
@@ -493,6 +569,12 @@ pub fn show(
         None => {}
     }
     state.menu_col = menu_col;
+    if let Some((r, c)) = view {
+        let pending = edit.as_ref().and_then(|e| e.changes.get(&(r, c)));
+        let value = pending.map_or(rs.rows[r][c].as_deref(), |v| v.as_deref());
+        state.viewer = value.map(|v| Viewer::new(&rs.columns[c], row_offset + r + 1, v));
+    }
+    viewer_ui(ui.ctx(), &mut state.viewer);
     let opened_menu = menu_row;
     if flash.is_none() {
         state.flash = None;

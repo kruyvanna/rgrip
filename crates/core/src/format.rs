@@ -22,6 +22,66 @@ pub fn format_sql(sql: &str) -> String {
     text
 }
 
+/// `text` re-indented, when it is a JSON object or array; keys keep their
+/// order (unlike a parse and print round trip).
+pub fn pretty_json(text: &str) -> Option<String> {
+    let text = text.trim();
+    if !(text.starts_with('{') || text.starts_with('[')) || serde_json::from_str::<serde::de::IgnoredAny>(text).is_err() {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len() * 2);
+    let (mut depth, mut in_str, mut escaped) = (0usize, false, false);
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        out.push_str(&"  ".repeat(depth));
+    };
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_str {
+            out.push(c);
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                out.push(c);
+            }
+            '{' | '[' => {
+                out.push(c);
+                // Empty ones stay on one line: `{}`, `[]`.
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+                if matches!(chars.peek(), Some('}' | ']')) {
+                    out.push(chars.next().unwrap());
+                } else {
+                    depth += 1;
+                    newline(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(c);
+            }
+            ',' => {
+                out.push(c);
+                newline(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
 /// ⌘/: comment the lines the selection touches with `-- `, or uncomment them
 /// when every non-blank one already is. `sel` is a byte range; returns the new
 /// text and where the selection ends up.
@@ -102,6 +162,15 @@ fn flush(chunk: &mut Vec<&str>, out: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pretty_json_keeps_order() {
+        let p = super::pretty_json(r#"{"name": "Sok \"A\", B", "z": 1, "a": [1, {"k": null}], "e": {}}"#).unwrap();
+        assert_eq!(p, "{\n  \"name\": \"Sok \\\"A\\\", B\",\n  \"z\": 1,\n  \"a\": [\n    1,\n    {\n      \"k\": null\n    }\n  ],\n  \"e\": {}\n}");
+        assert_eq!(super::pretty_json("[]").unwrap(), "[]");
+        assert!(super::pretty_json("{oops").is_none());
+        assert!(super::pretty_json("12").is_none());
+    }
+
     use super::*;
 
     #[test]

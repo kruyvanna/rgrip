@@ -5,6 +5,16 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.0.14-alpha] - 2026-10-22
+
+### Added
+- Your own placeholders in slash commands: any `{name}` (or `{name=default}`) in a template is an argument pasted in as typed. Arguments go in the order the placeholders appear, and the last one takes the rest of the line, so `/people ('a', 'b')` fills `where id in {ids}`. Quotes and brackets keep an earlier argument's spaces together.
+- `/new [name]` in the console (Tab, or pick it from the `/` menu) opens the slash command editor on a new command.
+- Value popup: double-click a JSON cell for the value indented and colored (keys in their order), with Copy and Copy compact. In read-only results any cell opens it; right-click → **View value** works everywhere.
+
+### Changed
+- The slash command editor shows the template and its preview side by side, with the preview colored like the editor and the placeholders still waiting for a value listed under it.
+
 ## [0.0.13-alpha] - 2026-10-22
 
 ### Added
@@ -169,7 +179,8 @@ First alpha: a minimal DataGrip-style PostgreSQL client written in Rust.
 - Khmer typed into the SQL editor is not shaped yet.
 - Only macOS on Apple silicon is published; other platforms can build from source.
 
-[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.13-alpha...HEAD
+[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.14-alpha...HEAD
+[0.0.14-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.14-alpha
 [0.0.13-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.13-alpha
 [0.0.12-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.12-alpha
 [0.0.11-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.11-alpha

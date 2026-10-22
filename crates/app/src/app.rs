@@ -520,6 +520,8 @@ enum Action {
     SetAutoUpdate(bool),
     /// Open the slash command editor (Settings).
     EditCommands,
+    /// The slash command editor on a new command with this name (empty: a generated one).
+    NewCommand(String),
     CheckUpdate,
     InstallUpdate,
     RenameSaved(usize),
@@ -647,6 +649,8 @@ enum TabAction {
     LoadLayers(Vec<crate::layout_tab::Action>),
     /// Show a message in the status bar.
     Notify(String),
+    /// `/new [name]` in the console: open the slash command editor on a new command.
+    NewCommand(String),
     /// Wrap the console's query to add `ST_Transform(col, 4326)` and re-run.
     Reproject(String),
     /// Filter the console's result to a map area (WHERE text), or clear it.
@@ -1503,6 +1507,13 @@ impl App {
             Action::EditCommands => {
                 self.commands_editor = Some(CommandsEditor { list: rgrip_core::commands::active().to_vec(), selected: 0, error: None, preview_args: String::new() });
             }
+            Action::NewCommand(name) => {
+                let mut list = rgrip_core::commands::active().to_vec();
+                let name = if name.is_empty() { format!("cmd{}", list.len() + 1) } else { name.to_ascii_lowercase() };
+                list.push(rgrip_core::commands::SlashCommand { name, help: String::new(), template: "select *\nfrom {table}\nwhere id in {ids};".into() });
+                let selected = list.len() - 1;
+                self.commands_editor = Some(CommandsEditor { list, selected, error: None, preview_args: String::new() });
+            }
             Action::CheckUpdate => {
                 if !matches!(self.update, UpdateState::Checking { .. } | UpdateState::Installing(_)) {
                     self.update = UpdateState::Checking { manual: true };
@@ -1781,6 +1792,7 @@ impl App {
                 }
             }
             (TabAction::Notify(text), _) => self.toast = Some((text, theme::WARN(), Instant::now())),
+            (TabAction::NewCommand(name), _) => self.apply(Action::NewCommand(name)),
             (TabAction::Cancel, TabKind::Console(c)) => {
                 if c.pending.take().is_some() {
                     c.running = None;
@@ -3623,6 +3635,15 @@ fn console_ui(
     if let Some(i) = keys.accept {
         if let Some(p) = c.popup.take() {
             c.cursor = completion::accept(ui.ctx(), editor_id, &mut c.sql, &p.completion, i);
+            // Picking /new opens the editor right away.
+            let byte = sql::char_to_byte(&c.sql, c.cursor.start);
+            if let Some((range, line)) = rgrip_core::commands::command_line_at(&c.sql, byte)
+                && let Some(name) = rgrip_core::commands::new_command(line)
+            {
+                let name = name.to_string();
+                c.cursor = completion::replace_text(ui.ctx(), editor_id, &mut c.sql, range, "");
+                return Some(TabAction::NewCommand(name));
+            }
         }
     }
     // Slash commands: Tab expands the command on the cursor's line; ⌘↩
@@ -3634,6 +3655,11 @@ fn console_ui(
         if let Some((range, line)) = rgrip_core::commands::command_line_at(&c.sql, byte) {
             if tab {
                 ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab));
+            }
+            if let Some(name) = rgrip_core::commands::new_command(line).filter(|_| tab) {
+                let name = name.to_string();
+                c.cursor = completion::replace_text(ui.ctx(), editor_id, &mut c.sql, range, "");
+                return Some(TabAction::NewCommand(name));
             }
             match rgrip_core::commands::expand(line, catalog, c.schema_or_default(schemas)) {
                 Ok(expanded) => {
@@ -4811,6 +4837,8 @@ impl App {
         use rgrip_core::commands::{self, SlashCommand};
         const LIST_W: f32 = 190.0;
         const GAP: f32 = 10.0;
+        /// Height of the template and preview panes.
+        const PANE_H: f32 = 380.0;
         let field_label = |ui: &mut Ui, text: &str| {
             ui.label(RichText::new(text).size(12.0).color(theme::MUTED()));
             ui.add_space(2.0);
@@ -4822,7 +4850,7 @@ impl App {
         let modal = egui::Modal::new(Id::new("commands-editor"))
             .frame(Frame::new().fill(theme::SURFACE()).stroke(Stroke::new(1.0, theme::BORDER())).corner_radius(12).inner_margin(Margin::same(20)))
             .show(ctx, |ui| {
-                ui.set_width(760.0);
+                ui.set_width((ctx.content_rect().width() - 80.0).clamp(760.0, 1180.0));
                 ui.label(RichText::new("Slash commands").heading().color(theme::TEXT()));
                 ui.label(RichText::new("Type /name in the editor, then Tab to expand (or run it directly).").size(12.5).color(theme::MUTED()));
                 ui.add_space(12.0);
@@ -4855,75 +4883,120 @@ impl App {
                     // Not a separator: in a horizontal row it stretches to
                     // the full available height and blows up the modal.
                     ui.add_space(24.0);
-                    // Details.
+                    // Details: name and description on one row, then the
+                    // template and its preview side by side.
                     ui.vertical(|ui| {
                         let width = ui.available_width();
                         let Some(c) = ed.list.get_mut(ed.selected) else {
                             muted(ui, "No commands. Add one, or reset to the defaults.");
                             return;
                         };
-                        field_label(ui, "Name");
-                        ui.add(TextEdit::singleline(&mut c.name).font(TextStyle::Monospace).desired_width(width).margin(Margin::symmetric(8, 6)));
-                        ui.add_space(GAP);
-                        field_label(ui, "Description");
-                        ui.add(TextEdit::singleline(&mut c.help).desired_width(width).margin(Margin::symmetric(8, 6)));
-                        ui.add_space(GAP);
-                        field_label(ui, "SQL template");
-                        let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-                            let mut job = highlight::sql(buf.as_str(), TextStyle::Monospace.resolve(ui.style()));
-                            job.wrap.max_width = wrap;
-                            ui.fonts_mut(|f| f.layout_job(job))
-                        };
-                        ui.add(TextEdit::multiline(&mut c.template).code_editor().desired_rows(4).desired_width(width).margin(Margin::symmetric(8, 6)).layouter(&mut layouter));
-                        ui.add_space(6.0);
-                        // Placeholders as chips that wrap cleanly.
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                            for (token, what) in [
-                                ("{table}", "The table argument (schema-qualified if needed)"),
-                                ("{field}", "Geometry column: the argument, else the table's geometry column, else shape"),
-                                ("{field+_4326}", "The field name plus a suffix, quoted as needed (for aliases)"),
-                                ("{n}", "A number argument (required)"),
-                                ("{n=100}", "A number argument with a default"),
-                            ] {
-                                Frame::new().fill(theme::HOVER()).corner_radius(5).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
-                                    ui.label(RichText::new(token).monospace().size(11.5).color(theme::MUTED()));
-                                })
-                                .response
-                                .on_hover_text(what);
-                            }
-                        });
-                        ui.add_space(GAP + 4.0);
-                        // Preview: the command prefix sits inside the input.
-                        field_label(ui, "Preview");
-                        Frame::new().fill(theme::BG()).stroke(Stroke::new(1.0, theme::BORDER())).corner_radius(8).inner_margin(Margin::symmetric(8, 5)).show(ui, |ui| {
-                            ui.set_width(width - 18.0);
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                ui.label(RichText::new(format!("/{} ", c.name)).monospace().color(theme::MUTED()));
-                                ui.add(
-                                    TextEdit::singleline(&mut ed.preview_args)
-                                        .hint_text(hint(&c.args()))
-                                        .font(TextStyle::Monospace)
-                                        .frame(false)
-                                        .margin(Margin::ZERO)
-                                        .desired_width(f32::INFINITY),
-                                );
+                        let half = (width - 2.0 * GAP) / 2.0;
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0 * GAP;
+                            ui.vertical(|ui| {
+                                ui.set_width(half);
+                                field_label(ui, "Name");
+                                ui.add(TextEdit::singleline(&mut c.name).font(TextStyle::Monospace).desired_width(half).margin(Margin::symmetric(8, 6)));
+                            });
+                            ui.vertical(|ui| {
+                                ui.set_width(half);
+                                field_label(ui, "Description");
+                                ui.add(TextEdit::singleline(&mut c.help).desired_width(half).margin(Margin::symmetric(8, 6)));
                             });
                         });
+                        ui.add_space(GAP);
                         let line = format!("/{} {}", c.name, ed.preview_args);
-                        let preview = match c.problem() {
-                            Some(p) => Err(p),
-                            None => commands::expand_with(std::slice::from_ref(c), &line, &catalog, "public"),
-                        };
-                        let (text, color) = match &preview {
-                            Ok(sql) => (sql.clone(), theme::TEXT()),
-                            Err(e) => (e.clone(), theme::WARN()),
-                        };
-                        ui.add_space(6.0);
-                        Frame::new().fill(theme::BG()).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
-                            ui.set_width(width - 20.0);
-                            ui.label(RichText::new(text).monospace().size(12.5).color(color));
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0 * GAP;
+                            // Left: the template.
+                            ui.vertical(|ui| {
+                                ui.set_width(half);
+                                field_label(ui, "SQL template");
+                                let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                                    let mut job = highlight::sql(buf.as_str(), TextStyle::Monospace.resolve(ui.style()));
+                                    job.wrap.max_width = wrap;
+                                    ui.fonts_mut(|f| f.layout_job(job))
+                                };
+                                egui::ScrollArea::vertical().id_salt("cmd-template").max_height(PANE_H).auto_shrink([false, true]).show(ui, |ui| {
+                                    ui.add(
+                                        TextEdit::multiline(&mut c.template)
+                                            .code_editor()
+                                            .desired_rows(18)
+                                            .desired_width(half)
+                                            .margin(Margin::symmetric(8, 6))
+                                            .layouter(&mut layouter),
+                                    );
+                                });
+                                ui.add_space(6.0);
+                                // Placeholders as chips that wrap cleanly.
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                                    for (token, what) in [
+                                        ("{name}", "Your own argument, any name: pasted in as typed. Arguments go in the order the placeholders appear; the last one takes the rest of the line"),
+                                        ("{name=x}", "Your own argument with a default"),
+                                        ("{table}", "The table argument (schema-qualified if needed)"),
+                                        ("{field}", "Geometry column: the argument, else the table's geometry column, else shape"),
+                                        ("{field+_4326}", "The field name plus a suffix, quoted as needed (for aliases)"),
+                                        ("{n}", "A number argument (required)"),
+                                        ("{n=100}", "A number argument with a default"),
+                                    ] {
+                                        Frame::new().fill(theme::HOVER()).corner_radius(5).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
+                                            ui.label(RichText::new(token).monospace().size(11.5).color(theme::MUTED()));
+                                        })
+                                        .response
+                                        .on_hover_text(what);
+                                    }
+                                });
+                            });
+                            // Right: try it with arguments, see the SQL.
+                            ui.vertical(|ui| {
+                                ui.set_width(half);
+                                field_label(ui, "Preview");
+                                Frame::new().fill(theme::BG()).stroke(Stroke::new(1.0, theme::BORDER())).corner_radius(8).inner_margin(Margin::symmetric(8, 5)).show(ui, |ui| {
+                                    ui.set_width(half - 18.0);
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                        ui.label(RichText::new(format!("/{} ", c.name)).monospace().color(theme::MUTED()));
+                                        ui.add(
+                                            TextEdit::singleline(&mut ed.preview_args)
+                                                .hint_text(hint(&c.args()))
+                                                .font(TextStyle::Monospace)
+                                                .frame(false)
+                                                .margin(Margin::ZERO)
+                                                .desired_width(f32::INFINITY),
+                                        );
+                                    });
+                                });
+                                let preview = match c.problem() {
+                                    Some(p) => Err(p),
+                                    None => commands::preview_with(std::slice::from_ref(c), &line, &catalog, "public"),
+                                };
+                                ui.add_space(6.0);
+                                Frame::new().fill(theme::BG()).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
+                                    ui.set_width(half - 20.0);
+                                    egui::ScrollArea::vertical().id_salt("cmd-preview").max_height(PANE_H - 44.0).auto_shrink([false, false]).show(ui, |ui| {
+                                        match &preview {
+                                            Ok(sql) => {
+                                                let mut job = highlight::sql(sql, TextStyle::Monospace.resolve(ui.style()));
+                                                job.wrap.max_width = ui.available_width();
+                                                ui.add(egui::Label::new(job).selectable(true));
+                                            }
+                                            Err(e) => {
+                                                ui.label(RichText::new(e).monospace().size(12.5).color(theme::WARN()));
+                                            }
+                                        }
+                                    });
+                                });
+                                // Free placeholders still waiting for a value.
+                                if let Ok(sql) = &preview {
+                                    let missing: Vec<String> = c.args().split_whitespace().filter(|a| a.starts_with('<')).map(|a| a.trim_matches(['<', '>']).to_string()).filter(|n| sql.contains(&format!("{{{n}}}"))).collect();
+                                    if !missing.is_empty() {
+                                        ui.add_space(4.0);
+                                        ui.label(RichText::new(format!("Waiting for: {}", missing.join(", "))).size(12.0).color(theme::WARN()));
+                                    }
+                                }
+                            });
                         });
                     });
                 });

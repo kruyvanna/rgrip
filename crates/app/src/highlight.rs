@@ -86,6 +86,57 @@ pub fn sql(text: &str, font: FontId) -> LayoutJob {
     job
 }
 
+/// JSON: keys, strings, numbers and `true`/`false`/`null` in their colors.
+pub fn json(text: &str, font: FontId) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    let fmt = |color: Color32| TextFormat { font_id: font.clone(), color, ..Default::default() };
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        let (end, color) = match b[i] {
+            b'"' => {
+                let mut e = i + 1;
+                while e < b.len() && b[e] != b'"' {
+                    e += if b[e] == b'\\' { 2 } else { 1 };
+                }
+                let e = (e + 1).min(b.len());
+                // A key is a string followed by `:`.
+                let key = b[e..].iter().find(|c| !c.is_ascii_whitespace()) == Some(&b':');
+                (e, if key { theme::ACCENT() } else { theme::STRING() })
+            }
+            c if c.is_ascii_digit() || c == b'-' => {
+                let mut e = i + 1;
+                while e < b.len() && (b[e].is_ascii_alphanumeric() || matches!(b[e], b'.' | b'+' | b'-')) {
+                    e += 1;
+                }
+                (e, theme::WARN())
+            }
+            c if c.is_ascii_alphabetic() => {
+                let mut e = i;
+                while e < b.len() && b[e].is_ascii_alphabetic() {
+                    e += 1;
+                }
+                (e, theme::ACCENT())
+            }
+            _ => {
+                let mut e = i + 1;
+                while e < b.len() && !b[e].is_ascii_alphanumeric() && !matches!(b[e], b'"' | b'-') {
+                    e += 1;
+                }
+                (e, theme::MUTED())
+            }
+        };
+        let mut end = end.min(b.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        job.append(&text[start..end], 0.0, fmt(color));
+        i = end;
+    }
+    job
+}
+
 fn find(b: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     b.get(from..)?
         .windows(needle.len())
@@ -100,6 +151,12 @@ mod tests {
         let mut sorted = super::KEYWORDS.to_vec();
         sorted.sort();
         assert_eq!(sorted, super::KEYWORDS);
+    }
+
+    #[test]
+    fn json_covers_all_text() {
+        let src = "{\n  \"k\": \"é \\\" x\",\n  \"n\": -1.5e3,\n  \"b\": [true, null]\n}";
+        assert_eq!(super::json(src, Default::default()).text, src);
     }
 
     #[test]
