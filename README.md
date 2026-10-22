@@ -64,9 +64,15 @@ Put one or more tables on a page (A4, A3, Letter, portrait or landscape) and exp
 
 ## Install
 
-Download the zip from [Releases](https://github.com/yoouTaro/rgrip/releases), unzip it, and move **rgrip.app** to your Applications folder. The app is for Apple silicon; for other platforms, build from source.
+Run this in Terminal (Apple silicon):
 
-It is ad-hoc signed but not notarized, so macOS blocks the first launch. Right-click **rgrip.app** and choose **Open**, or run:
+```sh
+curl -fsSL https://raw.githubusercontent.com/yoouTaro/rgrip/main/install.sh | sh
+```
+
+It downloads the latest release, checks its SHA-256, puts **rgrip.app** in Applications and opens it. Run it again to update.
+
+Or download the zip from [Releases](https://github.com/yoouTaro/rgrip/releases), unzip it and move **rgrip.app** to Applications. It isn't notarized, so macOS blocks the first launch of a downloaded zip: right-click **rgrip.app** and choose **Open**, or run:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/rgrip.app
