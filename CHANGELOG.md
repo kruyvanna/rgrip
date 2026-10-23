@@ -5,6 +5,9 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Drag a column header to move the column; an accent line shows where it lands, and dragging near an edge scrolls sideways. Frozen columns reorder among themselves. The order is kept across reloads; right-click a header → **Reset column order** to go back to the query's order.
+
 ## [0.0.14-alpha] - 2026-10-22
 
 ### Added
