@@ -137,6 +137,9 @@ pub struct ConnectionConfig {
     /// Postgres rejects writes: the session is set read-only on connect.
     #[serde(default)]
     pub read_only: bool,
+    /// Explorer folder this connection is listed under (one level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 impl Default for ConnectionConfig {
@@ -160,6 +163,7 @@ impl Default for ConnectionConfig {
             ssh: SshConfig::default(),
             color: ConnColor::None,
             read_only: false,
+            folder: None,
         }
     }
 }

@@ -189,14 +189,16 @@ fn save_connections_at(path: &Path, store: &dyn SecretStore, connections: &[Conn
     Ok(())
 }
 
-/// A saved query: one `.sql` file in the queries folder. The file name is
-/// the query's name; an optional first line `-- rgrip-connection: <id>`
-/// remembers the connection it was written for.
+/// A saved query: one `.sql` file in the queries folder, or in one of its
+/// subfolders. The file name is the query's name; an optional first line
+/// `-- rgrip-connection: <id>` remembers the connection it was written for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedQuery {
-    /// File stem; unique within the folder.
+    /// `folder/stem`, or just the stem at the top level.
     pub id: String,
     pub name: String,
+    /// Subfolder of the queries folder (`None`: top level).
+    pub folder: Option<String>,
     pub sql: String,
     pub connection: Option<String>,
     /// Database picked in the console (`None`: the connection's default).
@@ -214,7 +216,14 @@ pub fn queries_dir() -> Option<PathBuf> {
     config_path().map(|p| p.with_file_name("queries"))
 }
 
-fn parse_query(path: &Path) -> Option<SavedQuery> {
+fn query_id(folder: Option<&str>, stem: &str) -> String {
+    match folder {
+        Some(f) => format!("{f}/{stem}"),
+        None => stem.to_string(),
+    }
+}
+
+fn parse_query(path: &Path, folder: Option<&str>) -> Option<SavedQuery> {
     let text = std::fs::read_to_string(path).ok()?;
     let name = path.file_stem()?.to_string_lossy().to_string();
     let (mut connection, mut database, mut schemas) = (None, None, Vec::new());
@@ -234,7 +243,16 @@ fn parse_query(path: &Path) -> Option<SavedQuery> {
         }
         sql = body;
     }
-    Some(SavedQuery { id: name.clone(), name, sql: sql.to_string(), connection, database, schemas, path: path.to_path_buf() })
+    Some(SavedQuery {
+        id: query_id(folder, &name),
+        name,
+        folder: folder.map(str::to_string),
+        sql: sql.to_string(),
+        connection,
+        database,
+        schemas,
+        path: path.to_path_buf(),
+    })
 }
 
 fn file_text(q: &SavedQuery) -> String {
@@ -275,17 +293,39 @@ fn free_path(dir: &Path, name: &str, keep: Option<&Path>) -> PathBuf {
     path
 }
 
-/// All `.sql` files in `dir`, sorted by name.
-pub fn load_queries_in(dir: &Path) -> Vec<SavedQuery> {
-    let mut out: Vec<SavedQuery> = std::fs::read_dir(dir)
+fn sql_files(dir: &Path, folder: Option<&str>) -> impl Iterator<Item = SavedQuery> {
+    let folder = folder.map(str::to_string);
+    std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "sql"))
-        .filter_map(|p| parse_query(&p))
+        .filter_map(move |p| parse_query(&p, folder.as_deref()))
+}
+
+/// Subfolders of `dir` (one level, hidden ones skipped), sorted by name.
+pub fn query_folders_in(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| !n.starts_with('.'))
         .collect();
-    out.sort_by_key(|q| q.name.to_lowercase());
+    out.sort_by_key(|n| n.to_lowercase());
+    out
+}
+
+/// All `.sql` files in `dir` and its subfolders, sorted by folder (top
+/// level first), then name.
+pub fn load_queries_in(dir: &Path) -> Vec<SavedQuery> {
+    let mut out: Vec<SavedQuery> = sql_files(dir, None).collect();
+    for f in query_folders_in(dir) {
+        out.extend(sql_files(&dir.join(&f), Some(&f)));
+    }
+    out.sort_by_key(|q| (q.folder.as_ref().map(|f| f.to_lowercase()), q.name.to_lowercase()));
     out
 }
 
@@ -293,7 +333,7 @@ pub fn create_query_in(dir: &Path, name: &str, sql: &str, connection: Option<Str
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = free_path(dir, name, None);
     let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-    let q = SavedQuery { id: stem.clone(), name: stem, sql: sql.to_string(), connection, database, schemas, path };
+    let q = SavedQuery { id: stem.clone(), name: stem, folder: None, sql: sql.to_string(), connection, database, schemas, path };
     std::fs::write(&q.path, file_text(&q)).map_err(|e| e.to_string())?;
     Ok(q)
 }
@@ -308,7 +348,60 @@ pub fn rename_query(q: &SavedQuery, new_name: &str) -> Result<SavedQuery, String
     let path = free_path(dir, new_name, Some(&q.path));
     std::fs::rename(&q.path, &path).map_err(|e| format!("Cannot rename: {e}"))?;
     let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-    Ok(SavedQuery { id: stem.clone(), name: stem, path, ..q.clone() })
+    Ok(SavedQuery { id: query_id(q.folder.as_deref(), &stem), name: stem, path, ..q.clone() })
+}
+
+/// Move the query into `folder` of the queries folder `root` (`None`: the
+/// top level), renumbering on a name clash.
+pub fn move_query_in(root: &Path, q: &SavedQuery, folder: Option<&str>) -> Result<SavedQuery, String> {
+    let folder = folder.map(file_stem);
+    let dir = folder.as_ref().map_or_else(|| root.to_path_buf(), |f| root.join(f));
+    if q.path.parent() == Some(dir.as_path()) {
+        return Ok(q.clone());
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = free_path(&dir, &q.name, None);
+    std::fs::rename(&q.path, &path).map_err(|e| format!("Cannot move: {e}"))?;
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    Ok(SavedQuery { id: query_id(folder.as_deref(), &stem), name: stem, folder, path, ..q.clone() })
+}
+
+/// Make an empty folder; returns its (cleaned) name.
+pub fn create_query_folder_in(root: &Path, name: &str) -> Result<String, String> {
+    let name = file_stem(name);
+    std::fs::create_dir_all(root.join(&name)).map_err(|e| format!("Cannot create folder: {e}"))?;
+    Ok(name)
+}
+
+/// Rename a folder; returns the new (cleaned) name.
+pub fn rename_query_folder_in(root: &Path, old: &str, new: &str) -> Result<String, String> {
+    let new = file_stem(new);
+    // A case-only rename finds itself on a case-insensitive disk.
+    if !new.eq_ignore_ascii_case(old) && root.join(&new).exists() {
+        return Err(format!("A folder named \"{new}\" already exists"));
+    }
+    std::fs::rename(root.join(old), root.join(&new)).map_err(|e| format!("Cannot rename: {e}"))?;
+    Ok(new)
+}
+
+/// Remove a folder, moving its queries to the top level first. Returns
+/// each moved query's old id with where it is now.
+pub fn delete_query_folder_in(root: &Path, folder: &str) -> Result<Vec<(String, SavedQuery)>, String> {
+    let dir = root.join(folder);
+    let mut moved = Vec::new();
+    for q in sql_files(&dir, Some(folder)).collect::<Vec<_>>() {
+        moved.push((q.id.clone(), move_query_in(root, &q, None)?));
+    }
+    // Finder litter (`.DS_Store`) goes with it; anything else the user put
+    // there stays, and so does the folder.
+    let rest: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    if rest.iter().all(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) && p.is_file()) {
+        for p in rest {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    std::fs::remove_dir(&dir).map_err(|e| format!("Cannot remove folder: {e}"))?;
+    Ok(moved)
 }
 
 /// Move the file to the Trash (recoverable), falling back to deleting it.
@@ -357,6 +450,26 @@ pub fn load_queries() -> Vec<SavedQuery> {
     load_queries_in(&dir)
 }
 
+pub fn query_folders() -> Vec<String> {
+    queries_dir().map(|d| query_folders_in(&d)).unwrap_or_default()
+}
+
+pub fn move_query(q: &SavedQuery, folder: Option<&str>) -> Result<SavedQuery, String> {
+    move_query_in(&queries_dir().ok_or("no config directory")?, q, folder)
+}
+
+pub fn create_query_folder(name: &str) -> Result<String, String> {
+    create_query_folder_in(&queries_dir().ok_or("no config directory")?, name)
+}
+
+pub fn rename_query_folder(old: &str, new: &str) -> Result<String, String> {
+    rename_query_folder_in(&queries_dir().ok_or("no config directory")?, old, new)
+}
+
+pub fn delete_query_folder(folder: &str) -> Result<Vec<(String, SavedQuery)>, String> {
+    delete_query_folder_in(&queries_dir().ok_or("no config directory")?, folder)
+}
+
 pub fn create_query(name: &str, sql: &str, connection: Option<String>, database: Option<String>, schemas: Vec<String>) -> Result<SavedQuery, String> {
     create_query_in(&queries_dir().ok_or("no config directory")?, name, sql, connection, database, schemas)
 }
@@ -379,6 +492,8 @@ pub struct Settings {
     pub light_theme: String,
     /// Check GitHub for a newer release on launch.
     pub check_updates: bool,
+    /// Explorer folders shown closed (row keys); folders start open.
+    pub collapsed_folders: Vec<String>,
 }
 
 impl Default for Settings {
@@ -388,6 +503,7 @@ impl Default for Settings {
             dark_theme: "rgrip Dark".into(),
             light_theme: "rgrip Light".into(),
             check_updates: true,
+            collapsed_folders: Vec::new(),
         }
     }
 }
@@ -488,6 +604,9 @@ mod tests {
         );
         let back: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+        let s = Settings { collapsed_folders: vec!["fc/Prod".into()], ..Settings::default() };
+        let back: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
     }
 
     #[test]
@@ -504,6 +623,68 @@ mod tests {
         assert!(text.contains("color = \"red\""));
         let back: ConfigFile = toml::from_str(&text).unwrap();
         assert_eq!(back.connections[0].color, ConnColor::Red);
+    }
+
+    #[test]
+    fn connection_folder_compat_and_round_trip() {
+        let old = "[[connections]]\nid = \"a\"\nname = \"Local\"\nhost = \"localhost\"\nport = 5432\ndatabase = \"postgres\"\nuser = \"u\"\n";
+        let f: ConfigFile = toml::from_str(old).unwrap();
+        assert_eq!(f.connections[0].folder, None);
+        // No folder: nothing written.
+        assert!(!toml::to_string_pretty(&f).unwrap().contains("folder"));
+
+        let mut c = f.connections[0].clone();
+        c.folder = Some("Prod".into());
+        let text = toml::to_string_pretty(&ConfigFile { connections: vec![c] }).unwrap();
+        assert!(text.contains("folder = \"Prod\""));
+        let back: ConfigFile = toml::from_str(&text).unwrap();
+        assert_eq!(back.connections[0].folder.as_deref(), Some("Prod"));
+    }
+
+    #[test]
+    fn saved_query_folders() {
+        let dir = std::env::temp_dir().join(format!("rgrip-query-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let a = create_query_in(&dir, "daily", "select 1", None, None, Vec::new()).unwrap();
+        let b = create_query_in(&dir, "weekly", "select 2", None, None, Vec::new()).unwrap();
+        assert_eq!(create_query_folder_in(&dir, "Empty").unwrap(), "Empty");
+        std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+
+        // Into a folder: id carries the folder; folders list includes empty ones.
+        let a = move_query_in(&dir, &a, Some("Reports/2024")).unwrap();
+        assert_eq!((a.id.as_str(), a.folder.as_deref()), ("Reports-2024/daily", Some("Reports-2024")));
+        assert!(a.path.ends_with("Reports-2024/daily.sql"));
+        assert_eq!(query_folders_in(&dir), ["Empty", "Reports-2024"]);
+        let all = load_queries_in(&dir);
+        assert_eq!(all.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["weekly", "Reports-2024/daily"]);
+        assert_eq!(all[1].sql, "select 1");
+
+        // Renaming keeps the folder.
+        let a = rename_query(&a, "daily sales").unwrap();
+        assert_eq!(a.id, "Reports-2024/daily sales");
+
+        // A clash on the way back is numbered.
+        let clash = create_query_in(&dir, "daily sales", "select 3", None, None, Vec::new()).unwrap();
+        let back = move_query_in(&dir, &a, None).unwrap();
+        assert_eq!((back.id.as_str(), back.folder), ("daily sales 2", None));
+        std::fs::remove_file(&clash.path).unwrap();
+
+        // Rename a folder; refuse to clobber another one.
+        let b = move_query_in(&dir, &b, Some("Reports-2024")).unwrap();
+        assert!(rename_query_folder_in(&dir, "Reports-2024", "Empty").is_err());
+        assert_eq!(rename_query_folder_in(&dir, "Reports-2024", "weekly").unwrap(), "weekly");
+        assert_eq!(rename_query_folder_in(&dir, "weekly", "Weekly").unwrap(), "Weekly");
+        assert_eq!(load_queries_in(&dir).iter().find(|q| q.name == "weekly").unwrap().id, format!("Weekly/{}", b.name));
+
+        // Deleting a folder keeps its queries.
+        std::fs::write(dir.join("Weekly/.DS_Store"), "").unwrap();
+        let moved = delete_query_folder_in(&dir, "Weekly").unwrap();
+        assert_eq!((moved[0].0.as_str(), moved[0].1.id.as_str()), ("Weekly/weekly", "weekly"));
+        assert!(!dir.join("Weekly").exists());
+        let all = load_queries_in(&dir);
+        assert_eq!(all.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["daily sales 2", "weekly"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -525,7 +706,7 @@ mod tests {
 
         let c = create_query_in(&dir, "scoped", "select 3", Some("local".into()), Some("gis".into()), vec!["land".into(), "public".into()]).unwrap();
         assert_eq!(std::fs::read_to_string(&c.path).unwrap(), "-- rgrip-connection: local\n-- rgrip-database: gis\n-- rgrip-schema: land, public\nselect 3");
-        let back = parse_query(&c.path).unwrap();
+        let back = parse_query(&c.path, None).unwrap();
         assert_eq!((back.sql.as_str(), back.database.as_deref(), back.schemas.as_slice()), ("select 3", Some("gis"), &["land".to_string(), "public".to_string()][..]));
         delete_query(&c).unwrap();
 

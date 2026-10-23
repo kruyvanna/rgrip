@@ -8,6 +8,7 @@ All notable changes to rgrip are documented here. The format is based on
 ### Added
 - **Open in console** in a table's right-click menu: a new console on that table's schema, with `SELECT * FROM schema.table LIMIT 100;` ready to run.
 - Drag a column header to move the column; an accent line shows where it lands, and dragging near an edge scrolls sideways. Frozen columns reorder among themselves. The order is kept across reloads; right-click a header → **Reset column order** to go back to the query's order.
+- Folders in the explorer for connections and saved queries (one level). Right-click → **Move to folder**, drag a row onto a folder (or onto another row to join its folder), or set **Folder** in the connection dialog. Query folders are real subfolders of `queries/`; folders remember whether they're open. Removing a folder keeps what was in it.
 
 ## [0.0.14-alpha] - 2026-10-22
 

@@ -462,6 +462,8 @@ struct Dialog {
     testing: bool,
     test: Option<Result<String, String>>,
     tab: DialogTab,
+    /// Explorer folder (empty: none).
+    folder: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -478,6 +480,7 @@ impl Dialog {
             url: String::new(),
             url_status: None,
             ssh_port: cfg.ssh.port.to_string(),
+            folder: cfg.folder.clone().unwrap_or_default(),
             cfg,
             is_new,
             testing: false,
@@ -530,8 +533,100 @@ enum Action {
     DeleteSaved(usize),
     RevealSaved(usize),
     OpenQueriesFolder,
+    /// Put a connection (by id) in a folder (`None`: the top level).
+    MoveConn(String, Option<String>),
+    /// Move a saved query (by id) into a folder (`None`: the top level).
+    MoveSaved(String, Option<String>),
+    /// Ask for a folder name; with an item id, move it there.
+    NewFolder(FolderKind, Option<String>),
+    RenameFolder(FolderKind, String),
+    /// Connections: ungroup them. Queries: move them to the top level.
+    DeleteFolder(FolderKind, String),
+    RevealQueryFolder(String),
     Toggle(String),
     Select(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FolderKind {
+    Conns,
+    Queries,
+}
+
+impl FolderKind {
+    /// Explorer row key of a folder; also what `collapsed_folders` stores.
+    fn key(self, name: &str) -> String {
+        match self {
+            FolderKind::Conns => format!("fc/{name}"),
+            FolderKind::Queries => format!("fq/{name}"),
+        }
+    }
+}
+
+/// What's being dragged in the explorer.
+#[derive(Clone)]
+enum DragItem {
+    Conn(String),
+    Saved(String),
+}
+
+/// Folder names used by connections, sorted.
+fn conn_folders(conns: &[Conn]) -> Vec<String> {
+    let mut out: Vec<String> = conns.iter().filter_map(|c| c.cfg.folder.clone()).collect();
+    out.sort_by_key(|f| f.to_lowercase());
+    out.dedup();
+    out
+}
+
+/// A choice in the "Move to folder" submenu.
+enum FolderPick {
+    To(Option<String>),
+    New,
+}
+
+/// "Move to folder" submenu: the folders, back to the top level, or a new one.
+fn move_to_folder_menu(ui: &mut Ui, folders: &[String], current: Option<&str>) -> Option<FolderPick> {
+    let mut pick = None;
+    crate::icons::submenu(ui, Svg::FolderOpen, "Move to folder", |ui| {
+        for f in folders.iter().filter(|f| Some(f.as_str()) != current) {
+            if ui.button(f).clicked() {
+                pick = Some(FolderPick::To(Some(f.clone())));
+                ui.close();
+            }
+        }
+        if current.is_some() && ui.button("No folder").clicked() {
+            pick = Some(FolderPick::To(None));
+            ui.close();
+        }
+        if folders.iter().any(|f| Some(f.as_str()) != current) || current.is_some() {
+            ui.separator();
+        }
+        if ui.button("New folder…").clicked() {
+            pick = Some(FolderPick::New);
+            ui.close();
+        }
+    });
+    pick
+}
+
+/// While a row is dragged: a grab cursor and its label by the pointer.
+fn drag_ghost(ui: &Ui, resp: &egui::Response, label: &str) {
+    if !resp.dragged() {
+        return;
+    }
+    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    if let Some(pos) = ui.ctx().pointer_interact_pos() {
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("explorer-drag")));
+        let text = painter.layout_no_wrap(label.to_string(), egui::FontId::proportional(12.5), theme::TEXT());
+        let rect = egui::Rect::from_min_size(pos + egui::vec2(14.0, 4.0), text.size()).expand2(egui::vec2(7.0, 4.0));
+        painter.rect(rect, 5.0, theme::SURFACE(), Stroke::new(1.0_f32, theme::BORDER()), egui::StrokeKind::Inside);
+        painter.galley(rect.min + egui::vec2(7.0, 4.0), text, theme::TEXT());
+    }
+}
+
+/// Outline a row that would take the item being dragged.
+fn drop_highlight(ui: &Ui, resp: &egui::Response) {
+    ui.painter().rect_stroke(resp.rect.shrink(0.5), 5.0, Stroke::new(1.5_f32, theme::ACCENT()), egui::StrokeKind::Inside);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -609,6 +704,9 @@ enum NameTarget {
     NewFrom(TabId),
     /// Rename the saved query with this id.
     Rename(String),
+    /// Name a new folder; with an item id, move it there.
+    NewFolder(FolderKind, Option<String>),
+    RenameFolder(FolderKind, String),
 }
 
 /// Statements waiting for the user's go-ahead (see `rgrip_core::safety`).
@@ -697,6 +795,8 @@ pub struct App {
     filter: String,
     notice: Option<String>,
     saved: Vec<SavedQuery>,
+    /// Subfolders of the queries folder (including empty ones).
+    query_folders: Vec<String>,
     name_prompt: Option<NamePrompt>,
     confirm: Option<Confirm>,
     /// The next Run / Save was confirmed: don't ask again.
@@ -781,6 +881,7 @@ impl App {
             filter: String::new(),
             notice: config::take_keychain_warning(),
             saved: config::load_queries(),
+            query_folders: config::query_folders(),
             name_prompt: None,
             confirm: None,
             skip_confirm: false,
@@ -1351,6 +1452,7 @@ impl App {
     /// Re-read the queries folder (files may be edited outside the app).
     fn reload_queries(&mut self) {
         self.saved = config::load_queries();
+        self.query_folders = config::query_folders();
     }
 
     fn report(&mut self, result: Result<(), String>) {
@@ -1371,6 +1473,45 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Rename a folder, keeping it open or closed and consoles linked.
+    fn rename_folder(&mut self, kind: FolderKind, old: &str, new: &str) -> Result<String, String> {
+        let new = match kind {
+            FolderKind::Conns => {
+                for c in self.conns.iter_mut().filter(|c| c.cfg.folder.as_deref() == Some(old)) {
+                    c.cfg.folder = Some(new.to_string());
+                }
+                self.save_config();
+                new.to_string()
+            }
+            FolderKind::Queries => {
+                let new = config::rename_query_folder(old, new)?;
+                for q in self.saved.clone().iter().filter(|q| q.folder.as_deref() == Some(old)) {
+                    let id = format!("{new}/{}", q.name);
+                    self.relink(&q.id, Some((&id, &q.name)));
+                }
+                new
+            }
+        };
+        let key = kind.key(&new);
+        if self.forget_folder(kind, old) && !self.settings.collapsed_folders.contains(&key) {
+            self.settings.collapsed_folders.push(key);
+            self.save_settings();
+        }
+        Ok(new)
+    }
+
+    /// Drop a folder's collapsed state (deleted or renamed away).
+    fn forget_folder(&mut self, kind: FolderKind, name: &str) -> bool {
+        let key = kind.key(name);
+        let before = self.settings.collapsed_folders.len();
+        self.settings.collapsed_folders.retain(|k| *k != key);
+        let was = self.settings.collapsed_folders.len() != before;
+        if was {
+            self.save_settings();
+        }
+        was
     }
 
     fn open_saved(&mut self, i: usize) {
@@ -1492,6 +1633,14 @@ impl App {
                 c.columns.insert((schema.clone(), table.clone()), Load::Loading);
                 self.worker.send(Cmd::Columns(c.cfg.id.clone(), schema, table));
             }
+            Action::Toggle(key) if key.starts_with("fc/") || key.starts_with("fq/") => {
+                let collapsed = &mut self.settings.collapsed_folders;
+                match collapsed.iter().position(|k| *k == key) {
+                    Some(i) => _ = collapsed.remove(i),
+                    None => collapsed.push(key),
+                }
+                self.save_settings();
+            }
             Action::Toggle(key) => {
                 if !self.expanded.remove(&key) {
                     self.expanded.insert(key);
@@ -1555,6 +1704,51 @@ impl App {
                         // Running from source: send the user to the release page.
                         None => self.egui_ctx.open_url(egui::OpenUrl::new_tab(&release.page_url)),
                     }
+                }
+            }
+            Action::MoveConn(id, folder) => {
+                if let Some(ci) = self.conn_index(&id) {
+                    self.conns[ci].cfg.folder = folder;
+                    self.save_config();
+                }
+            }
+            Action::MoveSaved(id, folder) => {
+                if let Some(q) = self.saved.iter().find(|q| q.id == id).cloned() {
+                    let result = config::move_query(&q, folder.as_deref()).map(|r| self.relink(&q.id, Some((&r.id, &r.name))));
+                    self.report(result);
+                    self.reload_queries();
+                }
+            }
+            Action::NewFolder(kind, item) => {
+                self.name_prompt = Some(NamePrompt { name: String::new(), target: NameTarget::NewFolder(kind, item) });
+            }
+            Action::RenameFolder(kind, name) => {
+                self.name_prompt = Some(NamePrompt { name: name.clone(), target: NameTarget::RenameFolder(kind, name) });
+            }
+            Action::DeleteFolder(kind, name) => {
+                self.forget_folder(kind, &name);
+                match kind {
+                    FolderKind::Conns => {
+                        for c in self.conns.iter_mut().filter(|c| c.cfg.folder.as_deref() == Some(name.as_str())) {
+                            c.cfg.folder = None;
+                        }
+                        self.save_config();
+                    }
+                    FolderKind::Queries => {
+                        let result = config::delete_query_folder(&name).map(|moved| {
+                            for (old, q) in moved {
+                                self.relink(&old, Some((&q.id, &q.name)));
+                            }
+                        });
+                        self.report(result);
+                        self.reload_queries();
+                    }
+                }
+            }
+            Action::RevealQueryFolder(name) => {
+                if let Some(dir) = config::queries_dir() {
+                    let result = config::reveal_in_finder(&dir.join(name));
+                    self.report(result);
                 }
             }
             Action::RenameSaved(i) => {
@@ -2702,8 +2896,12 @@ impl App {
         self.explorer_type_ahead(ui);
         let filter = self.filter.trim().to_lowercase();
         let scroll_to = self.scroll_to_row.take();
+        let conn_folders = conn_folders(&self.conns);
         let tree = Tree {
             expanded: &self.expanded,
+            collapsed: &self.settings.collapsed_folders,
+            conn_folders: &conn_folders,
+            indent: Default::default(),
             selected: self.selected.as_deref(),
             filter: &filter,
             headers: Default::default(),
@@ -2718,7 +2916,12 @@ impl App {
         }
         let out = scroll.show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            for (ci, conn) in self.conns.iter().enumerate() {
+            // Folders first (by name), then connections not in one.
+            for f in &conn_folders {
+                let members: Vec<(usize, &Conn)> = self.conns.iter().enumerate().filter(|(_, c)| c.cfg.folder.as_ref() == Some(f)).collect();
+                tree.conn_folder(ui, f, &members, actions);
+            }
+            for (ci, conn) in self.conns.iter().enumerate().filter(|(_, c)| c.cfg.folder.is_none()) {
                 tree.conn(ui, ci, conn, actions);
             }
             self.saved_section(ui, &filter, actions);
@@ -2959,11 +3162,11 @@ impl App {
     }
 
     fn saved_section(&self, ui: &mut Ui, filter: &str, actions: &mut Vec<Action>) {
-        if self.saved.is_empty() {
+        if self.saved.is_empty() && self.query_folders.is_empty() {
             return;
         }
         ui.add_space(14.0);
-        ui.horizontal(|ui| {
+        let header = ui.horizontal(|ui| {
             ui.add_space(4.0);
             ui.label(RichText::new("Saved queries").size(12.0).color(theme::MUTED()));
             ui.label(RichText::new(self.saved.len().to_string()).size(11.0).color(theme::FAINT()));
@@ -2971,55 +3174,125 @@ impl App {
                 if icon_button(ui, "↗").on_hover_text("Open queries folder in Finder").clicked() {
                     actions.push(Action::OpenQueriesFolder);
                 }
+                if icon_button(ui, "+").on_hover_text("New folder").clicked() {
+                    actions.push(Action::NewFolder(FolderKind::Queries, None));
+                }
             });
         });
+        // Dropping a query on the header takes it out of its folder.
+        let header = header.response.interact(egui::Sense::hover());
+        if let Some(DragItem::Saved(id)) = header.dnd_hover_payload::<DragItem>().as_deref()
+            && id.contains('/')
+        {
+            drop_highlight(ui, &header);
+        }
+        if let Some(DragItem::Saved(id)) = header.dnd_release_payload::<DragItem>().as_deref() {
+            actions.push(Action::MoveSaved(id.clone(), None));
+        }
         ui.add_space(4.0);
         let active_saved = self.tabs.get(self.active).and_then(|t| match &t.kind {
             TabKind::Console(c) => c.saved_id.clone(),
             TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
         });
-        for (i, q) in self.saved.iter().enumerate() {
-            if !filter.is_empty() && !q.name.to_lowercase().contains(filter) {
+        let matches = |q: &SavedQuery| filter.is_empty() || q.name.to_lowercase().contains(filter);
+        for f in &self.query_folders {
+            let members: Vec<(usize, &SavedQuery)> =
+                self.saved.iter().enumerate().filter(|(_, q)| q.folder.as_ref() == Some(f) && matches(q)).collect();
+            if !filter.is_empty() && members.is_empty() {
                 continue;
             }
-            let conn = q.connection.as_deref().and_then(|id| self.conn_index(id)).map(|ci| self.conns[ci].cfg.display_name());
+            let key = FolderKind::Queries.key(f);
+            let open = !filter.is_empty() || !self.settings.collapsed_folders.contains(&key);
             let resp = widgets::tree_row(
                 ui,
                 TreeRow {
                     depth: 0,
-                    open: None,
-                    icon: Icon::Query,
-                    label: &q.name,
+                    open: Some(open),
+                    icon: Icon::Folder,
+                    label: f,
                     label_color: theme::TEXT(),
-                    detail: conn.as_deref(),
-                    selected: active_saved.as_ref() == Some(&q.id),
+                    detail: Some(&members.len().to_string()),
+                    selected: false,
                 },
             );
             if resp.clicked() {
-                actions.push(Action::OpenSaved(i));
+                actions.push(Action::Toggle(key));
             }
-            let preview: String = q.sql.lines().take(12).collect::<Vec<_>>().join("\n");
-            resp.on_hover_text(RichText::new(preview).monospace().size(11.5)).context_menu(|ui| {
-                menu_layout(ui);
-                if crate::icons::menu_item(ui, Svg::Terminal, "Open", true).clicked() {
-                    actions.push(Action::OpenSaved(i));
-                    ui.close();
+            if let Some(DragItem::Saved(id)) = resp.dnd_hover_payload::<DragItem>().as_deref()
+                && members.iter().all(|(_, q)| &q.id != id)
+            {
+                drop_highlight(ui, &resp);
+            }
+            if let Some(DragItem::Saved(id)) = resp.dnd_release_payload::<DragItem>().as_deref() {
+                actions.push(Action::MoveSaved(id.clone(), Some(f.clone())));
+            }
+            resp.context_menu(|ui| folder_menu(ui, FolderKind::Queries, f, actions));
+            if open {
+                for (i, q) in members {
+                    self.saved_row(ui, 1, i, q, active_saved.as_deref(), actions);
                 }
-                if crate::icons::menu_item(ui, Svg::Pencil, "Rename…", true).clicked() {
-                    actions.push(Action::RenameSaved(i));
-                    ui.close();
-                }
-                if crate::icons::menu_item(ui, Svg::FolderOpen, "Reveal in Finder", true).clicked() {
-                    actions.push(Action::RevealSaved(i));
-                    ui.close();
-                }
-                ui.separator();
-                if crate::icons::danger_item(ui, Svg::Trash, "Move to Trash").clicked() {
-                    actions.push(Action::DeleteSaved(i));
-                    ui.close();
-                }
-            });
+            }
         }
+        for (i, q) in self.saved.iter().enumerate().filter(|(_, q)| q.folder.is_none() && matches(q)) {
+            self.saved_row(ui, 0, i, q, active_saved.as_deref(), actions);
+        }
+    }
+
+    fn saved_row(&self, ui: &mut Ui, depth: usize, i: usize, q: &SavedQuery, active: Option<&str>, actions: &mut Vec<Action>) {
+        let conn = q.connection.as_deref().and_then(|id| self.conn_index(id)).map(|ci| self.conns[ci].cfg.display_name());
+        let resp = widgets::tree_row_sense(
+            ui,
+            TreeRow {
+                depth,
+                open: None,
+                icon: Icon::Query,
+                label: &q.name,
+                label_color: theme::TEXT(),
+                detail: conn.as_deref(),
+                selected: active == Some(q.id.as_str()),
+            },
+            egui::Sense::click_and_drag(),
+        );
+        if resp.clicked() {
+            actions.push(Action::OpenSaved(i));
+        }
+        resp.dnd_set_drag_payload(DragItem::Saved(q.id.clone()));
+        drag_ghost(ui, &resp, &q.name);
+        // Dropping a query on another one puts it in that one's folder.
+        if let Some(DragItem::Saved(id)) = resp.dnd_hover_payload::<DragItem>().as_deref()
+            && id != &q.id
+        {
+            drop_highlight(ui, &resp);
+        }
+        if let Some(DragItem::Saved(id)) = resp.dnd_release_payload::<DragItem>().as_deref() {
+            actions.push(Action::MoveSaved(id.clone(), q.folder.clone()));
+        }
+        let preview: String = q.sql.lines().take(12).collect::<Vec<_>>().join("\n");
+        resp.on_hover_text(RichText::new(preview).monospace().size(11.5)).context_menu(|ui| {
+            menu_layout(ui);
+            if crate::icons::menu_item(ui, Svg::Terminal, "Open", true).clicked() {
+                actions.push(Action::OpenSaved(i));
+                ui.close();
+            }
+            if crate::icons::menu_item(ui, Svg::Pencil, "Rename…", true).clicked() {
+                actions.push(Action::RenameSaved(i));
+                ui.close();
+            }
+            match move_to_folder_menu(ui, &self.query_folders, q.folder.as_deref()) {
+                Some(FolderPick::To(folder)) => actions.push(Action::MoveSaved(q.id.clone(), folder)),
+                Some(FolderPick::New) => actions.push(Action::NewFolder(FolderKind::Queries, Some(q.id.clone()))),
+                None => {}
+            }
+            if crate::icons::menu_item(ui, Svg::FolderOpen, "Reveal in Finder", true).clicked() {
+                actions.push(Action::RevealSaved(i));
+                ui.close();
+            }
+            ui.separator();
+            if crate::icons::danger_item(ui, Svg::Trash, "Move to Trash").clicked() {
+                actions.push(Action::DeleteSaved(i));
+                ui.close();
+            }
+        });
     }
 
     fn status_bar(&self, ui: &mut Ui, actions: &mut Vec<Action>) {
@@ -3153,6 +3426,12 @@ fn status_style(s: &Status) -> (Color32, String) {
 /// Read-only view of explorer state; interactions are returned as actions.
 struct Tree<'a> {
     expanded: &'a HashSet<String>,
+    /// Folder keys shown closed (folders start open).
+    collapsed: &'a [String],
+    /// Connection folders, for the "Move to folder" menu.
+    conn_folders: &'a [String],
+    /// Extra depth for rows drawn inside a folder.
+    indent: std::cell::Cell<usize>,
     selected: Option<&'a str>,
     filter: &'a str,
     /// Open connection/schema rows as drawn, for the sticky headers.
@@ -3171,7 +3450,8 @@ fn type_ahead_match(rows: &[(String, String)], query: &str) -> Option<usize> {
     labels.iter().position(|l| l.starts_with(&q)).or_else(|| labels.iter().position(|l| l.contains(&q)))
 }
 
-/// An open connection (depth 0) or schema (depth 1) row, where it was drawn.
+/// An open folder, connection or schema row, where it was drawn. Depth is
+/// the row's indent: a connection in a folder is at 1, its schemas at 2.
 struct StickyHeader {
     depth: usize,
     key: String,
@@ -3182,15 +3462,18 @@ struct StickyHeader {
 }
 
 /// Which headers to pin at the top of the explorer for a viewport starting
-/// at `top`: the connection and schema whose rows scrolled out of view
-/// while their contents are still showing.
+/// at `top`: the folder, connection and schema whose rows scrolled out of
+/// view while their contents are still showing.
 fn sticky_headers(headers: &[StickyHeader], top: f32, row: f32) -> Vec<usize> {
-    let mut pinned = Vec::new();
-    for depth in 0..2 {
+    let mut pinned: Vec<usize> = Vec::new();
+    for depth in 0..3 {
         let slot = top + pinned.len() as f32 * row;
-        // Only look inside the pinned connection for its schemas.
+        // Only look inside the last pinned header for the next level.
         let (from, to) = match pinned.last() {
-            Some(&p) => (p + 1, headers[p + 1..].iter().position(|h| h.depth == 0).map_or(headers.len(), |n| p + 1 + n)),
+            Some(&p) => {
+                let d = headers[p].depth;
+                (p + 1, headers[p + 1..].iter().position(|h| h.depth <= d).map_or(headers.len(), |n| p + 1 + n))
+            }
             None => (0, headers.len()),
         };
         let Some(i) = (from..to).rev().find(|&i| headers[i].depth == depth && headers[i].top < slot) else { break };
@@ -3206,11 +3489,14 @@ fn sticky_headers(headers: &[StickyHeader], top: f32, row: f32) -> Vec<usize> {
 
 impl Tree<'_> {
     fn row(&self, ui: &mut Ui, key: &str, depth: usize, expandable: bool, icon: Icon, label: &str, detail: Option<&str>, actions: &mut Vec<Action>) -> (egui::Response, bool) {
-        // While searching, connections and schemas show their matches open.
-        let searching = !self.filter.is_empty() && (key.starts_with("c/") || key.starts_with("s/"));
-        let open = searching || self.expanded.contains(key);
-        let header_depth = if key.starts_with("c/") { Some(0) } else if key.starts_with("s/") { Some(1) } else { None };
-        let resp = widgets::tree_row(
+        let depth = depth + self.indent.get();
+        let folder = key.starts_with("fc/");
+        // While searching, folders, connections and schemas show their matches open.
+        let searching = !self.filter.is_empty() && (folder || key.starts_with("c/") || key.starts_with("s/"));
+        let open = searching || if folder { !self.collapsed.iter().any(|k| k == key) } else { self.expanded.contains(key) };
+        let header_depth = (folder || key.starts_with("c/") || key.starts_with("s/")).then_some(depth);
+        let sense = if key.starts_with("c/") { egui::Sense::click_and_drag() } else { egui::Sense::click() };
+        let resp = widgets::tree_row_sense(
             ui,
             TreeRow {
                 depth,
@@ -3221,6 +3507,7 @@ impl Tree<'_> {
                 detail,
                 selected: self.selected == Some(key),
             },
+            sense,
         );
         if let Some(depth) = header_depth.filter(|_| open) {
             self.headers.borrow_mut().push(StickyHeader {
@@ -3245,6 +3532,32 @@ impl Tree<'_> {
         (resp, open)
     }
 
+    fn note(&self, ui: &mut Ui, depth: usize, text: &str, color: Color32) {
+        widgets::tree_note(ui, depth + self.indent.get(), text, color);
+    }
+
+    /// A connection folder and, when open, its connections.
+    fn conn_folder(&self, ui: &mut Ui, name: &str, members: &[(usize, &Conn)], actions: &mut Vec<Action>) {
+        let key = FolderKind::Conns.key(name);
+        let (resp, open) = self.row(ui, &key, 0, true, Icon::Folder, name, Some(&members.len().to_string()), actions);
+        if let Some(DragItem::Conn(id)) = resp.dnd_hover_payload::<DragItem>().as_deref()
+            && members.iter().all(|(_, c)| &c.cfg.id != id)
+        {
+            drop_highlight(ui, &resp);
+        }
+        if let Some(DragItem::Conn(id)) = resp.dnd_release_payload::<DragItem>().as_deref() {
+            actions.push(Action::MoveConn(id.clone(), Some(name.to_string())));
+        }
+        resp.context_menu(|ui| folder_menu(ui, FolderKind::Conns, name, actions));
+        if open {
+            self.indent.set(self.indent.get() + 1);
+            for &(ci, conn) in members {
+                self.conn(ui, ci, conn, actions);
+            }
+            self.indent.set(self.indent.get() - 1);
+        }
+    }
+
     fn conn(&self, ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
         let key = format!("c/{}", conn.cfg.id);
         let (dot, _) = status_style(&conn.status);
@@ -3258,19 +3571,30 @@ impl Tree<'_> {
         if resp.clicked() && !open && matches!(conn.status, Status::Disconnected | Status::Failed(_)) {
             actions.push(Action::Connect(ci));
         }
+        resp.dnd_set_drag_payload(DragItem::Conn(conn.cfg.id.clone()));
+        drag_ghost(ui, &resp, &name);
+        // Dropping a connection on another one puts it in that one's folder.
+        if let Some(DragItem::Conn(id)) = resp.dnd_hover_payload::<DragItem>().as_deref()
+            && id != &conn.cfg.id
+        {
+            drop_highlight(ui, &resp);
+        }
+        if let Some(DragItem::Conn(id)) = resp.dnd_release_payload::<DragItem>().as_deref() {
+            actions.push(Action::MoveConn(id.clone(), conn.cfg.folder.clone()));
+        }
         let resp = resp.on_hover_text(format!("{}@{}:{}/{}", conn.cfg.user, conn.cfg.host, conn.cfg.port, conn.cfg.database));
         demo_open_menu(ui, "RGRIP_DEMO_CONN_MENU", ci, &resp);
-        resp.context_menu(|ui| conn_menu(ui, ci, conn, actions));
+        resp.context_menu(|ui| conn_menu(ui, ci, conn, self.conn_folders, actions));
         if !open {
             return;
         }
         match &conn.status {
             Status::Disconnected | Status::Connecting => {}
-            Status::Failed(e) => widgets::tree_note(ui, 1, e, theme::ERROR()),
+            Status::Failed(e) => self.note(ui, 1, e, theme::ERROR()),
             Status::Connected(_) => match &conn.schemas {
                 None => actions.push(Action::LoadSchemas(ci)),
-                Some(Load::Loading) => widgets::tree_note(ui, 1, "loading…", theme::FAINT()),
-                Some(Load::Failed(e)) => widgets::tree_note(ui, 1, e, theme::ERROR()),
+                Some(Load::Loading) => self.note(ui, 1, "loading…", theme::FAINT()),
+                Some(Load::Failed(e)) => self.note(ui, 1, e, theme::ERROR()),
                 Some(Load::Ready(list)) if !self.filter.is_empty() && !conn.catalog.tables.is_empty() => {
                     // Search every schema (not just expanded ones) via the catalog.
                     let mut any = false;
@@ -3293,7 +3617,7 @@ impl Tree<'_> {
                         }
                     }
                     if !any {
-                        widgets::tree_note(ui, 1, "no matching tables", theme::FAINT());
+                        self.note(ui, 1, "no matching tables", theme::FAINT());
                     }
                 }
                 Some(Load::Ready(list)) => {
@@ -3328,8 +3652,8 @@ impl Tree<'_> {
         }
         match conn.tables.get(schema) {
             None => actions.push(Action::LoadTables(ci, schema.to_string())),
-            Some(Load::Loading) => widgets::tree_note(ui, 2, "loading…", theme::FAINT()),
-            Some(Load::Failed(e)) => widgets::tree_note(ui, 2, e, theme::ERROR()),
+            Some(Load::Loading) => self.note(ui, 2, "loading…", theme::FAINT()),
+            Some(Load::Failed(e)) => self.note(ui, 2, e, theme::ERROR()),
             Some(Load::Ready(tables)) => {
                 let mut shown = 0;
                 for t in tables.iter().filter(|t| self.filter.is_empty() || t.name.to_lowercase().contains(self.filter)) {
@@ -3338,7 +3662,7 @@ impl Tree<'_> {
                 }
                 if shown == 0 {
                     let msg = if tables.is_empty() { "no tables" } else { "no matches" };
-                    widgets::tree_note(ui, 2, msg, theme::FAINT());
+                    self.note(ui, 2, msg, theme::FAINT());
                 }
             }
         }
@@ -3389,8 +3713,8 @@ impl Tree<'_> {
         }
         match conn.columns.get(&(schema.to_string(), t.name.clone())) {
             None => actions.push(Action::LoadColumns(ci, schema.to_string(), t.name.clone())),
-            Some(Load::Loading) => widgets::tree_note(ui, 3, "loading…", theme::FAINT()),
-            Some(Load::Failed(e)) => widgets::tree_note(ui, 3, e, theme::ERROR()),
+            Some(Load::Loading) => self.note(ui, 3, "loading…", theme::FAINT()),
+            Some(Load::Failed(e)) => self.note(ui, 3, e, theme::ERROR()),
             Some(Load::Ready(cols)) => {
                 for c in cols {
                     let key = format!("{key}/{}", c.name);
@@ -3432,7 +3756,7 @@ pub(crate) fn menu_layout(ui: &mut Ui) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
 }
 
-fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
+fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, folders: &[String], actions: &mut Vec<Action>) {
     menu_layout(ui);
     if crate::icons::menu_item(ui, Svg::Terminal, "New console", true).clicked() {
         actions.push(Action::NewConsole(ci));
@@ -3480,12 +3804,39 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, actions: &mut Vec<Action>) {
         });
     })
     .on_hover_text("Tint this connection's tabs (e.g. red for production)");
+    match move_to_folder_menu(ui, folders, conn.cfg.folder.as_deref()) {
+        Some(FolderPick::To(folder)) => actions.push(Action::MoveConn(conn.cfg.id.clone(), folder)),
+        Some(FolderPick::New) => actions.push(Action::NewFolder(FolderKind::Conns, Some(conn.cfg.id.clone()))),
+        None => {}
+    }
     if crate::icons::menu_item(ui, Svg::Pencil, "Edit…", true).clicked() {
         actions.push(Action::Edit(ci));
         ui.close();
     }
     if crate::icons::danger_item(ui, Svg::Trash, "Delete").clicked() {
         actions.push(Action::Delete(ci));
+        ui.close();
+    }
+}
+
+/// Right-click menu of a folder row.
+fn folder_menu(ui: &mut Ui, kind: FolderKind, name: &str, actions: &mut Vec<Action>) {
+    menu_layout(ui);
+    if crate::icons::menu_item(ui, Svg::Pencil, "Rename…", true).clicked() {
+        actions.push(Action::RenameFolder(kind, name.to_string()));
+        ui.close();
+    }
+    if kind == FolderKind::Queries && crate::icons::menu_item(ui, Svg::FolderOpen, "Reveal in Finder", true).clicked() {
+        actions.push(Action::RevealQueryFolder(name.to_string()));
+        ui.close();
+    }
+    ui.separator();
+    let (label, hover) = match kind {
+        FolderKind::Conns => ("Remove folder", "The connections stay, at the top level"),
+        FolderKind::Queries => ("Remove folder", "The queries stay, moved to the top level"),
+    };
+    if crate::icons::danger_item(ui, Svg::Trash, label).on_hover_text(hover).clicked() {
+        actions.push(Action::DeleteFolder(kind, name.to_string()));
         ui.close();
     }
 }
@@ -5224,6 +5575,8 @@ impl App {
         let title = match prompt.target {
             NameTarget::NewFrom(_) => "Save query",
             NameTarget::Rename(_) => "Rename query",
+            NameTarget::NewFolder(..) => "New folder",
+            NameTarget::RenameFolder(..) => "Rename folder",
         };
         let mut done = false;
         let mut cancel = false;
@@ -5277,7 +5630,7 @@ impl App {
                         Some((title, c, conn)) => config::create_query(&name, &c.sql, Some(conn), c.database.clone(), c.picked_schemas()).map(|q| {
                             c.saved_id = Some(q.id.clone());
                             *title = q.name.clone();
-                            q.name
+                            format!("Saved “{}”", q.name)
                         }),
                         None => Err("The console was closed".into()),
                     }
@@ -5285,13 +5638,29 @@ impl App {
                 NameTarget::Rename(id) => match self.saved.iter().find(|q| q.id == id).cloned() {
                     Some(q) => config::rename_query(&q, &name).map(|r| {
                         self.relink(&id, Some((&r.id, &r.name)));
-                        r.name
+                        format!("Saved “{}”", r.name)
                     }),
                     None => Err("The query no longer exists".into()),
                 },
+                NameTarget::NewFolder(FolderKind::Conns, item) => {
+                    if let Some(id) = item {
+                        self.apply(Action::MoveConn(id, Some(name.clone())));
+                    }
+                    Ok(format!("Moved to “{name}”"))
+                }
+                NameTarget::NewFolder(FolderKind::Queries, item) => config::create_query_folder(&name).map(|folder| {
+                    match item {
+                        Some(id) => {
+                            self.apply(Action::MoveSaved(id, Some(folder.clone())));
+                            format!("Moved to “{folder}”")
+                        }
+                        None => format!("Created “{folder}”"),
+                    }
+                }),
+                NameTarget::RenameFolder(kind, old) => self.rename_folder(kind, &old, &name).map(|new| format!("Renamed to “{new}”")),
             };
             match result {
-                Ok(saved_as) => self.toast = Some((format!("Saved “{saved_as}”"), theme::OK(), Instant::now())),
+                Ok(message) => self.toast = Some((message, theme::OK(), Instant::now())),
                 Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
             }
             self.reload_queries();
@@ -5305,6 +5674,7 @@ impl App {
 
 impl App {
     fn dialog_ui(&mut self, ctx: &egui::Context) {
+        let folders = conn_folders(&self.conns);
         let Some(d) = &mut self.dialog else { return };
         let mut test = false;
         let mut save = false;
@@ -5347,7 +5717,7 @@ impl App {
                 ui.allocate_ui_with_layout(body, Layout::top_down(Align::Min), |ui| {
                     ui.set_min_size(body);
                     match d.tab {
-                        DialogTab::General => general_form(ui, d),
+                        DialogTab::General => general_form(ui, d, &folders),
                         DialogTab::Ssl => ssl_form(ui, d),
                         DialogTab::Ssh => ssh_form(ui, d),
                     }
@@ -5394,6 +5764,8 @@ impl App {
             self.worker.send(Cmd::Test(d.cfg.clone()));
         }
         if save {
+            let folder = d.folder.trim();
+            d.cfg.folder = (!folder.is_empty()).then(|| folder.to_string());
             let cfg = d.cfg.clone();
             self.dialog = None;
             match self.conn_index(&cfg.id) {
@@ -5458,6 +5830,29 @@ fn field(ui: &mut Ui, label: &str, edit: TextEdit<'_>) {
     ui.end_row();
 }
 
+/// Folder name, typed or picked from the folders in use.
+fn folder_field(ui: &mut Ui, folder: &mut String, folders: &[String]) {
+    ui.label(RichText::new("Folder").color(theme::MUTED()));
+    ui.horizontal(|ui| {
+        let button_w = 28.0;
+        let w = FIELD_WIDTH - button_w - ui.spacing().item_spacing.x - 2.0 * FIELD_PAD as f32;
+        ui.add(TextEdit::singleline(folder).hint_text(hint("None")).desired_width(w).margin(Margin::symmetric(FIELD_PAD, 5)));
+        ui.add_enabled_ui(!folders.is_empty(), |ui| {
+            ui.menu_button("▾", |ui| {
+                for f in folders {
+                    if ui.button(f).clicked() {
+                        *folder = f.clone();
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Existing folders");
+        });
+    });
+    ui.end_row();
+}
+
 /// Path field with a "…" button that opens a native file picker.
 fn file_field(ui: &mut Ui, label: &str, path: &mut String, placeholder: &str) {
     ui.label(RichText::new(label).color(theme::MUTED()));
@@ -5489,7 +5884,7 @@ fn note(ui: &mut Ui, text: &str) {
 
 const COLOR_HINT: &str = "Tint this connection's tabs (e.g. red for production)";
 
-fn general_form(ui: &mut Ui, d: &mut Dialog) {
+fn general_form(ui: &mut Ui, d: &mut Dialog, folders: &[String]) {
     form_grid(ui, "conn-url", |ui| {
         let edit = TextEdit::singleline(&mut d.url).hint_text(hint("postgres://user:pass@host:5432/db"));
         ui.label(RichText::new("URL").color(theme::MUTED()));
@@ -5517,6 +5912,7 @@ fn general_form(ui: &mut Ui, d: &mut Dialog) {
     form_grid(ui, "conn-general", |ui| {
         let placeholder = format!("{}@{}", d.cfg.database, d.cfg.host);
         field(ui, "Name", TextEdit::singleline(&mut d.cfg.name).hint_text(hint(&placeholder)));
+        folder_field(ui, &mut d.folder, folders);
         field(ui, "Host", TextEdit::singleline(&mut d.cfg.host));
         field(ui, "Port", TextEdit::singleline(&mut d.port));
         field(ui, "Database", TextEdit::singleline(&mut d.cfg.database));
@@ -5862,6 +6258,12 @@ mod tests {
         assert_eq!(sticky_headers(&headers, 600.0, row), [0, 2], "inside schema B");
         assert_eq!(sticky_headers(&headers, 860.0, row), [0], "schema B nearly done: only the connection");
         assert_eq!(sticky_headers(&headers, 1000.0, row), [3], "second connection");
+
+        // folder at 0 holding a conn (1) with schema A (2); then a top-level conn.
+        let headers = [h(0, 0.0), h(1, 25.0), h(2, 50.0), h(0, 900.0), h(1, 925.0)];
+        assert_eq!(sticky_headers(&headers, 200.0, row), [0, 1, 2], "inside a schema in a folder");
+        assert_eq!(sticky_headers(&headers, 860.0, row), [0], "folder nearly done: only the folder");
+        assert_eq!(sticky_headers(&headers, 1000.0, row), [3, 4], "top-level connection and its schema");
     }
 
     #[test]

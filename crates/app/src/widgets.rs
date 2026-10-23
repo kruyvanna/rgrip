@@ -21,6 +21,8 @@ pub enum Icon {
     Function,
     /// Saved query (a small document).
     Query,
+    /// Explorer folder.
+    Folder,
     /// Generated spatial SQL (a globe).
     Globe,
     /// Appearance: follow the system (a monitor).
@@ -90,6 +92,15 @@ pub fn paint_icon_tinted(p: &Painter, c: Pos2, icon: Icon, tint: Option<Color32>
             for dy in [-1.5, 1.0] {
                 p.line_segment([pos2(r.left() + 2.2, c.y + dy), pos2(r.right() - 2.2, c.y + dy)], thin(theme::MUTED()));
             }
+        }
+        Icon::Folder => {
+            // Body with a tab on its top-left edge.
+            let r = Rect::from_center_size(c + vec2(0.0, 0.8), vec2(12.5, 9.0));
+            let s = thin(theme::MUTED());
+            p.rect_stroke(r, CornerRadius::same(2), s, StrokeKind::Inside);
+            p.line_segment([pos2(r.left() + 0.6, r.top()), pos2(r.left() + 1.6, r.top() - 1.8)], s);
+            p.line_segment([pos2(r.left() + 1.6, r.top() - 1.8), pos2(r.left() + 4.6, r.top() - 1.8)], s);
+            p.line_segment([pos2(r.left() + 4.6, r.top() - 1.8), pos2(r.left() + 5.8, r.top())], s);
         }
         Icon::Globe => {
             let s = thin(color_or(theme::GEO()));
@@ -209,7 +220,12 @@ pub struct TreeRow<'a> {
 pub const ROW_HEIGHT: f32 = 24.0;
 
 pub fn tree_row(ui: &mut Ui, row: TreeRow<'_>) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    tree_row_sense(ui, row, Sense::click())
+}
+
+/// A tree row that can also be dragged (`Sense::click_and_drag()`).
+pub fn tree_row_sense(ui: &mut Ui, row: TreeRow<'_>, sense: Sense) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), sense);
     if !ui.is_rect_visible(rect) {
         return resp;
     }

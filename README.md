@@ -142,7 +142,7 @@ cargo test
 <details>
 <summary>Configuration</summary>
 
-Connections and saved queries are stored in `~/Library/Application Support/dev.rgrip.rgrip/` (`connections.toml`, and `.sql` files under `queries/`).
+Connections and saved queries are stored in `~/Library/Application Support/dev.rgrip.rgrip/` (`connections.toml`, and `.sql` files under `queries/`, one level of subfolders for query folders).
 
 Passwords (database, SSH password and key passphrase) are stored in the macOS Keychain under the service `dev.rgrip.rgrip`, not in `connections.toml`. Older plain-text passwords are moved to the Keychain on first launch. If the Keychain is unavailable, rgrip shows a notice and keeps them in the file (mode 0600).
 
