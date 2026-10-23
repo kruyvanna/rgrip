@@ -2741,7 +2741,7 @@ impl App {
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 ui.painter().rect_filled(rect, 0.0, theme::BG());
                 if slot + 1 == pinned.len() {
-                    ui.painter().hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, theme::BORDER()));
+                    ui.painter().hline(rect.x_range(), rect.bottom(), Stroke::new(1.0_f32, theme::BORDER()));
                 }
                 let resp = widgets::tree_row(
                     ui,
@@ -2828,7 +2828,7 @@ impl App {
             .frame(Frame::new().fill(theme::BG()).inner_margin(Margin { left: 0, right: 10, top: 0, bottom: 0 }))
             .show(ctx, |ui| {
                 let bar = ui.max_rect();
-                ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, theme::BORDER()));
+                ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0_f32, theme::BORDER()));
                 // Registered first so the buttons below sit on top of it.
                 let resp = ui.interact(bar, Id::new("titlebar-drag"), Sense::click_and_drag());
                 if resp.drag_started() {
@@ -3103,7 +3103,7 @@ fn appearance_switch(ui: &mut Ui, current: ThemeChoice, width: f32) -> Option<Th
         let selected = current == choice;
         if selected {
             ui.painter().rect_filled(seg, 5.0, theme::SURFACE());
-            ui.painter().rect_stroke(seg, 5.0, Stroke::new(1.0, theme::BORDER()), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(seg, 5.0, Stroke::new(1.0_f32, theme::BORDER()), egui::StrokeKind::Inside);
         } else if resp.hovered() {
             ui.painter().rect_filled(seg, 5.0, theme::SELECTED().gamma_multiply(0.5));
         }
@@ -3130,7 +3130,7 @@ fn theme_row(ui: &mut Ui, t: &theme::Palette, selected: bool, width: f32) -> egu
     }
     let swatch = egui::Rect::from_min_size(egui::pos2(rect.left() + 6.0, rect.center().y - 7.0), egui::vec2(26.0, 14.0));
     p.rect_filled(swatch, 4.0, t.bg);
-    p.rect_stroke(swatch, 4.0, Stroke::new(1.0, theme::BORDER()), egui::StrokeKind::Inside);
+    p.rect_stroke(swatch, 4.0, Stroke::new(1.0_f32, theme::BORDER()), egui::StrokeKind::Inside);
     p.circle_filled(swatch.center() - egui::vec2(4.5, 0.0), 3.5, t.accent);
     p.circle_filled(swatch.center() + egui::vec2(4.5, 0.0), 3.5, t.text);
     let color = if selected { theme::TEXT() } else { theme::MUTED() };
@@ -3531,7 +3531,7 @@ impl App {
                     });
             });
         let rect = ui.available_rect_before_wrap();
-        ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, theme::BORDER()));
+        ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0_f32, theme::BORDER()));
     }
 
     fn tab_content(&mut self, ui: &mut Ui) -> Option<TabAction> {
@@ -3659,7 +3659,7 @@ fn tab_button(
         None => fill,
     };
     painter.rect_filled(rect, 0.0, fill);
-    painter.vline(rect.right() - 0.5, rect.y_range().shrink(9.0), Stroke::new(1.0, theme::BORDER()));
+    painter.vline(rect.right() - 0.5, rect.y_range().shrink(9.0), Stroke::new(1.0_f32, theme::BORDER()));
     // The active tab is underlined: the connection's color, else the accent.
     if active {
         let bar = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 3.0), rect.right_bottom());
@@ -4938,7 +4938,7 @@ impl App {
         let catalog = self.tabs.get(self.active).and_then(|t| self.conns.iter().find(|c| c.cfg.id == t.conn)).map(|c| c.catalog.clone()).unwrap_or_default();
         let (mut save, mut close, mut reset) = (false, false, false);
         let modal = egui::Modal::new(Id::new("commands-editor"))
-            .frame(Frame::new().fill(theme::SURFACE()).stroke(Stroke::new(1.0, theme::BORDER())).corner_radius(12).inner_margin(Margin::same(20)))
+            .frame(Frame::new().fill(theme::SURFACE()).stroke(Stroke::new(1.0_f32, theme::BORDER())).corner_radius(12).inner_margin(Margin::same(20)))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 80.0).clamp(760.0, 1180.0));
                 ui.label(RichText::new("Slash commands").heading().color(theme::TEXT()));
@@ -5043,7 +5043,7 @@ impl App {
                             ui.vertical(|ui| {
                                 ui.set_width(half);
                                 field_label(ui, "Preview");
-                                Frame::new().fill(theme::BG()).stroke(Stroke::new(1.0, theme::BORDER())).corner_radius(8).inner_margin(Margin::symmetric(8, 5)).show(ui, |ui| {
+                                Frame::new().fill(theme::BG()).stroke(Stroke::new(1.0_f32, theme::BORDER())).corner_radius(8).inner_margin(Margin::symmetric(8, 5)).show(ui, |ui| {
                                     ui.set_width(half - 18.0);
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 0.0;
@@ -5172,7 +5172,7 @@ fn confirm_modal(ctx: &egui::Context, c: &mut Confirm) -> Option<bool> {
             .frame(
                 Frame::new()
                     .fill(theme::SURFACE())
-                    .stroke(Stroke::new(1.0, theme::BORDER()))
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER()))
                     .corner_radius(12)
                     .inner_margin(Margin::same(20)),
             )
@@ -5231,7 +5231,7 @@ impl App {
             .frame(
                 Frame::new()
                     .fill(theme::SURFACE())
-                    .stroke(Stroke::new(1.0, theme::BORDER()))
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER()))
                     .corner_radius(12)
                     .inner_margin(Margin::same(20)),
             )
@@ -5314,7 +5314,7 @@ impl App {
             .frame(
                 Frame::new()
                     .fill(theme::SURFACE())
-                    .stroke(Stroke::new(1.0, theme::BORDER()))
+                    .stroke(Stroke::new(1.0_f32, theme::BORDER()))
                     .corner_radius(12)
                     .inner_margin(Margin::same(22)),
             )
@@ -5638,7 +5638,7 @@ fn toolbar(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
             });
         });
     let rect = ui.available_rect_before_wrap();
-    ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, theme::BORDER()));
+    ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0_f32, theme::BORDER()));
 }
 
 fn segment(ui: &mut Ui, selected: bool, text: &str) -> bool {
