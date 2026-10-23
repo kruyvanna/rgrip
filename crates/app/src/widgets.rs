@@ -215,6 +215,8 @@ pub struct TreeRow<'a> {
     pub label_color: Color32,
     pub detail: Option<&'a str>,
     pub selected: bool,
+    /// Pinned to the top: a small pin at the right edge.
+    pub pinned: bool,
 }
 
 pub const ROW_HEIGHT: f32 = 24.0;
@@ -259,6 +261,10 @@ pub fn tree_row_sense(ui: &mut Ui, row: TreeRow<'_>, sense: Sense) -> Response {
             FontId::proportional(11.5),
             theme::FAINT(),
         );
+    }
+    if row.pinned {
+        let pin = Rect::from_center_size(pos2(rect.right() - 12.0, cy), vec2(11.0, 11.0));
+        crate::icons::paint(ui, crate::icons::Svg::Pin, pin, theme::FAINT());
     }
     resp
 }

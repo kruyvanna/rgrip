@@ -494,6 +494,9 @@ pub struct Settings {
     pub check_updates: bool,
     /// Explorer folders shown closed (row keys); folders start open.
     pub collapsed_folders: Vec<String>,
+    /// Explorer rows pinned to the top of their list (row keys: connections
+    /// and folders).
+    pub pinned: Vec<String>,
 }
 
 impl Default for Settings {
@@ -504,6 +507,7 @@ impl Default for Settings {
             light_theme: "rgrip Light".into(),
             check_updates: true,
             collapsed_folders: Vec::new(),
+            pinned: Vec::new(),
         }
     }
 }
@@ -604,7 +608,7 @@ mod tests {
         );
         let back: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
-        let s = Settings { collapsed_folders: vec!["fc/Prod".into()], ..Settings::default() };
+        let s = Settings { collapsed_folders: vec!["fc/Prod".into()], pinned: vec!["c/local".into(), "fq/Reports".into()], ..Settings::default() };
         let back: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }

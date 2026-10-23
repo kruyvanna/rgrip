@@ -543,6 +543,8 @@ enum Action {
     /// Connections: ungroup them. Queries: move them to the top level.
     DeleteFolder(FolderKind, String),
     RevealQueryFolder(String),
+    /// Pin or unpin a connection or folder row (by key) to the top.
+    TogglePin(String),
     Toggle(String),
     Select(String),
 }
@@ -1495,20 +1497,29 @@ impl App {
             }
         };
         let key = kind.key(&new);
-        if self.forget_folder(kind, old) && !self.settings.collapsed_folders.contains(&key) {
-            self.settings.collapsed_folders.push(key);
+        let (collapsed, pinned) = self.forget_folder(kind, old);
+        for (had, list) in [(collapsed, &mut self.settings.collapsed_folders), (pinned, &mut self.settings.pinned)] {
+            if had && !list.contains(&key) {
+                list.push(key.clone());
+            }
+        }
+        if collapsed || pinned {
             self.save_settings();
         }
         Ok(new)
     }
 
-    /// Drop a folder's collapsed state (deleted or renamed away).
-    fn forget_folder(&mut self, kind: FolderKind, name: &str) -> bool {
+    /// Drop a folder's collapsed and pinned state (deleted or renamed
+    /// away); returns whether it was (collapsed, pinned).
+    fn forget_folder(&mut self, kind: FolderKind, name: &str) -> (bool, bool) {
         let key = kind.key(name);
-        let before = self.settings.collapsed_folders.len();
-        self.settings.collapsed_folders.retain(|k| *k != key);
-        let was = self.settings.collapsed_folders.len() != before;
-        if was {
+        let drop = |list: &mut Vec<String>| {
+            let before = list.len();
+            list.retain(|k| *k != key);
+            list.len() != before
+        };
+        let was = (drop(&mut self.settings.collapsed_folders), drop(&mut self.settings.pinned));
+        if was.0 || was.1 {
             self.save_settings();
         }
         was
@@ -1577,6 +1588,11 @@ impl App {
                 }
                 self.conns.remove(ci);
                 self.save_config();
+                let key = format!("c/{id}");
+                if self.settings.pinned.contains(&key) {
+                    self.settings.pinned.retain(|k| *k != key);
+                    self.save_settings();
+                }
             }
             Action::Refresh(ci) => {
                 self.conns[ci].clear_cache();
@@ -1638,6 +1654,14 @@ impl App {
                 match collapsed.iter().position(|k| *k == key) {
                     Some(i) => _ = collapsed.remove(i),
                     None => collapsed.push(key),
+                }
+                self.save_settings();
+            }
+            Action::TogglePin(key) => {
+                let pinned = &mut self.settings.pinned;
+                match pinned.iter().position(|k| *k == key) {
+                    Some(i) => _ = pinned.remove(i),
+                    None => pinned.push(key),
                 }
                 self.save_settings();
             }
@@ -2900,6 +2924,7 @@ impl App {
         let tree = Tree {
             expanded: &self.expanded,
             collapsed: &self.settings.collapsed_folders,
+            pinned: &self.settings.pinned,
             conn_folders: &conn_folders,
             indent: Default::default(),
             selected: self.selected.as_deref(),
@@ -2916,13 +2941,20 @@ impl App {
         }
         let out = scroll.show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            // Folders first (by name), then connections not in one.
-            for f in &conn_folders {
-                let members: Vec<(usize, &Conn)> = self.conns.iter().enumerate().filter(|(_, c)| c.cfg.folder.as_ref() == Some(f)).collect();
-                tree.conn_folder(ui, f, &members, actions);
-            }
-            for (ci, conn) in self.conns.iter().enumerate().filter(|(_, c)| c.cfg.folder.is_none()) {
-                tree.conn(ui, ci, conn, actions);
+            // Pinned folders and connections first, then folders (by name),
+            // then connections not in one; pinned ones lead inside a folder too.
+            let pinned = |key: String| self.settings.pinned.contains(&key);
+            let conn_pinned = |c: &Conn| pinned(format!("c/{}", c.cfg.id));
+            let loose: Vec<(usize, &Conn)> = self.conns.iter().enumerate().filter(|(_, c)| c.cfg.folder.is_none()).collect();
+            for top in [true, false] {
+                for f in conn_folders.iter().filter(|f| pinned(FolderKind::Conns.key(f)) == top) {
+                    let mut members: Vec<(usize, &Conn)> = self.conns.iter().enumerate().filter(|(_, c)| c.cfg.folder.as_ref() == Some(f)).collect();
+                    members.sort_by_key(|(_, c)| !conn_pinned(c));
+                    tree.conn_folder(ui, f, &members, actions);
+                }
+                for &(ci, conn) in loose.iter().filter(|(_, c)| conn_pinned(c) == top) {
+                    tree.conn(ui, ci, conn, actions);
+                }
             }
             self.saved_section(ui, &filter, actions);
         });
@@ -2948,7 +2980,7 @@ impl App {
                 }
                 let resp = widgets::tree_row(
                     ui,
-                    TreeRow { depth: h.depth, open: Some(true), icon: h.icon, label: &h.label, label_color: theme::TEXT(), detail: h.detail.as_deref(), selected: false },
+                    TreeRow { depth: h.depth, open: Some(true), icon: h.icon, label: &h.label, label_color: theme::TEXT(), detail: h.detail.as_deref(), selected: false, pinned: false },
                 );
                 if resp.on_hover_text("Click to collapse").clicked() {
                     actions.push(Action::Toggle(h.key.clone()));
@@ -3195,7 +3227,9 @@ impl App {
             TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
         });
         let matches = |q: &SavedQuery| filter.is_empty() || q.name.to_lowercase().contains(filter);
-        for f in &self.query_folders {
+        let mut folders: Vec<&String> = self.query_folders.iter().collect();
+        folders.sort_by_key(|f| !self.settings.pinned.contains(&FolderKind::Queries.key(f)));
+        for f in folders {
             let members: Vec<(usize, &SavedQuery)> =
                 self.saved.iter().enumerate().filter(|(_, q)| q.folder.as_ref() == Some(f) && matches(q)).collect();
             if !filter.is_empty() && members.is_empty() {
@@ -3203,6 +3237,7 @@ impl App {
             }
             let key = FolderKind::Queries.key(f);
             let open = !filter.is_empty() || !self.settings.collapsed_folders.contains(&key);
+            let pinned = self.settings.pinned.contains(&key);
             let resp = widgets::tree_row(
                 ui,
                 TreeRow {
@@ -3213,6 +3248,7 @@ impl App {
                     label_color: theme::TEXT(),
                     detail: Some(&members.len().to_string()),
                     selected: false,
+                    pinned,
                 },
             );
             if resp.clicked() {
@@ -3226,7 +3262,7 @@ impl App {
             if let Some(DragItem::Saved(id)) = resp.dnd_release_payload::<DragItem>().as_deref() {
                 actions.push(Action::MoveSaved(id.clone(), Some(f.clone())));
             }
-            resp.context_menu(|ui| folder_menu(ui, FolderKind::Queries, f, actions));
+            resp.context_menu(|ui| folder_menu(ui, FolderKind::Queries, f, pinned, actions));
             if open {
                 for (i, q) in members {
                     self.saved_row(ui, 1, i, q, active_saved.as_deref(), actions);
@@ -3250,6 +3286,7 @@ impl App {
                 label_color: theme::TEXT(),
                 detail: conn.as_deref(),
                 selected: active == Some(q.id.as_str()),
+                pinned: false,
             },
             egui::Sense::click_and_drag(),
         );
@@ -3428,6 +3465,8 @@ struct Tree<'a> {
     expanded: &'a HashSet<String>,
     /// Folder keys shown closed (folders start open).
     collapsed: &'a [String],
+    /// Row keys pinned to the top.
+    pinned: &'a [String],
     /// Connection folders, for the "Move to folder" menu.
     conn_folders: &'a [String],
     /// Extra depth for rows drawn inside a folder.
@@ -3506,6 +3545,7 @@ impl Tree<'_> {
                 label_color: theme::TEXT(),
                 detail,
                 selected: self.selected == Some(key),
+                pinned: self.pinned.iter().any(|k| k == key),
             },
             sense,
         );
@@ -3548,7 +3588,8 @@ impl Tree<'_> {
         if let Some(DragItem::Conn(id)) = resp.dnd_release_payload::<DragItem>().as_deref() {
             actions.push(Action::MoveConn(id.clone(), Some(name.to_string())));
         }
-        resp.context_menu(|ui| folder_menu(ui, FolderKind::Conns, name, actions));
+        let pinned = self.pinned.contains(&key);
+        resp.context_menu(|ui| folder_menu(ui, FolderKind::Conns, name, pinned, actions));
         if open {
             self.indent.set(self.indent.get() + 1);
             for &(ci, conn) in members {
@@ -3584,7 +3625,8 @@ impl Tree<'_> {
         }
         let resp = resp.on_hover_text(format!("{}@{}:{}/{}", conn.cfg.user, conn.cfg.host, conn.cfg.port, conn.cfg.database));
         demo_open_menu(ui, "RGRIP_DEMO_CONN_MENU", ci, &resp);
-        resp.context_menu(|ui| conn_menu(ui, ci, conn, self.conn_folders, actions));
+        let pinned = self.pinned.contains(&key);
+        resp.context_menu(|ui| conn_menu(ui, ci, conn, self.conn_folders, pinned, actions));
         if !open {
             return;
         }
@@ -3756,7 +3798,16 @@ pub(crate) fn menu_layout(ui: &mut Ui) {
     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
 }
 
-fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, folders: &[String], actions: &mut Vec<Action>) {
+/// "Pin to top" / "Unpin" for a connection or folder row.
+fn pin_item(ui: &mut Ui, key: String, pinned: bool, actions: &mut Vec<Action>) {
+    let label = if pinned { "Unpin" } else { "Pin to top" };
+    if crate::icons::menu_item(ui, Svg::Pin, label, true).clicked() {
+        actions.push(Action::TogglePin(key));
+        ui.close();
+    }
+}
+
+fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, folders: &[String], pinned: bool, actions: &mut Vec<Action>) {
     menu_layout(ui);
     if crate::icons::menu_item(ui, Svg::Terminal, "New console", true).clicked() {
         actions.push(Action::NewConsole(ci));
@@ -3809,6 +3860,7 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, folders: &[String], actions: &
         Some(FolderPick::New) => actions.push(Action::NewFolder(FolderKind::Conns, Some(conn.cfg.id.clone()))),
         None => {}
     }
+    pin_item(ui, format!("c/{}", conn.cfg.id), pinned, actions);
     if crate::icons::menu_item(ui, Svg::Pencil, "Edit…", true).clicked() {
         actions.push(Action::Edit(ci));
         ui.close();
@@ -3820,8 +3872,9 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, folders: &[String], actions: &
 }
 
 /// Right-click menu of a folder row.
-fn folder_menu(ui: &mut Ui, kind: FolderKind, name: &str, actions: &mut Vec<Action>) {
+fn folder_menu(ui: &mut Ui, kind: FolderKind, name: &str, pinned: bool, actions: &mut Vec<Action>) {
     menu_layout(ui);
+    pin_item(ui, kind.key(name), pinned, actions);
     if crate::icons::menu_item(ui, Svg::Pencil, "Rename…", true).clicked() {
         actions.push(Action::RenameFolder(kind, name.to_string()));
         ui.close();
