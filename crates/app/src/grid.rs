@@ -28,6 +28,11 @@ pub struct GridState {
     /// Frozen (pinned left) columns by name, in the order they were frozen.
     /// By name so they survive reloads and re-runs.
     pub frozen: Vec<String>,
+    /// Column order by name, set by dragging headers (empty: as queried).
+    /// Columns not listed follow in result order.
+    pub order: Vec<String>,
+    /// One-shot: drop the table's stored widths, which are kept by position.
+    reset_widths: bool,
     /// Shared vertical offset of the frozen and scrolling halves.
     scroll_y: f32,
     /// One-shot: scroll this row into view (set when the map selects a row).
@@ -199,6 +204,28 @@ fn cell_text(s: &str, max: usize) -> String {
     out
 }
 
+/// Column indexes in display order: `order`'s names first, then the rest as queried.
+fn display_order(columns: &[String], order: &[String]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::with_capacity(columns.len());
+    for name in order {
+        if let Some(c) = columns.iter().position(|c| c == name)
+            && !out.contains(&c)
+        {
+            out.push(c);
+        }
+    }
+    let rest: Vec<usize> = (0..columns.len()).filter(|c| !out.contains(c)).collect();
+    out.extend(rest);
+    out
+}
+
+/// `list` with `item` moved to slot `to` (counted in `list` without `item`).
+fn move_to<T: PartialEq + Clone>(list: &[T], item: &T, to: usize) -> Vec<T> {
+    let mut out: Vec<T> = list.iter().filter(|x| *x != item).cloned().collect();
+    out.insert(to.min(out.len()), item.clone());
+    out
+}
+
 fn column_widths(rs: &ResultSet) -> Vec<f32> {
     rs.columns
         .iter()
@@ -224,9 +251,9 @@ impl GridState {
         self.goto = Some(Goto { query: query.to_string(), highlight: 0, focus: true });
     }
 
-    /// State for a new result: selection and scroll reset, frozen columns kept.
+    /// State for a new result: selection and scroll reset, frozen columns and order kept.
     pub fn fresh(old: &GridState) -> Self {
-        Self { frozen: old.frozen.clone(), ..Default::default() }
+        Self { frozen: old.frozen.clone(), order: old.order.clone(), ..Default::default() }
     }
 
     fn cache(&mut self, rs: &ResultSet) -> &mut Cache {
@@ -281,7 +308,18 @@ pub fn show(
     let demo_menu = state.demo_menu.take();
     // Frozen columns (by name) that exist in this result, in freeze order.
     let frozen: Vec<usize> = state.frozen.iter().filter_map(|n| rs.columns.iter().position(|c| c == n)).collect();
-    let rest: Vec<usize> = (0..rs.columns.len()).filter(|c| !frozen.contains(c)).collect();
+    let rest: Vec<usize> = display_order(&rs.columns, &state.order).into_iter().filter(|c| !frozen.contains(c)).collect();
+    let header_id = |salt: &str, c: usize| id.with(("header", salt, c));
+    // The header being dragged to a new place: (in the frozen half, column).
+    let drag: Option<(bool, usize)> = ui.ctx().dragged_id().and_then(|d| {
+        frozen.iter().map(|&c| (true, c)).chain(rest.iter().map(|&c| (false, c))).find(|&(f, c)| header_id(if f { "frozen" } else { "main" }, c) == d)
+    });
+    // Header cells as laid out, for the drop position: (frozen half, column, rect).
+    let mut headers: Vec<(bool, usize, egui::Rect)> = Vec::new();
+    let mut dropped: Option<(bool, usize)> = None;
+    let reset_widths = std::mem::take(&mut state.reset_widths);
+    let reordered = !state.order.is_empty();
+    let mut reset_order = false;
     let scroll_y = state.scroll_y;
     let scroll_x = state.scroll_x.take();
     let flash_state = state.flash;
@@ -325,6 +363,9 @@ pub fn show(
             for &c in cols {
                 table = table.column(Column::initial(cache.widths[c]).at_least(40.0).clip(true));
             }
+            if reset_widths {
+                table.reset();
+            }
         }
         let out = table
             .header(row_h + 4.0, |mut header| {
@@ -349,8 +390,16 @@ pub fn show(
                         if let Some((c, a)) = flash && c == i {
                             ui.painter().rect_filled(rect, 0.0, theme::ACCENT().gamma_multiply(0.4 * a));
                         }
-                        // The whole cell takes clicks; the lookup icon, added later, sits on top.
-                        let r = ui.interact(rect, id.with(("header", salt, i)), Sense::click());
+                        // The whole cell takes clicks and drags (to reorder); the
+                        // lookup icon, added later, sits on top.
+                        let r = ui.interact(rect, header_id(salt, i), Sense::click_and_drag());
+                        headers.push((gutter, i, rect));
+                        if drag == Some((gutter, i)) {
+                            ui.painter().rect_filled(rect, 0.0, theme::HOVER());
+                        }
+                        if r.drag_stopped() {
+                            dropped = Some((gutter, i));
+                        }
                         ui.add_space(PAD);
                         // The outgoing relation this column is part of: gets a lookup icon.
                         let lookup = source.relations.iter().position(|r| r.outgoing && r.columns.iter().any(|(here, _)| here == name));
@@ -402,6 +451,14 @@ pub fn show(
                             }
                             if crate::icons::menu_item(ui, crate::icons::Svg::Search, "Go to column…  ⌘J", true).clicked() {
                                 open_goto = true;
+                                ui.close();
+                            }
+                            if reordered
+                                && crate::icons::menu_item(ui, crate::icons::Svg::Undo, "Reset column order", true)
+                                    .on_hover_text("Back to the order of the query; drag headers to reorder")
+                                    .clicked()
+                            {
+                                reset_order = true;
                                 ui.close();
                             }
                             ui.separator();
@@ -535,7 +592,8 @@ pub fn show(
 
     let left_w = gutter_w + frozen.iter().map(|&c| cache_widths[c]).sum::<f32>();
     let mut offsets = [scroll_y; 2];
-    ui.horizontal_top(|ui| {
+    let mut main_clip = egui::Rect::NOTHING;
+    let grid_rect = ui.horizontal_top(|ui| {
         let h = ui.available_height();
         ui.allocate_ui_with_layout(egui::vec2(left_w, h), Layout::top_down(Align::Min), |ui| {
             ui.set_width(left_w);
@@ -554,8 +612,78 @@ pub fn show(
             .show(ui, |ui| {
                 // The table stacks header and body: it needs a vertical layout.
                 ui.vertical(|ui| offsets[1] = draw(ui, "main", &rest, false));
+                main_clip = ui.clip_rect();
+                // Dragging a header near an edge scrolls sideways.
+                if drag.is_some_and(|(f, _)| !f)
+                    && let Some(p) = ui.ctx().pointer_hover_pos()
+                {
+                    const EDGE: f32 = 40.0;
+                    let dx = (main_clip.left() + EDGE - p.x).max(0.0) - (p.x - main_clip.right() + EDGE).max(0.0);
+                    if dx != 0.0 {
+                        ui.scroll_with_delta(egui::vec2(dx.clamp(-EDGE, EDGE) * 0.5, 0.0));
+                        ui.ctx().request_repaint();
+                    }
+                }
             });
-    });
+    })
+    .response
+    .rect;
+    let pointer = ui.ctx().pointer_interact_pos();
+    // Where the header `c` would land in its half: the slot among the other
+    // headers, and the x of the gap.
+    let slot = |f: bool, c: usize, x: f32| -> (usize, f32) {
+        let others: Vec<egui::Rect> = headers.iter().filter(|h| h.0 == f && h.1 != c).map(|h| h.2).collect();
+        let k = others.iter().filter(|r| r.center().x < x).count();
+        let gap = others.get(k).map(|r| r.left()).or(others.last().map(|r| r.right())).unwrap_or(x);
+        (k, gap)
+    };
+    if let (Some((f, c)), Some(p)) = (drag, pointer) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        let (_, x) = slot(f, c, p.x);
+        let clip = if f { grid_rect.with_max_x(grid_rect.left() + left_w) } else { main_clip.intersect(grid_rect) };
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, id.with("col-drag")));
+        painter.with_clip_rect(clip.expand(1.0)).vline(x, grid_rect.y_range(), Stroke::new(2.0_f32, theme::ACCENT()));
+        let g = painter.layout_no_wrap(rs.columns[c].clone(), egui::FontId::proportional(12.5), theme::TEXT());
+        let tag = egui::Rect::from_min_size(p + egui::vec2(12.0, -10.0), g.size() + egui::vec2(16.0, 8.0));
+        painter.rect(tag, 4.0, theme::SURFACE(), Stroke::new(1.0_f32, theme::ACCENT()), egui::StrokeKind::Inside);
+        painter.galley(tag.min + egui::vec2(8.0, 4.0), g, theme::TEXT());
+    }
+    if reset_order {
+        state.order.clear();
+        state.reset_widths = true;
+    }
+    if let (Some((f, c)), Some(p)) = (dropped, pointer) {
+        let (k, _) = slot(f, c, p.x);
+        let name = &rs.columns[c];
+        if f {
+            let shown: Vec<String> = frozen.iter().map(|&c| rs.columns[c].clone()).collect();
+            let mut names = move_to(&shown, name, k);
+            names.extend(state.frozen.iter().filter(|n| !shown.contains(n)).cloned());
+            state.frozen = names;
+        } else {
+            let moved = move_to(&rest, &c, k);
+            if moved != rest {
+                // Place it in the full order next to its new neighbour, so
+                // frozen columns keep their spot for when they're unfrozen.
+                let mut all: Vec<usize> = display_order(&rs.columns, &state.order).into_iter().filter(|&x| x != c).collect();
+                let at = match moved.get(k + 1) {
+                    Some(next) => all.iter().position(|x| x == next).unwrap_or(all.len()),
+                    None => moved.get(k.wrapping_sub(1)).and_then(|prev| all.iter().position(|x| x == prev)).map_or(all.len(), |i| i + 1),
+                };
+                all.insert(at, c);
+                state.order = all.iter().map(|&c| rs.columns[c].clone()).collect();
+                // The table keeps widths by position: carry the current ones
+                // over by column and start it afresh.
+                if let Some(cache) = state.cache.as_mut() {
+                    for &(_, col, rect) in headers.iter().filter(|h| !h.0) {
+                        cache.widths[col] = rect.width();
+                    }
+                }
+                state.reset_widths = true;
+            }
+        }
+        ui.ctx().request_repaint();
+    }
     // Whichever half was scrolled leads; the other follows next frame.
     let moved = offsets.iter().copied().find(|y| (y - scroll_y).abs() > 0.5);
     if let Some(y) = moved {
@@ -1152,6 +1280,39 @@ mod tests {
         frame_mods(&ctx, &rs, &mut st, vec![cmd_a], egui::Modifiers::COMMAND);
         assert_eq!(st.selection.len(), 10);
         assert_eq!(rows_tsv(&rs, &[1, 3], true), "id\tname\n1\trow 1\n3\trow 3");
+    }
+
+    #[test]
+    fn drag_header_to_reorder() {
+        let rs = ResultSet {
+            columns: vec!["id".into(), "name".into(), "note".into()],
+            rows: (0..3).map(|i| vec![Some(i.to_string()), Some(format!("row {i}")), None]).collect(),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut st = GridState::default();
+        frame(&ctx, &rs, &mut st, vec![]);
+        // Grab `id` (the first header, right of the row numbers) and drop it past `name`.
+        let y = 20.0;
+        let press = |x, pressed| egui::Event::PointerButton { pos: egui::pos2(x, y), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(&ctx, &rs, &mut st, vec![egui::Event::PointerMoved(egui::pos2(60.0, y))]);
+        frame(&ctx, &rs, &mut st, vec![press(60.0, true)]);
+        for x in [80.0, 120.0, 150.0] {
+            frame(&ctx, &rs, &mut st, vec![egui::Event::PointerMoved(egui::pos2(x, y))]);
+        }
+        frame(&ctx, &rs, &mut st, vec![press(150.0, false)]);
+        assert_eq!(st.order, ["name", "id", "note"]);
+        assert_eq!(display_order(&rs.columns, &st.order), [1, 0, 2]);
+        // Kept for the next result.
+        assert_eq!(GridState::fresh(&st).order, st.order);
+    }
+
+    #[test]
+    fn order_helpers() {
+        let cols: Vec<String> = ["a", "b", "c"].map(String::from).into();
+        assert_eq!(display_order(&cols, &["c".into(), "gone".into()]), [2, 0, 1]);
+        assert_eq!(move_to(&[0, 1, 2], &0, 2), [1, 2, 0]);
+        assert_eq!(move_to(&[0, 1, 2], &2, 0), [2, 0, 1]);
     }
 
     /// One frame with inline editing on; returns the grid's event.
