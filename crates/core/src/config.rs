@@ -119,34 +119,44 @@ pub fn save_connections(connections: &[ConnectionConfig]) -> Result<(), String> 
     save_connections_at(&path, &KeyringStore, connections)
 }
 
+/// Reads the file only: secrets stay in the store until `load_secrets`, so
+/// launching never asks for Keychain access.
 fn load_connections_at(path: &Path, store: &dyn SecretStore) -> Vec<ConnectionConfig> {
     let mut conns = parse_file(path);
-    let mut migrated = false;
-    for c in &mut conns {
-        let id = c.id.clone();
-        for (field, value) in secret_fields(c) {
-            let acct = account(&id, field);
-            if value.is_empty() {
-                match store.get(&acct) {
-                    Ok(Some(v)) => *value = v,
-                    Ok(None) => {}
-                    Err(e) => warn_keychain(&e),
-                }
-            } else {
-                // Plain-text secret from an older file: move it to the store.
-                match store.set(&acct, value) {
-                    Ok(()) => migrated = true,
-                    Err(e) => warn_keychain(&e),
+    // Plain-text secrets from an older file: save moves them to the store.
+    let plain = conns.iter_mut().any(|c| secret_fields(c).iter().any(|(_, v)| !v.is_empty()));
+    if plain {
+        let _ = save_connections_at(path, store, &conns);
+    }
+    conns
+}
+
+/// Fill in a connection's secrets from the store, once (call before
+/// connecting or editing). It stays unloaded if the store fails, so a later
+/// save can't erase what is there.
+pub fn load_secrets(c: &mut ConnectionConfig) {
+    load_secrets_from(&KeyringStore, c)
+}
+
+fn load_secrets_from(store: &dyn SecretStore, c: &mut ConnectionConfig) {
+    if c.secrets_loaded {
+        return;
+    }
+    let id = c.id.clone();
+    let mut ok = true;
+    for (field, value) in secret_fields(c) {
+        if value.is_empty() {
+            match store.get(&account(&id, field)) {
+                Ok(Some(v)) => *value = v,
+                Ok(None) => {}
+                Err(e) => {
+                    warn_keychain(&e);
+                    ok = false;
                 }
             }
         }
     }
-    // Rewrite only to drop secrets whose store write succeeded; save re-checks
-    // each one, so nothing is blanked unless it is safely in the store.
-    if migrated {
-        let _ = save_connections_at(path, store, &conns);
-    }
-    conns
+    c.secrets_loaded = ok;
 }
 
 fn save_connections_at(path: &Path, store: &dyn SecretStore, connections: &[ConnectionConfig]) -> Result<(), String> {
@@ -164,12 +174,15 @@ fn save_connections_at(path: &Path, store: &dyn SecretStore, connections: &[Conn
     }
     let mut out = connections.to_vec();
     for c in &mut out {
-        let id = c.id.clone();
+        let (id, loaded) = (c.id.clone(), c.secrets_loaded);
         for (field, value) in secret_fields(c) {
             let acct = account(&id, field);
             if value.is_empty() {
-                // Cleared in the UI: don't leave a stale secret behind.
-                let _ = store.delete(&acct);
+                // Cleared in the UI: don't leave a stale secret behind. (Blank
+                // because never loaded: the stored one is still wanted.)
+                if loaded {
+                    let _ = store.delete(&acct);
+                }
             } else if let Err(e) = store.set(&acct, value) {
                 // Keep the plain value in the file rather than lose it.
                 warn_keychain(&e);
@@ -789,8 +802,34 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("pw-secret") && !text.contains("kp-secret") && !text.contains("ssh-secret"));
         assert_eq!(store.get("a:password").unwrap().as_deref(), Some("pw-secret"));
-        let back = load_connections_at(&path, &store);
-        assert_eq!((back[0].password.as_str(), back[0].ssh.password.as_str(), back[0].ssh.passphrase.as_str()), ("pw-secret", "ssh-secret", "kp-secret"));
+        let mut back = load_connections_at(&path, &store).remove(0);
+        load_secrets_from(&store, &mut back);
+        assert!(back.secrets_loaded);
+        assert_eq!((back.password.as_str(), back.ssh.password.as_str(), back.ssh.passphrase.as_str()), ("pw-secret", "ssh-secret", "kp-secret"));
+    }
+
+    #[test]
+    fn launch_leaves_secrets_in_store_until_asked() {
+        let (path, store) = (temp_file("lazy"), MemStore::default());
+        save_connections_at(&path, &store, &[secret_conn("a")]).unwrap();
+        // A denied store shows that loading the file doesn't read it.
+        let back = load_connections_at(&path, &MemStore { broken: true, ..Default::default() });
+        assert!(!back[0].secrets_loaded && back[0].password.is_empty());
+        // Saving the unloaded (blank) connection keeps the stored secrets.
+        save_connections_at(&path, &store, &back).unwrap();
+        assert_eq!(store.get("a:password").unwrap().as_deref(), Some("pw-secret"));
+        assert_eq!(store.get("a:ssh_passphrase").unwrap().as_deref(), Some("kp-secret"));
+    }
+
+    #[test]
+    fn failed_secret_load_stays_unloaded() {
+        let (path, store) = (temp_file("lazy-deny"), MemStore::default());
+        save_connections_at(&path, &store, &[secret_conn("a")]).unwrap();
+        let mut c = load_connections_at(&path, &store).remove(0);
+        load_secrets_from(&MemStore { broken: true, ..Default::default() }, &mut c);
+        assert!(!c.secrets_loaded);
+        save_connections_at(&path, &store, &[c]).unwrap();
+        assert_eq!(store.get("a:password").unwrap().as_deref(), Some("pw-secret"));
     }
 
     #[test]
