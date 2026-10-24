@@ -10,6 +10,7 @@ All notable changes to rgrip are documented here. The format is based on
 - Drag a column header to move the column; an accent line shows where it lands, and dragging near an edge scrolls sideways. Frozen columns reorder among themselves. The order is kept across reloads; right-click a header → **Reset column order** to go back to the query's order.
 - Folders in the explorer for connections and saved queries (one level). Right-click → **Move to folder**, drag a row onto a folder (or onto another row to join its folder), or set **Folder** in the connection dialog. Query folders are real subfolders of `queries/`; folders remember whether they're open. Removing a folder keeps what was in it.
 - Right-click a connection or folder → **Pin to top**: pinned folders and connections lead the explorer (and a folder's pinned connections lead the folder; pinned query folders lead Saved queries), marked with a small pin. **Unpin** puts it back in order.
+- Arrow keys in the explorer: after clicking a row (or ↓ from the search field), ↑↓ move the selection, → opens a row or steps into it, ← closes it or steps out to its parent, and Enter opens a table's data (or opens/closes any other row). ↑ on the first row goes back to the search field.
 
 ## [0.0.14-alpha] - 2026-10-22
 

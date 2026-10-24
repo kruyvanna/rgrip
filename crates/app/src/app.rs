@@ -816,14 +816,15 @@ pub struct App {
     /// Keys of expanded explorer nodes.
     expanded: HashSet<String>,
     selected: Option<String>,
-    /// A tree row was clicked last: typing jumps to a matching row.
+    /// A tree row was clicked last: arrow keys move the selection and
+    /// typing jumps to a matching row.
     explorer_active: bool,
     /// Type-ahead buffer and when its last key came in.
     type_ahead: (String, Instant),
-    /// (key, label) of the tree rows drawn last frame, in order.
-    explorer_rows: Vec<(String, String)>,
-    /// A row to scroll into view on the next frame.
-    scroll_to_row: Option<String>,
+    /// The tree rows drawn last frame, in order.
+    explorer_rows: Vec<NavRow>,
+    /// A row to scroll into view on the next frame (`None`: just enough).
+    scroll_to_row: Option<(String, Option<Align>)>,
     /// Slash command editor (Settings), while open.
     commands_editor: Option<CommandsEditor>,
     /// The Import data dialog, while open.
@@ -2917,7 +2918,7 @@ impl App {
             });
         });
         ui.add_space(6.0);
-        ui.add(
+        let search = ui.add(
             TextEdit::singleline(&mut self.filter)
                 .hint_text(hint("Search tables"))
                 .desired_width(f32::INFINITY)
@@ -2936,7 +2937,7 @@ impl App {
             return;
         }
 
-        self.explorer_type_ahead(ui);
+        self.explorer_keys(ui, &search, actions);
         let filter = self.filter.trim().to_lowercase();
         let scroll_to = self.scroll_to_row.take();
         let conn_folders = conn_folders(&self.conns);
@@ -2950,7 +2951,7 @@ impl App {
             filter: &filter,
             headers: Default::default(),
             rows: Default::default(),
-            scroll_to: scroll_to.as_deref(),
+            scroll_to: scroll_to.as_ref().map(|(k, align)| (k.as_str(), *align)),
         };
         let mut scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
         // Debug screenshots: `RGRIP_DEMO_EXPLORER_SCROLL=300` (kept, so the
@@ -3008,10 +3009,18 @@ impl App {
         }
     }
 
-    /// Finder-style type-to-select: while the explorer is active, typed
-    /// characters select the first drawn row that matches and scroll to it.
-    fn explorer_type_ahead(&mut self, ui: &Ui) {
+    /// Keyboard use of the tree while it's active (a row was clicked, or ↓
+    /// from the search field): arrows move and open/close rows, Enter opens,
+    /// and Finder-style typed characters jump to the first matching row.
+    fn explorer_keys(&mut self, ui: &Ui, search: &egui::Response, actions: &mut Vec<Action>) {
         const IDLE: Duration = Duration::from_secs(1);
+        if search.has_focus() && !self.explorer_rows.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
+            search.surrender_focus();
+            self.explorer_active = true;
+            let key = self.explorer_rows[0].key.clone();
+            (self.selected, self.scroll_to_row) = (Some(key.clone()), Some((key, None)));
+            return;
+        }
         let panel = ui.max_rect();
         let outside = ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !panel.contains(p)));
         if outside || ui.ctx().memory(|m| m.focused().is_some()) {
@@ -3019,6 +3028,32 @@ impl App {
         }
         if !self.explorer_active {
             return;
+        }
+        let at = self.selected.as_ref().and_then(|k| self.explorer_rows.iter().position(|r| &r.key == k));
+        let nav = ui.input_mut(|i| {
+            [Key::ArrowDown, Key::ArrowUp, Key::ArrowRight, Key::ArrowLeft, Key::Enter]
+                .into_iter()
+                .filter(|&k| i.consume_key(Modifiers::NONE, k))
+                .last()
+        });
+        match nav.and_then(|k| explorer_nav(&self.explorer_rows, at, k)) {
+            Some(Nav::Select(i)) => {
+                let key = self.explorer_rows[i].key.clone();
+                (self.selected, self.scroll_to_row) = (Some(key.clone()), Some((key, None)));
+            }
+            Some(Nav::Toggle(i)) => {
+                let row = &mut self.explorer_rows[i];
+                actions.push(Action::Toggle(row.key.clone()));
+                if row.open == Some(false) {
+                    actions.extend(row.on_open.take());
+                }
+            }
+            Some(Nav::Enter(i)) => actions.extend(self.explorer_rows[i].on_enter.take()),
+            Some(Nav::ToSearch) => {
+                self.explorer_active = false;
+                search.request_focus();
+            }
+            None => {}
         }
         let (typed, escape) = ui.input(|i| {
             let typed: String = if i.modifiers.command || i.modifiers.ctrl {
@@ -3038,9 +3073,9 @@ impl App {
         buffer.push_str(&typed);
         *at = Instant::now();
         if let Some(i) = type_ahead_match(&self.explorer_rows, buffer) {
-            let key = self.explorer_rows[i].0.clone();
+            let key = self.explorer_rows[i].key.clone();
             self.selected = Some(key.clone());
-            self.scroll_to_row = Some(key);
+            self.scroll_to_row = Some((key, Some(Align::Center)));
         }
     }
 
@@ -3494,17 +3529,71 @@ struct Tree<'a> {
     filter: &'a str,
     /// Open connection/schema rows as drawn, for the sticky headers.
     headers: std::cell::RefCell<Vec<StickyHeader>>,
-    /// (key, label) of every row as drawn, for type-ahead.
-    rows: std::cell::RefCell<Vec<(String, String)>>,
-    /// Scroll this row into view (a type-ahead jump).
-    scroll_to: Option<&'a str>,
+    /// Every row as drawn, for keyboard navigation.
+    rows: std::cell::RefCell<Vec<NavRow>>,
+    /// Scroll this row into view (a keyboard move or type-ahead jump).
+    scroll_to: Option<(&'a str, Option<Align>)>,
+}
+
+/// A tree row as drawn, for keyboard navigation.
+struct NavRow {
+    key: String,
+    label: String,
+    /// Indent, folders included.
+    depth: usize,
+    /// Expandable rows: whether it's open.
+    open: Option<bool>,
+    /// What opening it does besides expanding (connecting).
+    on_open: Option<Action>,
+    /// What Enter does (a table opens its data).
+    on_enter: Option<Action>,
+}
+
+/// A keyboard move in the explorer tree.
+#[derive(Debug, PartialEq)]
+enum Nav {
+    Select(usize),
+    Toggle(usize),
+    Enter(usize),
+    /// ↑ on the first row: back to the search field.
+    ToSearch,
+}
+
+/// What `key` does with row `at` selected: ↑↓ move, → opens a row (or
+/// steps into an open one), ← closes it (or steps out to its parent),
+/// Enter opens a table, else toggles.
+fn explorer_nav(rows: &[NavRow], at: Option<usize>, key: Key) -> Option<Nav> {
+    let last = rows.len().checked_sub(1)?;
+    let Some(i) = at else {
+        return match key {
+            Key::ArrowDown => Some(Nav::Select(0)),
+            Key::ArrowUp => Some(Nav::Select(last)),
+            _ => None,
+        };
+    };
+    let row = &rows[i];
+    match key {
+        Key::ArrowDown => Some(Nav::Select((i + 1).min(last))),
+        Key::ArrowUp if i == 0 => Some(Nav::ToSearch),
+        Key::ArrowUp => Some(Nav::Select(i - 1)),
+        Key::ArrowRight => match row.open {
+            Some(false) => Some(Nav::Toggle(i)),
+            Some(true) => rows.get(i + 1).filter(|r| r.depth > row.depth).map(|_| Nav::Select(i + 1)),
+            None => None,
+        },
+        Key::ArrowLeft if row.open == Some(true) => Some(Nav::Toggle(i)),
+        Key::ArrowLeft => rows[..i].iter().rposition(|r| r.depth < row.depth).map(Nav::Select),
+        Key::Enter if row.on_enter.is_some() => Some(Nav::Enter(i)),
+        Key::Enter => row.open.map(|_| Nav::Toggle(i)),
+        _ => None,
+    }
 }
 
 /// The type-ahead target: the first row whose label starts with `query`,
 /// else the first that contains it (ignoring case).
-fn type_ahead_match(rows: &[(String, String)], query: &str) -> Option<usize> {
+fn type_ahead_match(rows: &[NavRow], query: &str) -> Option<usize> {
     let q = query.to_lowercase();
-    let labels: Vec<String> = rows.iter().map(|(_, l)| l.to_lowercase()).collect();
+    let labels: Vec<String> = rows.iter().map(|r| r.label.to_lowercase()).collect();
     labels.iter().position(|l| l.starts_with(&q)).or_else(|| labels.iter().position(|l| l.contains(&q)))
 }
 
@@ -3578,9 +3667,14 @@ impl Tree<'_> {
                 top: resp.rect.top(),
             });
         }
-        self.rows.borrow_mut().push((key.to_string(), label.to_string()));
-        if self.scroll_to == Some(key) {
-            resp.scroll_to_me(Some(Align::Center));
+        // Rows held open by a search don't toggle: ← steps out of them instead.
+        let toggles = expandable && !searching;
+        self.rows.borrow_mut().push(NavRow { key: key.to_string(), label: label.to_string(), depth, open: toggles.then_some(open), on_open: None, on_enter: None });
+        match self.scroll_to {
+            Some((k, Some(align))) if k == key => resp.scroll_to_me(Some(align)),
+            // Room for the sticky headers above, and a row of context below.
+            Some((k, None)) if k == key => ui.scroll_to_rect(resp.rect.expand2(egui::vec2(0.0, 3.0 * widgets::ROW_HEIGHT)), None),
+            _ => {}
         }
         if resp.clicked() {
             actions.push(Action::Select(key.to_string()));
@@ -3628,8 +3722,11 @@ impl Tree<'_> {
         };
         let name = conn.cfg.display_name();
         let (resp, open) = self.row(ui, &key, 0, true, Icon::Database(dot, theme::conn_color(conn.cfg.color)), &name, detail, actions);
-        if resp.clicked() && !open && matches!(conn.status, Status::Disconnected | Status::Failed(_)) {
-            actions.push(Action::Connect(ci));
+        if matches!(conn.status, Status::Disconnected | Status::Failed(_)) {
+            if resp.clicked() && !open {
+                actions.push(Action::Connect(ci));
+            }
+            self.rows.borrow_mut().last_mut().unwrap().on_open = Some(Action::Connect(ci));
         }
         resp.dnd_set_drag_payload(DragItem::Conn(conn.cfg.id.clone()));
         drag_ghost(ui, &resp, &name);
@@ -3736,6 +3833,7 @@ impl Tree<'_> {
         if resp.double_clicked() {
             actions.push(Action::OpenTable(ci, schema.to_string(), t.name.clone()));
         }
+        self.rows.borrow_mut().last_mut().unwrap().on_enter = Some(Action::OpenTable(ci, schema.to_string(), t.name.clone()));
         resp.context_menu(|ui| {
             menu_layout(ui);
             if crate::icons::menu_item(ui, Svg::Table, "Open data", true).clicked() {
@@ -6311,12 +6409,37 @@ mod tests {
 
     #[test]
     fn explorer_type_ahead_match() {
-        let rows: Vec<(String, String)> = ["public", "customers", "order_items", "orders", "Accounts"].iter().map(|l| (format!("k/{l}"), l.to_string())).collect();
+        let rows: Vec<NavRow> = ["public", "customers", "order_items", "orders", "Accounts"].iter().map(|l| nav_row(l, 0, None)).collect();
         assert_eq!(type_ahead_match(&rows, "o"), Some(2), "first prefix match in tree order");
         assert_eq!(type_ahead_match(&rows, "orders"), Some(3), "a longer buffer narrows it");
         assert_eq!(type_ahead_match(&rows, "acc"), Some(4), "ignores case");
         assert_eq!(type_ahead_match(&rows, "item"), Some(2), "falls back to a substring");
         assert_eq!(type_ahead_match(&rows, "zzz"), None);
+    }
+
+    fn nav_row(label: &str, depth: usize, open: Option<bool>) -> NavRow {
+        NavRow { key: format!("k/{label}"), label: label.to_string(), depth, open, on_open: None, on_enter: None }
+    }
+
+    #[test]
+    fn explorer_keyboard_nav() {
+        // conn (open) > schema (open) > table (closed), then a closed conn.
+        let mut rows = vec![nav_row("conn", 0, Some(true)), nav_row("public", 1, Some(true)), nav_row("orders", 2, Some(false)), nav_row("other", 0, Some(false))];
+        rows[2].on_enter = Some(Action::OpenTable(0, "public".into(), "orders".into()));
+        let nav = |at, key| explorer_nav(&rows, at, key);
+        assert_eq!(nav(None, Key::ArrowDown), Some(Nav::Select(0)), "nothing selected: ↓ starts at the top");
+        assert_eq!(nav(None, Key::ArrowUp), Some(Nav::Select(3)), "…and ↑ at the bottom");
+        assert_eq!(nav(Some(1), Key::ArrowDown), Some(Nav::Select(2)));
+        assert_eq!(nav(Some(3), Key::ArrowDown), Some(Nav::Select(3)), "stays on the last row");
+        assert_eq!(nav(Some(0), Key::ArrowUp), Some(Nav::ToSearch));
+        assert_eq!(nav(Some(2), Key::ArrowRight), Some(Nav::Toggle(2)), "→ opens a closed row");
+        assert_eq!(nav(Some(0), Key::ArrowRight), Some(Nav::Select(1)), "→ on an open row steps into it");
+        assert_eq!(nav(Some(1), Key::ArrowLeft), Some(Nav::Toggle(1)), "← closes an open row");
+        assert_eq!(nav(Some(2), Key::ArrowLeft), Some(Nav::Select(1)), "← on a closed row goes to its parent");
+        assert_eq!(nav(Some(3), Key::ArrowLeft), None, "a top-level row has no parent");
+        assert_eq!(nav(Some(2), Key::Enter), Some(Nav::Enter(2)), "Enter opens a table");
+        assert_eq!(nav(Some(3), Key::Enter), Some(Nav::Toggle(3)), "…and toggles anything else");
+        assert_eq!(explorer_nav(&[], None, Key::ArrowDown), None);
     }
 
     #[test]
