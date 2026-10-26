@@ -4514,7 +4514,7 @@ dependencies = [
 
 [[package]]
 name = "rgrip"
-version = "0.0.14-alpha"
+version = "0.0.15-alpha"
 dependencies = [
  "ab_glyph",
  "earcutr",
@@ -4534,7 +4534,7 @@ dependencies = [
 
 [[package]]
 name = "rgrip-core"
-version = "0.0.14-alpha"
+version = "0.0.15-alpha"
 dependencies = [
  "bytes",
  "csv",
