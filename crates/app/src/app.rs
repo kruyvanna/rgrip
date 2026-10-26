@@ -495,7 +495,7 @@ enum Action {
     Connect(usize),
     Disconnect(usize),
     Edit(usize),
-    /// Copy the connection URL, password included (read from the Keychain).
+    /// Copy the connection URL, password included.
     CopyUrlWithPassword(usize),
     /// Set a connection's tab color (explorer menu).
     SetColor(usize, rgrip_core::ConnColor),
@@ -884,7 +884,7 @@ impl App {
             next_tab: 1,
             dialog: None,
             filter: String::new(),
-            notice: config::take_keychain_warning(),
+            notice: None,
             saved: config::load_queries(),
             query_folders: config::query_folders(),
             name_prompt: None,
@@ -920,23 +920,10 @@ impl App {
         self.tabs.iter_mut().find(|t| t.id == id)
     }
 
-    /// Read a connection's passwords from the Keychain the first time they're
-    /// needed, not at launch, so only connections in use ask for access.
-    fn load_secrets(&mut self, ci: usize) {
-        if !self.conns[ci].cfg.secrets_loaded {
-            config::load_secrets(&mut self.conns[ci].cfg);
-            if let Some(w) = config::take_keychain_warning() {
-                self.notice = Some(w);
-            }
-        }
-    }
-
     fn save_config(&mut self) {
         let cfgs: Vec<_> = self.conns.iter().map(|c| c.cfg.clone()).collect();
         if let Err(e) = config::save_connections(&cfgs) {
             self.notice = Some(format!("Could not save connections: {e}"));
-        } else if let Some(w) = config::take_keychain_warning() {
-            self.notice = Some(w);
         }
     }
 
@@ -1576,7 +1563,6 @@ impl App {
                 self.dialog = Some(Dialog::new(ConnectionConfig::default(), true));
             }
             Action::Connect(ci) => {
-                self.load_secrets(ci);
                 let c = &mut self.conns[ci];
                 c.status = Status::Connecting;
                 c.clear_cache();
@@ -1589,7 +1575,6 @@ impl App {
                 c.clear_cache();
             }
             Action::CopyUrlWithPassword(ci) => {
-                self.load_secrets(ci);
                 self.egui_ctx.copy_text(rgrip_core::conn_string::to_url(&self.conns[ci].cfg, true));
             }
             Action::SetColor(ci, color) => {
@@ -1597,7 +1582,6 @@ impl App {
                 self.save_config();
             }
             Action::Edit(ci) => {
-                self.load_secrets(ci);
                 self.dialog = Some(Dialog::new(self.conns[ci].cfg.clone(), false));
             }
             Action::Delete(ci) => {

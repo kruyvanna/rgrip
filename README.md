@@ -46,7 +46,7 @@ Put one or more tables on a page (A4, A3, Letter, portrait or landscape) and exp
 - Add primary key to tables that have none
 - Related rows across foreign keys, including relations inferred from column names
 - Production safety: colored connections, read-only connections, confirmation before risky statements
-- SSL up to `verify-full`, SSH tunnels, passwords in the macOS Keychain
+- SSL up to `verify-full`, SSH tunnels, passwords saved locally (0600 file)
 - Export to CSV, TSV, JSON, GeoJSON, Markdown, SQL INSERT and SVG; copy rows as an image or for an AI agent
 - Sort query results by clicking a column header
 - Dark, light and system themes, and in-app updates
@@ -144,7 +144,7 @@ cargo test
 
 Connections and saved queries are stored in `~/Library/Application Support/dev.rgrip.rgrip/` (`connections.toml`, and `.sql` files under `queries/`, one level of subfolders for query folders).
 
-Passwords (database, SSH password and key passphrase) are stored in the macOS Keychain under the service `dev.rgrip.rgrip`, not in `connections.toml`. Older plain-text passwords are moved to the Keychain on first launch. If the Keychain is unavailable, rgrip shows a notice and keeps them in the file (mode 0600).
+Passwords (database, SSH password and key passphrase) are stored in plain text in `connections.toml`, which rgrip keeps readable only by you (mode 0600).
 
 </details>
 

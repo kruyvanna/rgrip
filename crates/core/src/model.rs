@@ -140,10 +140,6 @@ pub struct ConnectionConfig {
     /// Explorer folder this connection is listed under (one level).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
-    /// The secrets were read from the credential store (or the connection is
-    /// new). Until then they are blank, and saving must not erase the stored ones.
-    #[serde(skip)]
-    pub secrets_loaded: bool,
 }
 
 impl Default for ConnectionConfig {
@@ -168,7 +164,6 @@ impl Default for ConnectionConfig {
             color: ConnColor::None,
             read_only: false,
             folder: None,
-            secrets_loaded: true,
         }
     }
 }
