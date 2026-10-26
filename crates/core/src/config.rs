@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 struct ConfigFile {
     #[serde(default)]
     connections: Vec<ConnectionConfig>,
+    /// Connection folders, kept even while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    folders: Vec<String>,
 }
 
 pub fn config_path() -> Option<PathBuf> {
@@ -13,29 +16,30 @@ pub fn config_path() -> Option<PathBuf> {
         .map(|d| d.config_dir().join("connections.toml"))
 }
 
-fn parse_file(path: &Path) -> Vec<ConnectionConfig> {
+fn parse_file(path: &Path) -> (Vec<ConnectionConfig>, Vec<String>) {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| toml::from_str::<ConfigFile>(&s).ok())
-        .map(|f| f.connections)
+        .map(|f| (f.connections, f.folders))
         .unwrap_or_default()
 }
 
-pub fn load_connections() -> Vec<ConnectionConfig> {
+/// The connections and the connection folders.
+pub fn load_connections() -> (Vec<ConnectionConfig>, Vec<String>) {
     config_path().map(|p| parse_file(&p)).unwrap_or_default()
 }
 
 /// Passwords are saved in the file too, so it is kept private (0600).
-pub fn save_connections(connections: &[ConnectionConfig]) -> Result<(), String> {
+pub fn save_connections(connections: &[ConnectionConfig], folders: &[String]) -> Result<(), String> {
     let path = config_path().ok_or("no config directory")?;
-    save_connections_at(&path, connections)
+    save_connections_at(&path, connections, folders)
 }
 
-fn save_connections_at(path: &Path, connections: &[ConnectionConfig]) -> Result<(), String> {
+fn save_connections_at(path: &Path, connections: &[ConnectionConfig], folders: &[String]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let text = toml::to_string_pretty(&ConfigFile { connections: connections.to_vec() }).map_err(|e| e.to_string())?;
+    let text = toml::to_string_pretty(&ConfigFile { connections: connections.to_vec(), folders: folders.to_vec() }).map_err(|e| e.to_string())?;
     std::fs::write(path, text).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
@@ -479,7 +483,7 @@ mod tests {
 
         let mut c = f.connections[0].clone();
         c.color = ConnColor::Red;
-        let text = toml::to_string_pretty(&ConfigFile { connections: vec![c] }).unwrap();
+        let text = toml::to_string_pretty(&ConfigFile { connections: vec![c], ..Default::default() }).unwrap();
         assert!(text.contains("color = \"red\""));
         let back: ConfigFile = toml::from_str(&text).unwrap();
         assert_eq!(back.connections[0].color, ConnColor::Red);
@@ -495,7 +499,7 @@ mod tests {
 
         let mut c = f.connections[0].clone();
         c.folder = Some("Prod".into());
-        let text = toml::to_string_pretty(&ConfigFile { connections: vec![c] }).unwrap();
+        let text = toml::to_string_pretty(&ConfigFile { connections: vec![c], ..Default::default() }).unwrap();
         assert!(text.contains("folder = \"Prod\""));
         let back: ConfigFile = toml::from_str(&text).unwrap();
         assert_eq!(back.connections[0].folder.as_deref(), Some("Prod"));
@@ -607,8 +611,10 @@ mod tests {
         let mut c = ConnectionConfig { id: "a".into(), ..Default::default() };
         c.password = "pw-secret".into();
         c.ssh.passphrase = "kp-secret".into();
-        save_connections_at(&path, &[c]).unwrap();
-        let back = parse_file(&path).remove(0);
+        save_connections_at(&path, &[c], &["Empty".into()]).unwrap();
+        let (mut conns, folders) = parse_file(&path);
+        assert_eq!(folders, ["Empty"]);
+        let back = conns.remove(0);
         assert_eq!((back.password.as_str(), back.ssh.passphrase.as_str()), ("pw-secret", "kp-secret"));
         #[cfg(unix)]
         {

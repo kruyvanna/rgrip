@@ -574,9 +574,10 @@ enum DragItem {
     Saved(String),
 }
 
-/// Folder names used by connections, sorted.
-fn conn_folders(conns: &[Conn]) -> Vec<String> {
-    let mut out: Vec<String> = conns.iter().filter_map(|c| c.cfg.folder.clone()).collect();
+/// Connection folders: the saved ones (empty ones too) and those the
+/// connections name, sorted.
+fn conn_folders(conns: &[Conn], saved: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = saved.iter().cloned().chain(conns.iter().filter_map(|c| c.cfg.folder.clone())).collect();
     out.sort_by_key(|f| f.to_lowercase());
     out.dedup();
     out
@@ -792,6 +793,8 @@ enum TabAction {
 pub struct App {
     worker: Worker,
     conns: Vec<Conn>,
+    /// Connection folders, kept even while empty (`connections.toml`).
+    conn_folders: Vec<String>,
     tabs: Vec<Tab>,
     active: usize,
     next_tab: TabId,
@@ -871,6 +874,7 @@ impl App {
         if check_now {
             worker.send(Cmd::CheckUpdate);
         }
+        let (conns, conn_folders) = config::load_connections();
         Self {
             update: if check_now { UpdateState::Checking { manual: false } } else { UpdateState::Idle },
             ctx_close: false,
@@ -878,7 +882,8 @@ impl App {
             egui_ctx: cc.egui_ctx.clone(),
             settings,
             worker,
-            conns: config::load_connections().into_iter().map(Conn::new).collect(),
+            conns: conns.into_iter().map(Conn::new).collect(),
+            conn_folders,
             tabs: Vec::new(),
             active: 0,
             next_tab: 1,
@@ -922,7 +927,8 @@ impl App {
 
     fn save_config(&mut self) {
         let cfgs: Vec<_> = self.conns.iter().map(|c| c.cfg.clone()).collect();
-        if let Err(e) = config::save_connections(&cfgs) {
+        self.conn_folders = conn_folders(&self.conns, &self.conn_folders);
+        if let Err(e) = config::save_connections(&cfgs, &self.conn_folders) {
             self.notice = Some(format!("Could not save connections: {e}"));
         }
     }
@@ -1485,6 +1491,8 @@ impl App {
                 for c in self.conns.iter_mut().filter(|c| c.cfg.folder.as_deref() == Some(old)) {
                     c.cfg.folder = Some(new.to_string());
                 }
+                self.conn_folders.retain(|f| f != old);
+                self.conn_folders.push(new.to_string());
                 self.save_config();
                 new.to_string()
             }
@@ -1760,6 +1768,7 @@ impl App {
                         for c in self.conns.iter_mut().filter(|c| c.cfg.folder.as_deref() == Some(name.as_str())) {
                             c.cfg.folder = None;
                         }
+                        self.conn_folders.retain(|f| f != &name);
                         self.save_config();
                     }
                     FolderKind::Queries => {
@@ -2924,7 +2933,7 @@ impl App {
         self.explorer_keys(ui, &search, actions);
         let filter = self.filter.trim().to_lowercase();
         let scroll_to = self.scroll_to_row.take();
-        let conn_folders = conn_folders(&self.conns);
+        let conn_folders = conn_folders(&self.conns, &self.conn_folders);
         let tree = Tree {
             expanded: &self.expanded,
             collapsed: &self.settings.collapsed_folders,
@@ -2961,6 +2970,20 @@ impl App {
                 }
             }
             self.saved_section(ui, &filter, actions);
+            // Right-click below the rows: add a connection or a folder.
+            let rest = (ui.clip_rect().bottom() - ui.cursor().top()).max(widgets::ROW_HEIGHT);
+            let (_, blank) = ui.allocate_exact_size(egui::vec2(ui.available_width(), rest), egui::Sense::click());
+            blank.context_menu(|ui| {
+                menu_layout(ui);
+                if crate::icons::menu_item(ui, Svg::Plus, "Add Connection…", true).clicked() {
+                    actions.push(Action::NewConnection);
+                    ui.close();
+                }
+                if crate::icons::menu_item(ui, Svg::FolderOpen, "Add Folder…", true).clicked() {
+                    actions.push(Action::NewFolder(FolderKind::Conns, None));
+                    ui.close();
+                }
+            });
         });
         self.explorer_rows = tree.rows.take();
         // Sticky headers: the connection and schema you're scrolling through
@@ -5797,10 +5820,17 @@ impl App {
                     None => Err("The query no longer exists".into()),
                 },
                 NameTarget::NewFolder(FolderKind::Conns, item) => {
-                    if let Some(id) = item {
-                        self.apply(Action::MoveConn(id, Some(name.clone())));
+                    self.conn_folders.push(name.clone());
+                    match item {
+                        Some(id) => {
+                            self.apply(Action::MoveConn(id, Some(name.clone())));
+                            Ok(format!("Moved to “{name}”"))
+                        }
+                        None => {
+                            self.save_config();
+                            Ok(format!("Created “{name}”"))
+                        }
                     }
-                    Ok(format!("Moved to “{name}”"))
                 }
                 NameTarget::NewFolder(FolderKind::Queries, item) => config::create_query_folder(&name).map(|folder| {
                     match item {
@@ -5828,7 +5858,7 @@ impl App {
 
 impl App {
     fn dialog_ui(&mut self, ctx: &egui::Context) {
-        let folders = conn_folders(&self.conns);
+        let folders = conn_folders(&self.conns, &self.conn_folders);
         let Some(d) = &mut self.dialog else { return };
         let mut test = false;
         let mut save = false;
