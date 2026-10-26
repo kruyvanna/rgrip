@@ -5,12 +5,17 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.0.15-alpha] - 2026-10-26
+
 ### Added
 - **Open in console** in a table's right-click menu: a new console on that table's schema, with `SELECT * FROM schema.table LIMIT 100;` ready to run.
 - Drag a column header to move the column; an accent line shows where it lands, and dragging near an edge scrolls sideways. Frozen columns reorder among themselves. The order is kept across reloads; right-click a header → **Reset column order** to go back to the query's order.
 - Folders in the explorer for connections and saved queries (one level). Right-click → **Move to folder**, drag a row onto a folder (or onto another row to join its folder), or set **Folder** in the connection dialog. Query folders are real subfolders of `queries/`; folders remember whether they're open. Removing a folder keeps what was in it.
 - Right-click a connection or folder → **Pin to top**: pinned folders and connections lead the explorer (and a folder's pinned connections lead the folder; pinned query folders lead Saved queries), marked with a small pin. **Unpin** puts it back in order.
 - Arrow keys in the explorer: after clicking a row (or ↓ from the search field), ↑↓ move the selection, → opens a row or steps into it, ← closes it or steps out to its parent, and Enter opens a table's data (or opens/closes any other row). ↑ on the first row goes back to the search field.
+
+### Changed
+- Connection passwords are read from the Keychain when you connect, not at launch, so macOS no longer asks about every saved connection on startup.
 
 ## [0.0.14-alpha] - 2026-10-22
 
@@ -186,7 +191,8 @@ First alpha: a minimal DataGrip-style PostgreSQL client written in Rust.
 - Khmer typed into the SQL editor is not shaped yet.
 - Only macOS on Apple silicon is published; other platforms can build from source.
 
-[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.14-alpha...HEAD
+[Unreleased]: https://github.com/yoouTaro/rgrip/compare/v0.0.15-alpha...HEAD
+[0.0.15-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.15-alpha
 [0.0.14-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.14-alpha
 [0.0.13-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.13-alpha
 [0.0.12-alpha]: https://github.com/yoouTaro/rgrip/releases/tag/v0.0.12-alpha
