@@ -983,11 +983,6 @@ impl App {
                     }
                 }
                 Ev::Schemas { conn, database: None, result } => {
-                    if let Ok(list) = &result {
-                        if list.iter().any(|s| s == "public") {
-                            self.expanded.insert(format!("s/{conn}/public"));
-                        }
-                    }
                     if let Some(ci) = self.conn_index(&conn) {
                         self.conns[ci].schemas = Some(result.into());
                     }
