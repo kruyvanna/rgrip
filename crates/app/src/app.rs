@@ -179,6 +179,13 @@ struct Console {
     count_asked: bool,
     /// The column origins were asked for (once per run).
     origins_asked: bool,
+    /// Pending inline edits to the result: (row, col) → new value.
+    changes: std::collections::BTreeMap<(usize, usize), Option<String>>,
+    editor: Option<grid::CellEditor>,
+    /// Edits or deletes are being written (then the page reloads).
+    saving: bool,
+    /// The statements being saved delete rows of the result.
+    deleting: bool,
     /// Bumped on every Run: answers from an older run are dropped.
     run: u64,
 }
@@ -274,6 +281,10 @@ impl Console {
             total: None,
             count_asked: false,
             origins_asked: false,
+            changes: Default::default(),
+            editor: None,
+            saving: false,
+            deleting: false,
             run: 0,
         }
     }
@@ -1094,6 +1105,9 @@ impl App {
                             },
                             Err(_) => View::Output,
                         };
+                        // Edits are keyed by row index: they belong to the old rows.
+                        c.changes.clear();
+                        c.editor = None;
                         c.output = Some(result);
                     }
                     if let Some((conn, database)) = refresh {
@@ -1179,6 +1193,30 @@ impl App {
                                 t.changes.clear();
                                 self.toast = Some((format!("{verb} {}", plural(n, "row")), theme::OK(), Instant::now()));
                                 self.tab_action(ti, TabAction::Reload);
+                            }
+                            Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
+                        }
+                        continue;
+                    }
+                    let conn = self.tabs[ti].conn.clone();
+                    if let TabKind::Console(c) = &mut self.tabs[ti].kind
+                        && std::mem::take(&mut c.saving)
+                    {
+                        c.running = None;
+                        let deleted = std::mem::take(&mut c.deleting);
+                        match result {
+                            Ok(n) => {
+                                let verb = if deleted { "Deleted" } else { "Saved" };
+                                self.toast = Some((format!("{verb} {}", plural(n, "row")), theme::OK(), Instant::now()));
+                                if deleted {
+                                    c.total = c.total.map(|t| t - n as i64);
+                                }
+                                c.changes.clear();
+                                // The same page again, as saved.
+                                if let Some(sql) = c.paged.clone() {
+                                    c.running = Some(Instant::now());
+                                    self.worker.send(Cmd::Query { conn, tab, sql, page: Some(c.offset), schema: c.run_schema.clone(), database: c.run_database.clone() });
+                                }
                             }
                             Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
                         }
@@ -1850,6 +1888,15 @@ impl App {
             }
             return;
         }
+        // Pending result edits are keyed by row index: anything that replaces
+        // or reorders the rows waits for Save / Discard.
+        if let TabKind::Console(c) = &self.tabs[ti].kind
+            && !c.changes.is_empty()
+            && matches!(action, TabAction::Run { .. } | TabAction::SortResult(..) | TabAction::Page(_) | TabAction::ResultArea(_) | TabAction::DeleteRows(_))
+        {
+            self.toast = Some(("Save or discard your changes first".into(), theme::WARN(), Instant::now()));
+            return;
+        }
         let connected = matches!(self.conns[ci].status, Status::Connected(_));
         let mut needs_connect = false;
         let database = match &self.tabs[ti].kind {
@@ -2082,6 +2129,31 @@ impl App {
                     Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
                 }
             }
+            (TabAction::SaveEdits, TabKind::Console(c)) => {
+                let confirmed = std::mem::take(&mut self.skip_confirm);
+                if self.conns[ci].cfg.read_only {
+                    self.toast = Some((READ_ONLY_HINT.into(), theme::WARN(), Instant::now()));
+                    return;
+                }
+                if c.changes.is_empty() || c.running.is_some() || !connected {
+                    return;
+                }
+                let Some((schema, table, key)) = console_edit_target(c) else { return };
+                let Some((origins, _)) = &c.sources else { return };
+                let Some(Ok(out)) = &c.output else { return };
+                let Some(rs) = out.statements.iter().find_map(|s| s.result.as_ref()) else { return };
+                let statements = console_edit_statements(&schema, &table, &key, origins, rs, &c.changes);
+                let cfg = &self.conns[ci].cfg;
+                if cfg.color == ConnColor::Red && !confirmed {
+                    let items = statements.iter().map(|s| (s.clone(), "Updates a row on a production connection".to_string(), false)).collect();
+                    self.confirm = Some(Confirm { tab: tab.id, kind: ConfirmKind::Save, title: format!("Save {} to {}?", plural(c.changes.len(), "change"), cfg.display_name()), items, focused: false });
+                    return;
+                }
+                c.running = Some(Instant::now());
+                c.saving = true;
+                c.editor = None;
+                self.worker.send(Cmd::SaveEdits { conn: tab.conn.clone(), tab: tab.id, statements });
+            }
             (TabAction::DeleteRows(rows), TabKind::Table(t)) => {
                 let confirmed = std::mem::take(&mut self.skip_confirm);
                 if self.conns[ci].cfg.read_only {
@@ -2098,7 +2170,7 @@ impl App {
                 if t.saving || !connected || rows.is_empty() {
                     return;
                 }
-                match delete_statements(t, rs, &rows) {
+                match table_key(t, rs).map(|key| delete_statements(&t.schema, &t.table, &key, rs, &rows)) {
                     Ok(statements) => {
                         // Deleting can't be undone: always show the statements.
                         if !confirmed {
@@ -2117,6 +2189,34 @@ impl App {
                     }
                     Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
                 }
+            }
+            (TabAction::DeleteRows(rows), TabKind::Console(c)) => {
+                let confirmed = std::mem::take(&mut self.skip_confirm);
+                if self.conns[ci].cfg.read_only {
+                    self.toast = Some((READ_ONLY_HINT.into(), theme::WARN(), Instant::now()));
+                    return;
+                }
+                if c.running.is_some() || !connected || rows.is_empty() {
+                    return;
+                }
+                let Some((schema, table, key)) = console_edit_target(c) else { return };
+                let Some(Ok(out)) = &c.output else { return };
+                let Some(rs) = out.statements.iter().find_map(|s| s.result.as_ref()) else { return };
+                let statements = delete_statements(&schema, &table, &key, rs, &rows);
+                // Deleting can't be undone: always show the statements.
+                if !confirmed {
+                    let cfg = &self.conns[ci].cfg;
+                    let why = if cfg.color == ConnColor::Red { "Deletes a row on a production connection" } else { "Deletes a row" };
+                    let items = statements.iter().map(|s| (s.clone(), why.to_string(), true)).collect();
+                    let title = format!("Delete {} from {schema}.{table}?", plural(rows.len(), "row"));
+                    self.confirm = Some(Confirm { tab: tab.id, kind: ConfirmKind::Delete(rows), title, items, focused: false });
+                    return;
+                }
+                c.running = Some(Instant::now());
+                (c.saving, c.deleting) = (true, true);
+                c.editor = None;
+                c.grid.selection.clear();
+                self.worker.send(Cmd::SaveEdits { conn: tab.conn.clone(), tab: tab.id, statements });
             }
             (TabAction::AddKey, TabKind::Table(t)) => {
                 let confirmed = std::mem::take(&mut self.skip_confirm);
@@ -4516,7 +4616,24 @@ fn console_ui(
                 });
         });
 
-    let Console { running, output, view, grid, paged, offset, map, last_sql, order, relations, probe, related, total, area, .. } = c;
+    // Rows of the result can be edited and deleted in the one table it reads
+    // (by its key); columns that aren't read from it stay read-only.
+    let target = if read_only || c.running.is_some() { None } else { console_edit_target(c) };
+    let deletable = target.is_some();
+    let (kinds, locked): (Vec<_>, Vec<bool>) = match (&target, &c.sources) {
+        (Some((schema, table, _)), Some((origins, tables))) => {
+            let columns = tables.iter().find(|(s, t, _, _)| s == schema && t == table).map_or(&[][..], |(_, _, cols, _)| cols.as_slice());
+            origins
+                .iter()
+                .map(|o| match o {
+                    Some((_, _, name)) => (columns.iter().find(|c| c.name == *name).and_then(|c| rgrip_core::datetime::kind_of(&c.data_type)), false),
+                    None => (None, true),
+                })
+                .unzip()
+        }
+        _ => Default::default(),
+    };
+    let Console { running, output, view, grid, paged, offset, map, last_sql, order, relations, probe, related, total, area, changes, editor, .. } = c;
     // Only a paged (wrappable) statement can be filtered to an area.
     let area_filter = paged.is_some().then_some(area.as_str());
     if let Some(started) = running {
@@ -4573,6 +4690,19 @@ fn console_ui(
                 if segment(ui, *view == View::Output, "Output") {
                     *view = View::Output;
                 }
+                if !changes.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(plural(changes.len(), "change")).small().color(theme::ACCENT()));
+                    // Not "Save": that saves the query (⌘S).
+                    let save = Button::new(RichText::new("Save rows").color(theme::BG())).fill(theme::ACCENT());
+                    if ui.add(save).on_hover_text("Write the changes to the table in one transaction").clicked() {
+                        action = Some(TabAction::SaveEdits);
+                    }
+                    if ui.button("Discard").clicked() {
+                        changes.clear();
+                        *editor = None;
+                    }
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let ms = out.elapsed.as_secs_f64() * 1000.0;
                     let result = match *view {
@@ -4617,9 +4747,15 @@ fn console_ui(
                     let row_offset = if paged.is_some() { *offset } else { 0 };
                     let menu_rows: Vec<usize> = grid.selection.iter().copied().collect();
                     let counts = probe.as_ref().map(|p| p.best(&menu_rows, relations.len())).unwrap_or_default();
-                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts };
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts, deletable };
                     let sort = order.as_ref().filter(|(m, _, _)| *m == n).map(|(_, c, asc)| grid::Sort { column: c, ascending: *asc });
-                    match grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, None) {
+                    // Only the first result has sources (a single statement).
+                    let editing = (deletable && n == 0).then_some(grid::Editing { changes, editor, kinds: &kinds, locked: &locked });
+                    match grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, editing) {
+                        Some(GridEvent::Change { row, col, value }) => record_change(changes, sets[n], row, col, value),
+                        Some(GridEvent::Revert { row, col }) => {
+                            changes.remove(&(row, col));
+                        }
                         Some(grid::GridEvent::HeaderClicked(i)) => action = Some(TabAction::SortResult(n, i)),
                         Some(GridEvent::Follow { relation, rows }) => {
                             let only = probe.as_ref().map(|p| p.matched(&rows, relation)).unwrap_or_default();
@@ -4627,6 +4763,7 @@ fn console_ui(
                         }
                         Some(GridEvent::RowsMenu { rows }) => action = probe_action(relations, sets[n], rows, false),
                         Some(GridEvent::Lookup { relation }) => action = relations.get(relation).map(lookup),
+                        Some(GridEvent::Delete { rows }) => action = Some(TabAction::DeleteRows(rows)),
                         _ => {}
                     }
                 }
@@ -4649,7 +4786,7 @@ fn console_ui(
                     let row_offset = if paged.is_some() { *offset } else { 0 };
                     let menu_rows: Vec<usize> = grid.selection.iter().copied().collect();
                     let counts = probe.as_ref().map(|p| p.best(&menu_rows, relations.len())).unwrap_or_default();
-                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts };
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts, deletable };
                     let can_reproject = paged.is_some();
                     let mut sort_click = None;
                     let reproject = &mut action;
@@ -4668,7 +4805,12 @@ fn console_ui(
                         },
                         |ui, g| {
                             let sort = order.as_ref().filter(|(m, _, _)| *m == n).map(|(_, c, asc)| grid::Sort { column: c, ascending: *asc });
-                            match grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], g, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, None) {
+                            let editing = (deletable && n == 0).then_some(grid::Editing { changes, editor: &mut *editor, kinds: &kinds, locked: &locked });
+                            match grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], g, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, editing) {
+                                Some(GridEvent::Change { row, col, value }) => record_change(changes, sets[n], row, col, value),
+                                Some(GridEvent::Revert { row, col }) => {
+                                    changes.remove(&(row, col));
+                                }
                                 Some(grid::GridEvent::HeaderClicked(i)) => sort_click = Some(TabAction::SortResult(n, i)),
                                 Some(GridEvent::Follow { relation, rows }) => {
                                     let only = probe.as_ref().map(|p| p.matched(&rows, relation)).unwrap_or_default();
@@ -4676,6 +4818,7 @@ fn console_ui(
                                 }
                                 Some(GridEvent::RowsMenu { rows }) => sort_click = probe_action(relations, sets[n], rows, false),
                                 Some(GridEvent::Lookup { relation }) => sort_click = relations.get(relation).map(lookup),
+                                Some(GridEvent::Delete { rows }) => sort_click = Some(TabAction::DeleteRows(rows)),
                                 _ => {}
                             }
                         },
@@ -5105,21 +5248,82 @@ fn edit_statements(t: &TableView, rs: &ResultSet) -> Result<Vec<String>, String>
         .collect())
 }
 
+/// Keep an edited cell as a pending change, or drop it when it's back to the
+/// value as loaded.
+fn record_change(changes: &mut std::collections::BTreeMap<(usize, usize), Option<String>>, rs: &ResultSet, row: usize, col: usize, value: Option<String>) {
+    if rs.rows[row][col] == value {
+        changes.remove(&(row, col));
+    } else {
+        changes.insert((row, col), value);
+    }
+}
+
+/// A primary key in a result: (result column, key column in the table) pairs.
+type ResultKey = Vec<(usize, String)>;
+
+/// The primary key of a table tab in its page.
+fn table_key(t: &TableView, rs: &ResultSet) -> Result<ResultKey, String> {
+    t.key
+        .iter()
+        .map(|k| rs.columns.iter().position(|c| c == k).map(|i| (i, k.clone())).ok_or(format!("Primary key column {k} isn't in the result")))
+        .collect()
+}
+
 /// One DELETE per row, matched on the primary key values as loaded.
-fn delete_statements(t: &TableView, rs: &ResultSet, rows: &[usize]) -> Result<Vec<String>, String> {
-    let key_cols: Vec<usize> = t
-        .key
-        .iter()
-        .map(|k| rs.columns.iter().position(|c| c == k).ok_or(format!("Primary key column {k} isn't in the result")))
-        .collect::<Result<_, _>>()?;
-    Ok(rows
-        .iter()
+fn delete_statements(schema: &str, table: &str, key: &[(usize, String)], rs: &ResultSet, rows: &[usize]) -> Vec<String> {
+    rows.iter()
         .filter(|&&row| row < rs.rows.len())
         .map(|&row| {
-            let key: Vec<(&str, Option<&str>)> = key_cols.iter().map(|&c| (rs.columns[c].as_str(), rs.rows[row][c].as_deref())).collect();
-            rgrip_core::edit::delete_sql(&t.schema, &t.table, &key)
+            let values: Vec<(&str, Option<&str>)> = key.iter().map(|(c, name)| (name.as_str(), rs.rows[row][*c].as_deref())).collect();
+            rgrip_core::edit::delete_sql(schema, table, &values)
         })
-        .collect())
+        .collect()
+}
+
+/// The table a console result's rows can be edited and deleted in: schema,
+/// table and its primary key. Only when every column read from a table comes
+/// from that one table, and its whole key is there.
+fn console_edit_target(c: &Console) -> Option<(String, String, ResultKey)> {
+    let (origins, tables) = c.sources.as_ref()?;
+    let (schema, table, _) = origins.iter().flatten().next()?;
+    if origins.iter().flatten().any(|(s, t, _)| s != schema || t != table) {
+        return None;
+    }
+    let (_, _, columns, _) = tables.iter().find(|(s, t, _, _)| s == schema && t == table)?;
+    let pk: Vec<&str> = columns.iter().filter(|c| c.primary_key).map(|c| c.name.as_str()).collect();
+    if pk.is_empty() {
+        return None;
+    }
+    let key = pk
+        .iter()
+        .map(|k| origins.iter().position(|o| o.as_ref().is_some_and(|(_, _, col)| col == k)).map(|i| (i, k.to_string())))
+        .collect::<Option<Vec<_>>>()?;
+    Some((schema.clone(), table.clone(), key))
+}
+
+/// One UPDATE per edited row of a console result, matched on the key values
+/// as loaded. Columns are named as in the table (`origins`), not the result;
+/// edits to columns that aren't read from the table are skipped.
+fn console_edit_statements(
+    schema: &str,
+    table: &str,
+    key: &[(usize, String)],
+    origins: &[Option<rgrip_core::relations::Origin>],
+    rs: &ResultSet,
+    changes: &std::collections::BTreeMap<(usize, usize), Option<String>>,
+) -> Vec<String> {
+    let mut rows: std::collections::BTreeMap<usize, Vec<(&str, Option<&str>)>> = Default::default();
+    for ((row, col), value) in changes {
+        if let (true, Some(Some((_, _, name)))) = (*row < rs.rows.len(), origins.get(*col)) {
+            rows.entry(*row).or_default().push((name.as_str(), value.as_deref()));
+        }
+    }
+    rows.into_iter()
+        .map(|(row, set)| {
+            let values: Vec<(&str, Option<&str>)> = key.iter().map(|(c, name)| (name.as_str(), rs.rows[row][*c].as_deref())).collect();
+            rgrip_core::edit::update_sql(schema, table, &values, &set)
+        })
+        .collect()
 }
 
 /// A small lock and "read-only" for connections whose session rejects writes.
@@ -5272,6 +5476,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                 changes: &t.changes,
                 editor: &mut t.editor,
                 kinds: &kinds,
+                locked: &[],
             });
             // Both views take the grid state as an argument (they share its selection).
             let draw_grid = |ui: &mut Ui, g: &mut GridState| {
@@ -5282,7 +5487,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                     g,
                     sort,
                     offset,
-                    &grid::Source { table: &table_name, sql: Some(&table_sql), relations: &t.relations, counts: &counts },
+                    &grid::Source { table: &table_name, sql: Some(&table_sql), relations: &t.relations, counts: &counts, deletable: editing.is_some() },
                     editing,
                 )
             };
@@ -5324,13 +5529,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                 None => {}
             }
             match event {
-                Some(GridEvent::Change { row, col, value }) => {
-                    if rs.rows[row][col] == value {
-                        t.changes.remove(&(row, col));
-                    } else {
-                        t.changes.insert((row, col), value);
-                    }
-                }
+                Some(GridEvent::Change { row, col, value }) => record_change(&mut t.changes, rs, row, col, value),
                 Some(GridEvent::Revert { row, col }) => {
                     t.changes.remove(&(row, col));
                 }
@@ -5419,7 +5618,7 @@ fn related_ui(ui: &mut Ui, tab_id: TabId, related: &mut Option<Related>) -> Opti
                     let name = format!("{}.{}", rel.target.schema, rel.target.table);
                     let menu_rows: Vec<usize> = rel.grid.selection.iter().copied().collect();
                     let counts = rel.probe.as_ref().map(|p| p.best(&menu_rows, rel.relations.len())).unwrap_or_default();
-                    let source = grid::Source { table: &name, sql: None, relations: &rel.relations, counts: &counts };
+                    let source = grid::Source { table: &name, sql: None, relations: &rel.relations, counts: &counts, deletable: false };
                     let event = grid::show(ui, Id::new(("related-grid", tab_id)), rs, &mut rel.grid, None, 0, &source, None);
                     match event {
                         Some(GridEvent::Follow { relation, rows }) => {
@@ -6455,6 +6654,34 @@ mod tests {
         let esc = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
         frame(&mut t, vec![esc]);
         assert!(t.related.is_none());
+    }
+
+    #[test]
+    fn console_delete_needs_one_table_and_its_key() {
+        let col = |name: &str, pk: bool| ColumnInfo { name: name.into(), data_type: "integer".into(), nullable: !pk, default: None, primary_key: pk };
+        let origin = |t: &str, c: &str| Some(("public".to_string(), t.to_string(), c.to_string()));
+        let users = ("public".to_string(), "users".to_string(), vec![col("id", true), col("name", false)], Vec::new());
+        let orders = ("public".to_string(), "orders".to_string(), vec![col("id", true)], Vec::new());
+        let mut c = Console::new();
+        assert!(console_edit_target(&c).is_none(), "no origins yet");
+        // `select name, id as user_id, 1 from users`: the key found by origin.
+        c.sources = Some((vec![origin("users", "name"), origin("users", "id"), None], vec![users.clone()]));
+        assert_eq!(console_edit_target(&c), Some(("public".into(), "users".into(), vec![(1, "id".into())])));
+        c.sources = Some((vec![origin("users", "name")], vec![users.clone()]));
+        assert!(console_edit_target(&c).is_none(), "key column not selected");
+        c.sources = Some((vec![origin("users", "id"), origin("orders", "id")], vec![users, orders]));
+        assert!(console_edit_target(&c).is_none(), "a join");
+    }
+
+    #[test]
+    fn console_edits_use_table_column_names() {
+        // `select id as user_id, name as who, 1 as one from users`
+        let origin = |c: &str| Some(("public".to_string(), "users".to_string(), c.to_string()));
+        let origins = vec![origin("id"), origin("name"), None];
+        let rs = ResultSet { columns: vec!["user_id".into(), "who".into(), "one".into()], rows: vec![vec![Some("5".into()), Some("Ann".into()), Some("1".into())]], ..Default::default() };
+        let changes = [((0, 1), Some("Bo".to_string())), ((0, 2), Some("2".to_string())), ((3, 1), None)].into_iter().collect();
+        let statements = console_edit_statements("public", "users", &[(0, "id".into())], &origins, &rs, &changes);
+        assert_eq!(statements, [r#"update "public"."users" set "name" = 'Bo' where "id" = '5';"#], "alias mapped, expression and missing row skipped");
     }
 
     #[test]

@@ -627,7 +627,7 @@ impl ImportDialog {
         ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
             ui.set_min_size(size);
             ui.set_max_size(size);
-            let source = grid::Source { table: "import", sql: None, relations: &[], counts: &[] };
+            let source = grid::Source { table: "import", sql: None, relations: &[], counts: &[], deletable: false };
             grid::show(ui, Id::new("import-preview"), &self.preview, &mut self.grid, None, 0, &source, None);
         });
     }

@@ -7,6 +7,8 @@ All notable changes to rgrip are documented here. The format is based on
 
 ### Added
 - Right-click a row in a table tab → **Delete row** (or **Delete N rows** for the selection). Shows the `DELETE` statements and asks first; all or nothing, matched on the primary key. Needs a primary key and a writable connection, like inline editing.
+- Edit cells in console results, like in a table tab (double-click, or right-click → Edit cell / Set NULL), when the query reads a single table and includes its primary key. Columns that aren't read from the table (expressions) stay read-only; **Save rows** writes the changes in one transaction and reloads the page.
+- **Delete row** in console results too, when the query reads a single table and includes its primary key (`select * from t where …`). The page reloads afterwards.
 
 ## [0.0.15-alpha] - 2026-10-26
 

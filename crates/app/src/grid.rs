@@ -128,6 +128,8 @@ pub struct Source<'a> {
     /// Matching rows per relation for the rows the menu acts on (empty: not
     /// counted yet; `None`: couldn't count).
     pub counts: &'a [Option<i64>],
+    /// Rows can be deleted from the table (by primary key).
+    pub deletable: bool,
 }
 
 /// Per-result-set derived data.
@@ -169,6 +171,15 @@ pub struct Editing<'a> {
     pub editor: &'a mut Option<CellEditor>,
     /// Date/time kind of each column, for the picker.
     pub kinds: &'a [Option<TemporalKind>],
+    /// Per column: can't be edited (e.g. an expression in a query result).
+    /// Empty: every column can.
+    pub locked: &'a [bool],
+}
+
+impl Editing<'_> {
+    fn can_edit(&self, col: usize) -> bool {
+        self.locked.is_empty() || !self.locked.get(col).copied().unwrap_or(true)
+    }
 }
 
 pub struct CellEditor {
@@ -516,7 +527,7 @@ pub fn show(
                         if cell_resp.double_clicked() && !cache.geom_cols.contains(&col) {
                             let json = value.is_some_and(|v| matches!(v.trim_start().as_bytes().first(), Some(b'{' | b'[')));
                             match edit.as_mut() {
-                                Some(e) if !json => *e.editor = Some(CellEditor::open(i, col, value)),
+                                Some(e) if !json && e.can_edit(col) => *e.editor = Some(CellEditor::open(i, col, value)),
                                 _ if value.is_some() && anchor == Some(i) => view = Some((i, col)),
                                 _ => {}
                             }
@@ -559,11 +570,11 @@ pub fn show(
                             if rows.len() > 1 {
                                 copy_column_items(ui, rs, &rows, col, &format!("Copy {} ({} values)", rs.columns[col], rows.len()));
                             }
-                            if edit.is_some() && !cache.geom_cols.contains(&col) {
+                            if edit.as_ref().is_some_and(|e| e.can_edit(col)) && !cache.geom_cols.contains(&col) {
                                 ui.separator();
                             }
                         }
-                        if let (Some(e), Some(col)) = (edit.as_mut(), menu_col.filter(|c| !cache.geom_cols.contains(c))) {
+                        if let (Some(e), Some(col)) = (edit.as_mut(), menu_col.filter(|c| !cache.geom_cols.contains(c))) && e.can_edit(col) {
                             let pending = e.changes.get(&(i, col));
                             let value = pending.map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
                             if crate::icons::menu_item(ui, crate::icons::Svg::Pencil, "Edit cell", true).on_hover_text("Or double-click it").clicked() {
@@ -586,7 +597,7 @@ pub fn show(
                         if let Some(e) = rows_menu(ui, rs, &rows, source, geom) {
                             event = Some(e);
                         }
-                        if edit.is_some() {
+                        if source.deletable {
                             ui.separator();
                             let label = if rows.len() == 1 { "Delete row".to_string() } else { format!("Delete {} rows", rows.len()) };
                             if crate::icons::danger_item(ui, crate::icons::Svg::Trash, &label).clicked() {
@@ -1252,7 +1263,7 @@ mod tests {
         };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[] }, None);
+                show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[], deletable: false }, None);
             });
         });
     }
@@ -1345,8 +1356,8 @@ mod tests {
         let mut out = None;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let edit = Some(Editing { changes, editor: &mut *editor, kinds });
-                out = show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[] }, edit);
+                let edit = Some(Editing { changes, editor: &mut *editor, kinds, locked: &[] });
+                out = show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[], deletable: false }, edit);
             });
         });
         out
@@ -1625,7 +1636,7 @@ mod perf {
             let start = Instant::now();
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    show(ui, egui::Id::new("perf"), &rs, &mut state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[] }, None);
+                    show(ui, egui::Id::new("perf"), &rs, &mut state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[], deletable: false }, None);
                 });
             });
             // Tessellation runs every frame in the real app too.
