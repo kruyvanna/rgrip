@@ -157,6 +157,8 @@ pub enum GridEvent {
     RowsMenu { rows: Vec<usize> },
     /// The lookup icon of a relation column: show the table it references.
     Lookup { relation: usize },
+    /// Delete these rows from the table (asks first).
+    Delete { rows: Vec<usize> },
 }
 
 /// Inline editing, for table tabs whose rows have a primary key.
@@ -583,6 +585,14 @@ pub fn show(
                         }
                         if let Some(e) = rows_menu(ui, rs, &rows, source, geom) {
                             event = Some(e);
+                        }
+                        if edit.is_some() {
+                            ui.separator();
+                            let label = if rows.len() == 1 { "Delete row".to_string() } else { format!("Delete {} rows", rows.len()) };
+                            if crate::icons::danger_item(ui, crate::icons::Svg::Trash, &label).clicked() {
+                                event = Some(GridEvent::Delete { rows });
+                                ui.close();
+                            }
                         }
                     });
                 });

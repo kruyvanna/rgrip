@@ -5,6 +5,9 @@ All notable changes to rgrip are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- Right-click a row in a table tab → **Delete row** (or **Delete N rows** for the selection). Shows the `DELETE` statements and asks first; all or nothing, matched on the primary key. Needs a primary key and a writable connection, like inline editing.
+
 ## [0.0.15-alpha] - 2026-10-26
 
 ### Added

@@ -12,10 +12,8 @@ fn literal(v: Option<&str>) -> String {
     }
 }
 
-/// `update "schema"."table" set "a" = '1', "b" = NULL where "id" = '5';`
-/// `key` holds the row's original primary key values.
-pub fn update_sql(schema: &str, table: &str, key: &[(&str, Option<&str>)], set: &[(&str, Option<&str>)]) -> String {
-    let set: Vec<String> = set.iter().map(|(c, v)| format!("{} = {}", quote_ident(c), literal(*v))).collect();
+/// `key = value and …`, with `is null` for NULL values.
+fn key_cond(key: &[(&str, Option<&str>)]) -> String {
     let cond: Vec<String> = key
         .iter()
         .map(|(c, v)| match v {
@@ -23,13 +21,20 @@ pub fn update_sql(schema: &str, table: &str, key: &[(&str, Option<&str>)], set: 
             Some(_) => format!("{} = {}", quote_ident(c), literal(*v)),
         })
         .collect();
-    format!(
-        "update {}.{} set {} where {};",
-        quote_ident(schema),
-        quote_ident(table),
-        set.join(", "),
-        cond.join(" and ")
-    )
+    cond.join(" and ")
+}
+
+/// `update "schema"."table" set "a" = '1', "b" = NULL where "id" = '5';`
+/// `key` holds the row's original primary key values.
+pub fn update_sql(schema: &str, table: &str, key: &[(&str, Option<&str>)], set: &[(&str, Option<&str>)]) -> String {
+    let set: Vec<String> = set.iter().map(|(c, v)| format!("{} = {}", quote_ident(c), literal(*v))).collect();
+    format!("update {}.{} set {} where {};", quote_ident(schema), quote_ident(table), set.join(", "), key_cond(key))
+}
+
+/// `delete from "schema"."table" where "id" = '5';`
+/// `key` holds the row's original primary key values.
+pub fn delete_sql(schema: &str, table: &str, key: &[(&str, Option<&str>)]) -> String {
+    format!("delete from {}.{} where {};", quote_ident(schema), quote_ident(table), key_cond(key))
 }
 
 /// WHERE clause matching any of `rows`, each a list of (column, value)
@@ -86,5 +91,11 @@ mod tests {
             update_sql("gis", "My Table", &[("a", Some("1")), ("b", None)], &[("x", Some("ផ្លូវ"))]),
             r#"update "gis"."My Table" set "x" = 'ផ្លូវ' where "a" = '1' and "b" is null;"#
         );
+    }
+
+    #[test]
+    fn builds_deletes() {
+        assert_eq!(delete_sql("public", "parcels", &[("id", Some("5"))]), r#"delete from "public"."parcels" where "id" = '5';"#);
+        assert_eq!(delete_sql("gis", "My Table", &[("a", Some("O'Neil")), ("b", None)]), r#"delete from "gis"."My Table" where "a" = 'O''Neil' and "b" is null;"#);
     }
 }

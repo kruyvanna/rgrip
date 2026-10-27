@@ -311,6 +311,8 @@ struct TableView {
     changes: std::collections::BTreeMap<(usize, usize), Option<String>>,
     editor: Option<grid::CellEditor>,
     saving: bool,
+    /// The statements being saved delete rows (for the toast).
+    deleting: bool,
 }
 
 /// Match counts for each relation (and each of its alternative keys) of
@@ -411,6 +413,7 @@ impl TableView {
             changes: Default::default(),
             editor: None,
             saving: false,
+            deleting: false,
         }
     }
 
@@ -730,6 +733,7 @@ enum ConfirmKind {
     Run { all: bool },
     Save,
     AddKey,
+    Delete(Vec<usize>),
 }
 
 const READ_ONLY_HINT: &str = "This connection is read-only: Postgres rejects writes. Untick it in the connection's settings to edit.";
@@ -767,6 +771,8 @@ enum TabAction {
     Run { all: bool },
     /// Write a table tab's pending inline edits.
     SaveEdits,
+    /// Delete these rows of a table tab (by primary key, as loaded).
+    DeleteRows(Vec<usize>),
     /// Give a table without any key an identity primary key, so it can be
     /// edited (imports and shapefile loads often come without one).
     AddKey,
@@ -1172,10 +1178,11 @@ impl App {
                     let Some(ti) = self.tabs.iter().position(|t| t.id == tab) else { continue };
                     if let TabKind::Table(t) = &mut self.tabs[ti].kind {
                         t.saving = false;
+                        let verb = if std::mem::take(&mut t.deleting) { "Deleted" } else { "Saved" };
                         match result {
                             Ok(n) => {
                                 t.changes.clear();
-                                self.toast = Some((format!("Saved {}", plural(n, "row")), theme::OK(), Instant::now()));
+                                self.toast = Some((format!("{verb} {}", plural(n, "row")), theme::OK(), Instant::now()));
                                 self.tab_action(ti, TabAction::Reload);
                             }
                             Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
@@ -2075,6 +2082,42 @@ impl App {
                         }
                         t.saving = true;
                         t.editor = None;
+                        self.worker.send(Cmd::SaveEdits { conn: tab.conn.clone(), tab: tab.id, statements });
+                    }
+                    Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
+                }
+            }
+            (TabAction::DeleteRows(rows), TabKind::Table(t)) => {
+                let confirmed = std::mem::take(&mut self.skip_confirm);
+                if self.conns[ci].cfg.read_only {
+                    self.toast = Some((READ_ONLY_HINT.into(), theme::WARN(), Instant::now()));
+                    return;
+                }
+                let Some(Ok(rs)) = &t.data else { return };
+                // Pending edits are keyed by row index, and the reload after
+                // deleting would drop them.
+                if !t.changes.is_empty() {
+                    self.toast = Some(("Save or discard your changes first".into(), theme::WARN(), Instant::now()));
+                    return;
+                }
+                if t.saving || !connected || rows.is_empty() {
+                    return;
+                }
+                match delete_statements(t, rs, &rows) {
+                    Ok(statements) => {
+                        // Deleting can't be undone: always show the statements.
+                        if !confirmed {
+                            let cfg = &self.conns[ci].cfg;
+                            let why = if cfg.color == ConnColor::Red { "Deletes a row on a production connection" } else { "Deletes a row" };
+                            let items = statements.iter().map(|s| (s.clone(), why.to_string(), true)).collect();
+                            let title = format!("Delete {} from {}.{}?", plural(rows.len(), "row"), t.schema, t.table);
+                            self.confirm = Some(Confirm { tab: tab.id, kind: ConfirmKind::Delete(rows), title, items, focused: false });
+                            return;
+                        }
+                        t.saving = true;
+                        t.deleting = true;
+                        t.editor = None;
+                        t.grid.selection.clear();
                         self.worker.send(Cmd::SaveEdits { conn: tab.conn.clone(), tab: tab.id, statements });
                     }
                     Err(e) => self.toast = Some((e, theme::ERROR(), Instant::now())),
@@ -5067,6 +5110,23 @@ fn edit_statements(t: &TableView, rs: &ResultSet) -> Result<Vec<String>, String>
         .collect())
 }
 
+/// One DELETE per row, matched on the primary key values as loaded.
+fn delete_statements(t: &TableView, rs: &ResultSet, rows: &[usize]) -> Result<Vec<String>, String> {
+    let key_cols: Vec<usize> = t
+        .key
+        .iter()
+        .map(|k| rs.columns.iter().position(|c| c == k).ok_or(format!("Primary key column {k} isn't in the result")))
+        .collect::<Result<_, _>>()?;
+    Ok(rows
+        .iter()
+        .filter(|&&row| row < rs.rows.len())
+        .map(|&row| {
+            let key: Vec<(&str, Option<&str>)> = key_cols.iter().map(|&c| (rs.columns[c].as_str(), rs.rows[row][c].as_deref())).collect();
+            rgrip_core::edit::delete_sql(&t.schema, &t.table, &key)
+        })
+        .collect())
+}
+
 /// A small lock and "read-only" for connections whose session rejects writes.
 fn read_only_badge(ui: &mut Ui) {
     let resp = ui
@@ -5287,6 +5347,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                     action = probe_action(&t.relations, rs, rows, false);
                 }
                 Some(GridEvent::Lookup { relation }) => action = Some(lookup(&t.relations[relation])),
+                Some(GridEvent::Delete { rows }) => action = Some(TabAction::DeleteRows(rows)),
                 // Sorting reloads the page, which would drop pending edits.
                 Some(GridEvent::HeaderClicked(_)) if !t.changes.is_empty() => {
                     action = Some(TabAction::Notify("Save or discard your changes first".into()));
@@ -5676,6 +5737,7 @@ impl App {
             ConfirmKind::Run { all } => TabAction::Run { all },
             ConfirmKind::Save => TabAction::SaveEdits,
             ConfirmKind::AddKey => TabAction::AddKey,
+            ConfirmKind::Delete(rows) => TabAction::DeleteRows(rows),
         });
         self.skip_confirm = false;
     }
@@ -5723,7 +5785,8 @@ fn confirm_modal(ctx: &egui::Context, c: &mut Confirm) -> Option<bool> {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let danger = c.items.iter().any(|i| i.2);
                     let fill = if danger { theme::ERROR() } else { theme::ACCENT() };
-                    if ui.add(Button::new(RichText::new("Run anyway  ⌘↩").color(theme::BG())).fill(fill)).clicked() {
+                    let label = if matches!(c.kind, ConfirmKind::Delete(_)) { "Delete  ⌘↩" } else { "Run anyway  ⌘↩" };
+                    if ui.add(Button::new(RichText::new(label).color(theme::BG())).fill(fill)).clicked() {
                         go = true;
                     }
                     let cancel_button = ui.button("Cancel");
