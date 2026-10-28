@@ -2138,7 +2138,7 @@ impl App {
                 if c.changes.is_empty() || c.running.is_some() || !connected {
                     return;
                 }
-                let Some((schema, table, key)) = console_edit_target(c) else { return };
+                let Some((schema, table, key)) = console_edit_target(c, &self.conns[ci].catalog) else { return };
                 let Some((origins, _)) = &c.sources else { return };
                 let Some(Ok(out)) = &c.output else { return };
                 let Some(rs) = out.statements.iter().find_map(|s| s.result.as_ref()) else { return };
@@ -2199,7 +2199,7 @@ impl App {
                 if c.running.is_some() || !connected || rows.is_empty() {
                     return;
                 }
-                let Some((schema, table, key)) = console_edit_target(c) else { return };
+                let Some((schema, table, key)) = console_edit_target(c, &self.conns[ci].catalog) else { return };
                 let Some(Ok(out)) = &c.output else { return };
                 let Some(rs) = out.statements.iter().find_map(|s| s.result.as_ref()) else { return };
                 let statements = delete_statements(&schema, &table, &key, rs, &rows);
@@ -4618,7 +4618,7 @@ fn console_ui(
 
     // Rows of the result can be edited and deleted in the one table it reads
     // (by its key); columns that aren't read from it stay read-only.
-    let target = if read_only || c.running.is_some() { None } else { console_edit_target(c) };
+    let target = if read_only || c.running.is_some() { None } else { console_edit_target(c, catalog) };
     let deletable = target.is_some();
     let (kinds, locked): (Vec<_>, Vec<bool>) = match (&target, &c.sources) {
         (Some((schema, table, _)), Some((origins, tables))) => {
@@ -5103,13 +5103,25 @@ fn output_log(ui: &mut Ui, out: &QueryOutput) {
 /// `objectid` / `id` / `globalid`). Empty: read-only. Saves stay safe either
 /// way: each UPDATE must change exactly one row.
 fn edit_key(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalog) -> Vec<String> {
+    edit_keys(schema, table, columns, catalog).into_iter().next().unwrap_or_default()
+}
+
+/// Every key [`edit_key`] could pick, best first: the primary key alone if
+/// there is one, else each single-column unique key, NOT NULL ones first
+/// (a row with a null key can't be matched).
+fn edit_keys(schema: &str, table: &str, columns: &[ColumnInfo], catalog: &Catalog) -> Vec<Vec<String>> {
     let pk: Vec<String> = columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect();
     if !pk.is_empty() {
-        return pk;
+        return vec![pk];
     }
     let Some(t) = catalog.tables.iter().find(|t| t.schema == schema && t.name == table) else { return Vec::new() };
-    let preferred = ["objectid", "id", "globalid", "gid", "fid"].iter().find_map(|p| t.keys.iter().find(|k| k.eq_ignore_ascii_case(p)));
-    preferred.or(t.keys.first()).map(|k| vec![k.clone()]).unwrap_or_default()
+    let rank = |k: &String| {
+        let nullable = columns.iter().find(|c| c.name == *k).is_none_or(|c| c.nullable);
+        (nullable, ["objectid", "id", "globalid", "gid", "fid"].iter().position(|p| k.eq_ignore_ascii_case(p)).unwrap_or(usize::MAX))
+    };
+    let mut keys = t.keys.clone();
+    keys.sort_by_key(rank);
+    keys.into_iter().map(|k| vec![k]).collect()
 }
 
 /// Real foreign keys plus relations guessed from column names.
@@ -5281,23 +5293,21 @@ fn delete_statements(schema: &str, table: &str, key: &[(usize, String)], rs: &Re
 }
 
 /// The table a console result's rows can be edited and deleted in: schema,
-/// table and its primary key. Only when every column read from a table comes
-/// from that one table, and its whole key is there.
-fn console_edit_target(c: &Console) -> Option<(String, String, ResultKey)> {
+/// table and the key rows are matched on ([`edit_keys`]: the primary key, else
+/// a unique column). Only when every column read from a table comes from that
+/// one table, and a whole key is there.
+fn console_edit_target(c: &Console, catalog: &Catalog) -> Option<(String, String, ResultKey)> {
     let (origins, tables) = c.sources.as_ref()?;
     let (schema, table, _) = origins.iter().flatten().next()?;
     if origins.iter().flatten().any(|(s, t, _)| s != schema || t != table) {
         return None;
     }
     let (_, _, columns, _) = tables.iter().find(|(s, t, _, _)| s == schema && t == table)?;
-    let pk: Vec<&str> = columns.iter().filter(|c| c.primary_key).map(|c| c.name.as_str()).collect();
-    if pk.is_empty() {
-        return None;
-    }
-    let key = pk
-        .iter()
-        .map(|k| origins.iter().position(|o| o.as_ref().is_some_and(|(_, _, col)| col == k)).map(|i| (i, k.to_string())))
-        .collect::<Option<Vec<_>>>()?;
+    let key = edit_keys(schema, table, columns, catalog).into_iter().find_map(|key| {
+        key.into_iter()
+            .map(|k| origins.iter().position(|o| o.as_ref().is_some_and(|(_, _, col)| *col == k)).map(|i| (i, k)))
+            .collect::<Option<Vec<_>>>()
+    })?;
     Some((schema.clone(), table.clone(), key))
 }
 
@@ -6662,15 +6672,41 @@ mod tests {
         let origin = |t: &str, c: &str| Some(("public".to_string(), t.to_string(), c.to_string()));
         let users = ("public".to_string(), "users".to_string(), vec![col("id", true), col("name", false)], Vec::new());
         let orders = ("public".to_string(), "orders".to_string(), vec![col("id", true)], Vec::new());
+        let catalog = Catalog { tables: Vec::new() };
         let mut c = Console::new();
-        assert!(console_edit_target(&c).is_none(), "no origins yet");
+        assert!(console_edit_target(&c, &catalog).is_none(), "no origins yet");
         // `select name, id as user_id, 1 from users`: the key found by origin.
         c.sources = Some((vec![origin("users", "name"), origin("users", "id"), None], vec![users.clone()]));
-        assert_eq!(console_edit_target(&c), Some(("public".into(), "users".into(), vec![(1, "id".into())])));
+        assert_eq!(console_edit_target(&c, &catalog), Some(("public".into(), "users".into(), vec![(1, "id".into())])));
         c.sources = Some((vec![origin("users", "name")], vec![users.clone()]));
-        assert!(console_edit_target(&c).is_none(), "key column not selected");
+        assert!(console_edit_target(&c, &catalog).is_none(), "key column not selected");
         c.sources = Some((vec![origin("users", "id"), origin("orders", "id")], vec![users, orders]));
-        assert!(console_edit_target(&c).is_none(), "a join");
+        assert!(console_edit_target(&c, &catalog).is_none(), "a join");
+    }
+
+    #[test]
+    fn console_edits_fall_back_to_a_unique_key() {
+        let col = |name: &str, nullable: bool| ColumnInfo { name: name.into(), data_type: "integer".into(), nullable, default: None, primary_key: false };
+        let origin = |c: &str| Some(("mlmupc".to_string(), "parcel".to_string(), c.to_string()));
+        let parcel = ("mlmupc".to_string(), "parcel".to_string(), vec![col("id", true), col("objectid", false), col("globalid", false), col("name", true)], Vec::new());
+        let catalog = Catalog {
+            tables: vec![CatalogTable {
+                schema: "mlmupc".into(),
+                name: "parcel".into(),
+                kind: TableKind::Table,
+                columns: Vec::new(),
+                keys: vec!["id".into(), "globalid".into(), "objectid".into()],
+            }],
+        };
+        let mut c = Console::new();
+        // `select * from mlmupc.parcel`: no primary key, but a unique NOT NULL objectid.
+        c.sources = Some((vec![origin("id"), origin("objectid"), origin("globalid"), origin("name")], vec![parcel.clone()]));
+        assert_eq!(console_edit_target(&c, &catalog), Some(("mlmupc".into(), "parcel".into(), vec![(1, "objectid".into())])));
+        // Without objectid: the next NOT NULL unique column, ahead of the nullable id.
+        c.sources = Some((vec![origin("id"), origin("globalid")], vec![parcel.clone()]));
+        assert_eq!(console_edit_target(&c, &catalog), Some(("mlmupc".into(), "parcel".into(), vec![(1, "globalid".into())])));
+        c.sources = Some((vec![origin("name")], vec![parcel]));
+        assert!(console_edit_target(&c, &catalog).is_none(), "no key column selected");
     }
 
     #[test]
