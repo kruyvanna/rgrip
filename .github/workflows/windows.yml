@@ -1,0 +1,47 @@
+name: Build Windows release
+
+# Builds rgrip.exe and attaches rgrip-<version>-windows-x86_64.zip to the
+# release. Runs when a release is published; run it by hand to (re)build the
+# zip for an existing tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the zip to (e.g. v0.0.15-alpha)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/setup-nasm@v1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p rgrip
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = $env:TAG.TrimStart('v')
+          $name = "rgrip-$version-windows-x86_64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/rgrip.exe $name/
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $name/
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File "$name.zip.sha256" -Encoding ascii
+          "ZIP=$name.zip" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+      - name: Upload to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload $env:TAG $env:ZIP "$env:ZIP.sha256" --clobber
