@@ -305,11 +305,11 @@ fn svg(rs: &ResultSet, kinds: &[Kind], raster: bool) -> String {
     const FONT: f32 = 13.0;
     const PAD_X: f32 = 12.0;
     const ROW_H: f32 = 28.0;
-    const FONTS: &str = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif";
-    // Cells with Khmer use a Khmer font for the whole cell (these include
+    const FONTS: &str = "'Google Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif";
+    // Cells with Khmer use one font (Google Sans, which has Khmer) for the whole cell (these include
     // Latin too), so the text is shaped by one font instead of falling
     // back glyph by glyph, which breaks clusters in some renderers.
-    const KHMER_FONTS: &str = "'Kantumruy Pro', 'Khmer Sangam MN', 'Khmer MN', 'Noto Sans Khmer', 'Khmer OS', sans-serif";
+    const KHMER_FONTS: &str = "'Google Sans', 'Khmer Sangam MN', 'Khmer MN', 'Noto Sans Khmer', 'Khmer OS', sans-serif";
     let font_attr = |v: &str| {
         if v.chars().any(is_khmer) {
             format!(" font-family=\"{KHMER_FONTS}\"")
@@ -553,7 +553,7 @@ mod tests {
         // Mixed cell starts with the invisible Khmer sign; pure ones don't.
         assert!(raster.contains(">\u{17B4}&lt;div&gt;ផ្លូវ</text>"));
         assert!(raster.contains(">ផ្លូវ</text>") && raster.contains(">plain</text>"));
-        assert!(raster.contains("font-family=\"'Kantumruy Pro'"));
+        assert!(raster.contains("font-family=\"'Google Sans'"));
         // Saved files stay clean.
         assert!(!export(&rs, Format::Svg, "t").contains('\u{17B4}'));
     }

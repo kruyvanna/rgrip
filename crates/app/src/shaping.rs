@@ -145,7 +145,7 @@ pub fn shape(ctx: &egui::Context, text: &str, size: f32) -> Option<Arc<Shaped>> 
         .map(|a| Color32::from_white_alpha((a * 255.0).round() as u8))
         .collect();
     let image = ColorImage { size: [width, height], pixels, source_size: Vec2::new(width as f32, height as f32) };
-    let texture = ctx.load_texture(format!("shaped:{text}"), image, TextureOptions::LINEAR);
+    let texture = ctx.load_texture(format!("shaped:{text}"), image, TextureOptions::NEAREST);
     let shaped = Arc::new(Shaped {
         texture,
         size: Vec2::new(width as f32, height as f32) / ppp,
@@ -163,7 +163,11 @@ impl Shaped {
     /// Draw with the left edge at `left`, vertically centred on `center_y`,
     /// clipped to `clip`.
     pub fn paint(&self, painter: &Painter, left: f32, center_y: f32, color: Color32, clip: Rect) {
-        let rect = Rect::from_min_size(Pos2::new(left, center_y - self.size.y / 2.0), self.size);
+        // The image is rasterized at device resolution: put it on whole
+        // physical pixels, or sampling between them blurs the glyphs.
+        let ppp = painter.ctx().pixels_per_point();
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let rect = Rect::from_min_size(Pos2::new(snap(left), snap(center_y - self.size.y / 2.0)), self.size);
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         painter.with_clip_rect(clip).image(self.texture.id(), rect, uv, color);
     }

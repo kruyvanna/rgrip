@@ -466,6 +466,8 @@ pub fn set_choice(ctx: &egui::Context, choice: ThemeChoice) {
     sync(ctx);
 }
 
+const GOOGLE_SANS: &[u8] = include_bytes!("../../../assets/fonts/GoogleSans-Regular.ttf");
+
 /// Prefer native macOS fonts (and JetBrains Mono if installed), keeping
 /// egui's bundled fonts as fallbacks for symbols.
 fn install_fonts(ctx: &egui::Context) {
@@ -487,21 +489,17 @@ fn install_fonts(ctx: &egui::Context) {
     add(FontFamily::Proportional, &ui_fonts, "ui");
     add(FontFamily::Monospace, &mono_fonts, "mono");
 
-    // Khmer has no glyphs in SF / JetBrains Mono: fall back to a Khmer font
-    // right after the primary one, for both families.
-    let khmer_fonts = [
-        format!("{home}/Library/Fonts/KantumruyPro-VariableFont_wght.ttf"),
-        "/Library/Fonts/KantumruyPro-VariableFont_wght.ttf".to_string(),
-        "/System/Library/Fonts/Supplemental/Khmer Sangam MN.ttf".to_string(),
-    ];
-    if let Some(bytes) = khmer_fonts.iter().find_map(|p| std::fs::read(p).ok()) {
-        crate::shaping::init(bytes.clone());
-        fonts.font_data.insert("khmer".into(), Arc::new(FontData::from_owned(bytes)));
-        for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            let list = fonts.families.entry(family).or_default();
-            list.insert(1.min(list.len()), "khmer".into());
-        }
-    }
+    // Bundled Google Sans leads the proportional family, ahead of the
+    // system UI font.
+    fonts.font_data.insert("google-sans".into(), Arc::new(FontData::from_static(GOOGLE_SANS)));
+    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "google-sans".into());
+
+    // Google Sans also covers Khmer, which the monospace fonts lack: it
+    // follows the primary mono font as a fallback. The shaper draws Khmer
+    // with the same font.
+    crate::shaping::init(GOOGLE_SANS.to_vec());
+    let mono = fonts.families.entry(FontFamily::Monospace).or_default();
+    mono.insert(1.min(mono.len()), "google-sans".into());
     ctx.set_fonts(fonts);
 }
 

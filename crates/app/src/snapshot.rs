@@ -7,11 +7,13 @@ use std::sync::{Arc, OnceLock};
 /// Keeps very long tables from allocating hundreds of MB.
 const MAX_PIXELS: f32 = 40_000_000.0;
 
-/// System fonts, loaded once (Khmer and other scripts come from here).
+/// Bundled Google Sans plus system fonts, loaded once (other scripts come
+/// from the system).
 fn fonts() -> Arc<usvg::fontdb::Database> {
     static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     DB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
+        db.load_font_data(include_bytes!("../../../assets/fonts/GoogleSans-Regular.ttf").to_vec());
         db.load_system_fonts();
         Arc::new(db)
     })
