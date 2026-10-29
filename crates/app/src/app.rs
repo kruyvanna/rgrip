@@ -506,6 +506,8 @@ impl Dialog {
 
 enum Action {
     NewConnection,
+    /// New connection, pre-filed in the named folder.
+    NewConnectionIn(String),
     Connect(usize),
     Disconnect(usize),
     Edit(usize),
@@ -1609,6 +1611,10 @@ impl App {
         match action {
             Action::NewConnection => {
                 self.dialog = Some(Dialog::new(ConnectionConfig::default(), true));
+            }
+            Action::NewConnectionIn(folder) => {
+                let cfg = ConnectionConfig { folder: Some(folder), ..ConnectionConfig::default() };
+                self.dialog = Some(Dialog::new(cfg, true));
             }
             Action::Connect(ci) => {
                 let c = &mut self.conns[ci];
@@ -4136,6 +4142,10 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, folders: &[String], pinned: bo
 /// Right-click menu of a folder row.
 fn folder_menu(ui: &mut Ui, kind: FolderKind, name: &str, pinned: bool, actions: &mut Vec<Action>) {
     menu_layout(ui);
+    if kind == FolderKind::Conns && crate::icons::menu_item(ui, Svg::Plus, "Add Connection", true).clicked() {
+        actions.push(Action::NewConnectionIn(name.to_string()));
+        ui.close();
+    }
     pin_item(ui, kind.key(name), pinned, actions);
     if crate::icons::menu_item(ui, Svg::Pencil, "Rename…", true).clicked() {
         actions.push(Action::RenameFolder(kind, name.to_string()));
