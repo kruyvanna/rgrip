@@ -37,6 +37,40 @@ pub fn delete_sql(schema: &str, table: &str, key: &[(&str, Option<&str>)]) -> St
     format!("delete from {}.{} where {};", quote_ident(schema), quote_ident(table), key_cond(key))
 }
 
+/// `insert into "schema"."table" ("a", "b") values ('1', NULL);`
+/// `values` are the columns to set; leave a column out to let its default
+/// apply. With none, `default values`.
+pub fn insert_sql(schema: &str, table: &str, values: &[(&str, Option<&str>)]) -> String {
+    let target = format!("{}.{}", quote_ident(schema), quote_ident(table));
+    if values.is_empty() {
+        return format!("insert into {target} default values;");
+    }
+    let cols: Vec<String> = values.iter().map(|(c, _)| quote_ident(c)).collect();
+    let vals: Vec<String> = values.iter().map(|(_, v)| literal(*v)).collect();
+    format!("insert into {target} ({}) values ({});", cols.join(", "), vals.join(", "))
+}
+
+/// `"col" = 'value'` or `"col" is null`; with `exclude`, `<>` and
+/// `is not null`. For the table's quick filter.
+pub fn value_filter(column: &str, value: Option<&str>, exclude: bool) -> String {
+    match (value, exclude) {
+        (None, false) => format!("{} is null", quote_ident(column)),
+        (None, true) => format!("{} is not null", quote_ident(column)),
+        (Some(_), false) => format!("{} = {}", quote_ident(column), literal(value)),
+        (Some(_), true) => format!("{} <> {}", quote_ident(column), literal(value)),
+    }
+}
+
+/// `existing and extra`, with the existing filter in parentheses so an `or`
+/// in it stays grouped. Either may be empty.
+pub fn and_filter(existing: &str, extra: &str) -> String {
+    let existing = existing.trim().trim_end_matches(';').trim_end();
+    if existing.is_empty() {
+        return extra.to_string();
+    }
+    format!("({existing}) and {extra}")
+}
+
 /// WHERE clause matching any of `rows`, each a list of (column, value)
 /// pairs: `"user_id" = '5'`, `"user_id" in ('5', '7')`, or OR-ed groups
 /// for multi-column keys. `None` when no row has a complete (non-NULL) key.
@@ -91,6 +125,31 @@ mod tests {
             update_sql("gis", "My Table", &[("a", Some("1")), ("b", None)], &[("x", Some("ផ្លូវ"))]),
             r#"update "gis"."My Table" set "x" = 'ផ្លូវ' where "a" = '1' and "b" is null;"#
         );
+    }
+
+    #[test]
+    fn builds_inserts() {
+        assert_eq!(
+            insert_sql("public", "parcels", &[("name", Some("O'Neil")), ("note", None)]),
+            r#"insert into "public"."parcels" ("name", "note") values ('O''Neil', NULL);"#
+        );
+        assert_eq!(insert_sql("gis", "My Table", &[("x", Some("ផ្លូវ"))]), r#"insert into "gis"."My Table" ("x") values ('ផ្លូវ');"#);
+        assert_eq!(insert_sql("public", "t", &[]), r#"insert into "public"."t" default values;"#);
+    }
+
+    #[test]
+    fn builds_value_filters() {
+        assert_eq!(value_filter("status", Some("open"), false), r#""status" = 'open'"#);
+        assert_eq!(value_filter("My Col", Some("it's"), true), r#""My Col" <> 'it''s'"#);
+        assert_eq!(value_filter("note", None, false), r#""note" is null"#);
+        assert_eq!(value_filter("note", None, true), r#""note" is not null"#);
+    }
+
+    #[test]
+    fn ands_filters() {
+        assert_eq!(and_filter("", r#""a" = '1'"#), r#""a" = '1'"#);
+        assert_eq!(and_filter("  ", r#""a" = '1'"#), r#""a" = '1'"#);
+        assert_eq!(and_filter("x = 1 or y = 2;", r#""a" = '1'"#), r#"(x = 1 or y = 2) and "a" = '1'"#);
     }
 
     #[test]

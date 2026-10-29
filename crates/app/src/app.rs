@@ -610,6 +610,10 @@ struct TableView {
     saving: bool,
     /// The statements being saved delete rows (for the toast).
     deleting: bool,
+    /// Pending new rows: the last `added` rows of `data`. Their cells are
+    /// edited through `changes` like any other; a cell that is still NULL
+    /// is left out of the INSERT so its default applies.
+    added: usize,
 }
 
 /// Match counts for each relation (and each of its alternative keys) of
@@ -711,7 +715,79 @@ impl TableView {
             editor: None,
             saving: false,
             deleting: false,
+            added: 0,
         }
+    }
+
+    /// Pending edits or new rows: a reload would drop them.
+    fn dirty(&self) -> bool {
+        !self.changes.is_empty() || self.added > 0
+    }
+
+    /// Drop pending edits and new rows.
+    fn discard(&mut self) {
+        self.changes.clear();
+        self.editor = None;
+        if let Some(Ok(rs)) = &mut self.data {
+            rs.rows.truncate(rs.rows.len().saturating_sub(self.added));
+        }
+        self.added = 0;
+    }
+
+    /// Append a pending row: blank, or a copy of row `from` without its key
+    /// columns (they keep their default / sequence).
+    fn add_row(&mut self, from: Option<usize>) {
+        let Some(Ok(rs)) = &mut self.data else { return };
+        let mut row = match from.and_then(|r| rs.rows.get(r)) {
+            Some(src) => src.clone(),
+            None => vec![None; rs.columns.len()],
+        };
+        if from.is_some() {
+            // Without a primary key, the unique column rows are found by.
+            let pk: Vec<&str> = self.columns.iter().filter(|c| c.primary_key).map(|c| c.name.as_str()).collect();
+            let keys = if pk.is_empty() { self.key.iter().map(String::as_str).collect() } else { pk };
+            for (i, c) in rs.columns.iter().enumerate() {
+                if keys.contains(&c.as_str()) {
+                    row[i] = None;
+                }
+            }
+        }
+        rs.rows.push(row);
+        self.added += 1;
+        // Show it, and select it so it's clear where the typing goes.
+        self.grid.reveal = Some(rs.rows.len() - 1);
+        self.grid.selection = [rs.rows.len() - 1].into();
+    }
+
+    /// Drop the pending new rows among `rows` (indexes into the page), and
+    /// the edits of the rows that move up.
+    fn remove_added(&mut self, rows: &[usize]) {
+        let Some(Ok(rs)) = &mut self.data else { return };
+        let first = rs.rows.len() - self.added;
+        let gone: Vec<usize> = rows.iter().copied().filter(|&r| r >= first && r < rs.rows.len()).collect();
+        let mut keep = 0;
+        let mut moved = std::collections::BTreeMap::new();
+        for i in first..rs.rows.len() {
+            if gone.contains(&i) {
+                continue;
+            }
+            for c in 0..rs.columns.len() {
+                if let Some(v) = self.changes.remove(&(i, c)) {
+                    moved.insert((first + keep, c), v);
+                }
+            }
+            keep += 1;
+        }
+        self.changes.retain(|(r, _), _| *r < first);
+        self.changes.extend(moved);
+        let mut i = 0;
+        rs.rows.retain(|_| {
+            i += 1;
+            !gone.contains(&(i - 1))
+        });
+        self.added -= gone.len();
+        self.editor = None;
+        self.grid.selection.clear();
     }
 
     fn query(&self) -> TableQuery {
@@ -1517,6 +1593,7 @@ impl App {
                         t.columns = columns;
                         // Edits are keyed by row index: they belong to the old page.
                         t.changes.clear();
+                        t.added = 0;
                         t.editor = None;
                     }
                 }
@@ -1778,7 +1855,7 @@ impl App {
         }) {
             self.active = i;
             if let (Some(filter), TabKind::Table(t)) = (filter, &mut self.tabs[i].kind) {
-                if !t.changes.is_empty() {
+                if t.dirty() {
                     self.toast = Some(("Save or discard your changes in this tab first".into(), theme::WARN(), Instant::now()));
                     return;
                 }
@@ -2584,15 +2661,18 @@ impl App {
                     return;
                 }
                 let Some(Ok(rs)) = &t.data else { return };
-                if t.changes.is_empty() || t.saving || !connected {
+                if !t.dirty() || t.saving || !connected {
                     return;
                 }
                 match edit_statements(t, rs) {
                     Ok(statements) => {
                         let cfg = &self.conns[ci].cfg;
                         if cfg.color == ConnColor::Red && !confirmed {
-                            let items = statements.iter().map(|s| (s.clone(), "Updates a row on a production connection".to_string(), false)).collect();
-                            self.confirm = Some(Confirm { tab: tab.id, kind: ConfirmKind::Save, title: format!("Save {} to {}?", plural(t.changes.len(), "change"), cfg.display_name()), items, focused: false });
+                            let items = statements
+                                .iter()
+                                .map(|s| (s.clone(), if s.starts_with("insert") { "Adds a row on a production connection" } else { "Updates a row on a production connection" }.to_string(), false))
+                                .collect();
+                            self.confirm = Some(Confirm { tab: tab.id, kind: ConfirmKind::Save, title: format!("Save {} to {}?", plural(if t.added == 0 { t.changes.len() } else { statements.len() }, "change"), cfg.display_name()), items, focused: false });
                             return;
                         }
                         t.saving = true;
@@ -2636,7 +2716,7 @@ impl App {
                 let Some(Ok(rs)) = &t.data else { return };
                 // Pending edits are keyed by row index, and the reload after
                 // deleting would drop them.
-                if !t.changes.is_empty() {
+                if t.dirty() {
                     self.toast = Some(("Save or discard your changes first".into(), theme::WARN(), Instant::now()));
                     return;
                 }
@@ -2697,7 +2777,7 @@ impl App {
                     self.toast = Some((READ_ONLY_HINT.into(), theme::WARN(), Instant::now()));
                     return;
                 }
-                if t.saving || !connected || !t.changes.is_empty() {
+                if t.saving || !connected || t.dirty() {
                     return;
                 }
                 let name = ["id", "gid", "fid", "row_id"]
@@ -5311,10 +5391,10 @@ fn console_ui(
                     let row_offset = if paged.is_some() { *offset } else { 0 };
                     let menu_rows: Vec<usize> = grid.selection.iter().copied().collect();
                     let counts = probe.as_ref().map(|p| p.best(&menu_rows, relations.len())).unwrap_or_default();
-                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts, deletable };
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts, deletable, filterable: false };
                     let sort = order.as_ref().filter(|(m, _, _)| *m == n).map(|(_, c, asc)| grid::Sort { column: c, ascending: *asc });
                     // Only the first result has sources (a single statement).
-                    let editing = (deletable && n == 0).then_some(grid::Editing { changes, editor, kinds: &kinds, locked: &locked });
+                    let editing = (deletable && n == 0).then_some(grid::Editing { changes, editor, kinds: &kinds, locked: &locked, added_from: usize::MAX, existing_locked: false, insertable: false });
                     match grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], grid, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, editing) {
                         Some(GridEvent::Change { row, col, value }) => record_change(changes, sets[n], row, col, value),
                         Some(GridEvent::Revert { row, col }) => {
@@ -5350,7 +5430,7 @@ fn console_ui(
                     let row_offset = if paged.is_some() { *offset } else { 0 };
                     let menu_rows: Vec<usize> = grid.selection.iter().copied().collect();
                     let counts = probe.as_ref().map(|p| p.best(&menu_rows, relations.len())).unwrap_or_default();
-                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts, deletable };
+                    let source = grid::Source { table: "query_result", sql: Some(last_sql.as_str()), relations, counts: &counts, deletable, filterable: false };
                     let can_reproject = paged.is_some();
                     let mut sort_click = None;
                     let reproject = &mut action;
@@ -5369,7 +5449,7 @@ fn console_ui(
                         },
                         |ui, g| {
                             let sort = order.as_ref().filter(|(m, _, _)| *m == n).map(|(_, c, asc)| grid::Sort { column: c, ascending: *asc });
-                            let editing = (deletable && n == 0).then_some(grid::Editing { changes, editor: &mut *editor, kinds: &kinds, locked: &locked });
+                            let editing = (deletable && n == 0).then_some(grid::Editing { changes, editor: &mut *editor, kinds: &kinds, locked: &locked, added_from: usize::MAX, existing_locked: false, insertable: false });
                             match grid::show(ui, Id::new(("grid", tab_id, n)), sets[n], g, Some(sort.unwrap_or(grid::Sort { column: "", ascending: true })), row_offset, &source, editing) {
                                 Some(GridEvent::Change { row, col, value }) => record_change(changes, sets[n], row, col, value),
                                 Some(GridEvent::Revert { row, col }) => {
@@ -5803,25 +5883,45 @@ fn probe_action(relations: &[Relation], rs: &ResultSet, rows: Vec<usize>, modal:
     (!probes.is_empty()).then_some(TabAction::Probe { modal, rows, probes, map })
 }
 
-/// One UPDATE per edited row, matched on the primary key values as loaded.
+/// One UPDATE per edited row, matched on the primary key values as loaded,
+/// then one INSERT per pending new row.
 fn edit_statements(t: &TableView, rs: &ResultSet) -> Result<Vec<String>, String> {
-    let key_cols: Vec<usize> = t
-        .key
-        .iter()
-        .map(|k| rs.columns.iter().position(|c| c == k).ok_or(format!("Primary key column {k} isn't in the result")))
-        .collect::<Result<_, _>>()?;
+    let first_new = rs.rows.len().saturating_sub(t.added);
     let mut rows: std::collections::BTreeMap<usize, Vec<(&str, Option<&str>)>> = Default::default();
-    for ((row, col), value) in &t.changes {
+    for ((row, col), value) in t.changes.range(..(first_new, 0)) {
         rows.entry(*row).or_default().push((rs.columns[*col].as_str(), value.as_deref()));
     }
-    Ok(rows
+    // Rows are found by key only when an existing row was edited.
+    let key_cols: Vec<usize> = if rows.is_empty() {
+        Vec::new()
+    } else {
+        t.key
+            .iter()
+            .map(|k| rs.columns.iter().position(|c| c == k).ok_or(format!("Primary key column {k} isn't in the result")))
+            .collect::<Result<_, _>>()?
+    };
+    if !rows.is_empty() && key_cols.is_empty() {
+        return Err("This table has no key to find rows by".into());
+    }
+    let mut out: Vec<String> = rows
         .into_iter()
         .map(|(row, set)| {
             let key: Vec<(&str, Option<&str>)> =
                 key_cols.iter().map(|&c| (rs.columns[c].as_str(), rs.rows[row][c].as_deref())).collect();
             rgrip_core::edit::update_sql(&t.schema, &t.table, &key, &set)
         })
-        .collect())
+        .collect();
+    for row in first_new..rs.rows.len() {
+        // Cells still NULL are left out, so their defaults apply.
+        let values: Vec<(&str, Option<&str>)> = (0..rs.columns.len())
+            .filter_map(|c| {
+                let v = t.changes.get(&(row, c)).map_or(rs.rows[row][c].as_deref(), |v| v.as_deref());
+                v.map(|v| (rs.columns[c].as_str(), Some(v)))
+            })
+            .collect();
+        out.push(rgrip_core::edit::insert_sql(&t.schema, &t.table, &values));
+    }
+    Ok(out)
 }
 
 /// Keep an edited cell as a pending change, or drop it when it's back to the
@@ -5915,11 +6015,11 @@ fn read_only_badge(ui: &mut Ui) {
 
 fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> Option<TabAction> {
     let mut action = None;
-    if !t.changes.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
+    if t.dirty() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
         action = Some(TabAction::SaveEdits);
     }
     // Like the ↻ button: not while edits are pending (a reload drops them).
-    if t.changes.is_empty() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::R)) {
+    if !t.dirty() && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::R)) {
         action = Some(TabAction::Reload);
     }
     toolbar(ui, |ui| {
@@ -5933,11 +6033,21 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                 .margin(Margin::symmetric(8, 4)),
         );
         // Reloading drops pending edits, so it waits for Save / Discard.
-        let locked = !t.changes.is_empty();
-        if filter.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+        let locked = t.dirty();
+        let rows_len = match &t.data {
+            Some(Ok(rs)) => rs.rows.len(),
+            _ => 0,
+        };
+        let can_insert = !read_only && !t.loading && !t.saving && matches!(&t.data, Some(Ok(_)));
+        // Escape empties the field and drops the filter.
+        let cleared = filter.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape));
+        if cleared {
+            t.filter.clear();
+        }
+        if cleared || (filter.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter))) {
             if locked {
                 action = Some(TabAction::Notify("Save or discard your changes first".into()));
-            } else {
+            } else if t.applied_filter != t.filter || !cleared {
                 t.applied_filter = t.filter.clone();
                 t.page = 0;
                 action = Some(TabAction::Reload);
@@ -5945,6 +6055,9 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
         }
         if ui.add_enabled_ui(!locked, |ui| ghost_button(ui, "↻").on_hover_text("Reload  ⌘R")).inner.clicked() {
             action = Some(TabAction::Reload);
+        }
+        if ui.add_enabled_ui(can_insert, |ui| ghost_button(ui, "+ Add row")).inner.on_hover_text("Add a blank row, saved as an INSERT with Save").clicked() {
+            t.add_row(None);
         }
         if let Some(Ok(rs)) = &t.data {
             if !rs.geometry_columns().is_empty() {
@@ -5971,15 +6084,21 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
         }
         if locked {
             ui.add_space(8.0);
-            let cells = t.changes.len();
-            ui.label(RichText::new(plural(cells, "change")).small().color(theme::ACCENT()));
+            let cells = t.changes.iter().filter(|((r, _), _)| *r < rows_len.saturating_sub(t.added)).count();
+            let mut parts = Vec::new();
+            if cells > 0 {
+                parts.push(plural(cells, "change"));
+            }
+            if t.added > 0 {
+                parts.push(plural(t.added, "new row"));
+            }
+            ui.label(RichText::new(parts.join(", ")).small().color(theme::ACCENT()));
             let save = Button::new(RichText::new("Save").color(theme::BG())).fill(theme::ACCENT());
             if ui.add_enabled(!t.saving, save).on_hover_text("Write the changes in one transaction  ⌘S").clicked() {
                 action = Some(TabAction::SaveEdits);
             }
             if ui.add_enabled(!t.saving, Button::new("Discard")).clicked() {
-                t.changes.clear();
-                t.editor = None;
+                t.discard();
             }
         } else if read_only {
             ui.add_space(8.0);
@@ -6046,11 +6165,17 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
             let kinds: Vec<_> = rs.columns.iter().map(|c| t.temporal.get(c).copied()).collect();
             let menu_rows: Vec<usize> = t.grid.selection.iter().copied().collect();
             let counts = t.probe.as_ref().map(|p| p.best(&menu_rows, t.relations.len())).unwrap_or_default();
-            let editing = (!t.key.is_empty() && !t.saving && !read_only).then_some(grid::Editing {
+            // Without a key only new rows can be edited; existing ones can't be found again.
+            let has_key = !t.key.is_empty();
+            let added_from = if t.added > 0 { rs.rows.len().saturating_sub(t.added) } else { usize::MAX };
+            let editing = (!t.saving && !read_only).then_some(grid::Editing {
                 changes: &t.changes,
                 editor: &mut t.editor,
                 kinds: &kinds,
                 locked: &[],
+                added_from,
+                existing_locked: !has_key,
+                insertable: true,
             });
             // Both views take the grid state as an argument (they share its selection).
             let draw_grid = |ui: &mut Ui, g: &mut GridState| {
@@ -6061,7 +6186,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                     g,
                     sort,
                     offset,
-                    &grid::Source { table: &table_name, sql: Some(&table_sql), relations: &t.relations, counts: &counts, deletable: editing.is_some() },
+                    &grid::Source { table: &table_name, sql: Some(&table_sql), relations: &t.relations, counts: &counts, deletable: editing.is_some() && has_key, filterable: true },
                     editing,
                 )
             };
@@ -6072,6 +6197,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                 map.show(ui, rs, &cols, false, link)
             };
             let mut event = None;
+            let mut row_op: Option<(bool, Vec<usize>)> = None;
             let mut map_out = crate::map::MapOutput::default();
             match pane {
                 Pane::Grid => event = draw_grid(ui, &mut t.grid),
@@ -6085,7 +6211,7 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
             }
             match map_out.area {
                 // Reloading drops pending edits, so it waits for Save / Discard.
-                Some(_) if !t.changes.is_empty() => {
+                Some(_) if t.dirty() => {
                     action = Some(TabAction::Notify("Save or discard your changes first".into()));
                 }
                 Some(crate::map::AreaEvent::Set(sql)) => {
@@ -6116,8 +6242,21 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                 }
                 Some(GridEvent::Lookup { relation }) => action = Some(lookup(&t.relations[relation])),
                 Some(GridEvent::Delete { rows }) => action = Some(TabAction::DeleteRows(rows)),
+                Some(GridEvent::FilterValue { .. }) if t.dirty() => {
+                    action = Some(TabAction::Notify("Save or discard your changes first".into()));
+                }
+                Some(GridEvent::FilterValue { row, col, exclude }) => {
+                    let cond = rgrip_core::edit::value_filter(&rs.columns[col], rs.rows[row][col].as_deref(), exclude);
+                    t.filter = rgrip_core::edit::and_filter(&t.applied_filter, &cond);
+                    t.applied_filter = t.filter.clone();
+                    t.page = 0;
+                    action = Some(TabAction::Reload);
+                }
+                // These change the page's rows, which `rs` borrows: after the match.
+                Some(GridEvent::Duplicate { rows }) => row_op = Some((true, rows)),
+                Some(GridEvent::RemoveNew { rows }) => row_op = Some((false, rows)),
                 // Sorting reloads the page, which would drop pending edits.
-                Some(GridEvent::HeaderClicked(_)) if !t.changes.is_empty() => {
+                Some(GridEvent::HeaderClicked(_)) if t.dirty() => {
                     action = Some(TabAction::Notify("Save or discard your changes first".into()));
                 }
                 Some(GridEvent::HeaderClicked(i)) => {
@@ -6131,6 +6270,15 @@ fn table_ui(ui: &mut Ui, tab_id: TabId, t: &mut TableView, read_only: bool) -> O
                     t.page = 0;
                     action = Some(TabAction::Reload);
                 }
+                None => {}
+            }
+            match row_op {
+                Some((true, rows)) => {
+                    for r in rows {
+                        t.add_row(Some(r));
+                    }
+                }
+                Some((false, rows)) => t.remove_added(&rows),
                 None => {}
             }
         }
@@ -6192,7 +6340,7 @@ fn related_ui(ui: &mut Ui, tab_id: TabId, related: &mut Option<Related>) -> Opti
                     let name = format!("{}.{}", rel.target.schema, rel.target.table);
                     let menu_rows: Vec<usize> = rel.grid.selection.iter().copied().collect();
                     let counts = rel.probe.as_ref().map(|p| p.best(&menu_rows, rel.relations.len())).unwrap_or_default();
-                    let source = grid::Source { table: &name, sql: None, relations: &rel.relations, counts: &counts, deletable: false };
+                    let source = grid::Source { table: &name, sql: None, relations: &rel.relations, counts: &counts, deletable: false, filterable: false };
                     let event = grid::show(ui, Id::new(("related-grid", tab_id)), rs, &mut rel.grid, None, 0, &source, None);
                     match event {
                         Some(GridEvent::Follow { relation, rows }) => {
@@ -7259,6 +7407,41 @@ mod tests {
         let esc = egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
         frame(&mut t, vec![esc]);
         assert!(t.related.is_none());
+    }
+
+    #[test]
+    fn new_rows_are_saved_as_inserts() {
+        let s = |v: &str| Some(v.to_string());
+        let col = |name: &str, pk: bool| ColumnInfo { name: name.into(), data_type: "text".into(), nullable: !pk, default: None, primary_key: pk };
+        let mut t = TableView::new("public".into(), "users".into(), String::new());
+        t.data = Some(Ok(ResultSet { columns: vec!["id".into(), "name".into(), "note".into()], rows: vec![vec![s("1"), s("Ann"), None]], ..Default::default() }));
+        t.columns = vec![col("id", true), col("name", false), col("note", false)];
+        t.key = vec!["id".into()];
+        assert!(!t.dirty());
+        t.add_row(None);
+        t.add_row(Some(0));
+        assert!(t.dirty());
+        // Empty cells are left out; the copy has no key.
+        t.changes.insert((1, 1), s("O'Neil"));
+        let Some(Ok(rs)) = &t.data else { panic!() };
+        let sql = edit_statements(&t, rs).unwrap();
+        assert_eq!(
+            sql,
+            [r#"insert into "public"."users" ("name") values ('O''Neil');"#, r#"insert into "public"."users" ("name") values ('Ann');"#]
+        );
+        // Edits to existing rows come first, matched on the key.
+        t.changes.insert((0, 1), s("Anna"));
+        let Some(Ok(rs)) = &t.data else { panic!() };
+        assert_eq!(edit_statements(&t, rs).unwrap()[0], r#"update "public"."users" set "name" = 'Anna' where "id" = '1';"#);
+        // Removing the first new row moves the copy (and its edits) up.
+        t.changes.insert((2, 2), s("hi"));
+        t.remove_added(&[1]);
+        assert_eq!(t.added, 1);
+        let Some(Ok(rs)) = &t.data else { panic!() };
+        assert_eq!(edit_statements(&t, rs).unwrap()[1], r#"insert into "public"."users" ("name", "note") values ('Ann', 'hi');"#);
+        t.discard();
+        let Some(Ok(rs)) = &t.data else { panic!() };
+        assert_eq!((rs.rows.len(), t.dirty()), (1, false));
     }
 
     #[test]

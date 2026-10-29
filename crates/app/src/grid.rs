@@ -130,6 +130,8 @@ pub struct Source<'a> {
     pub counts: &'a [Option<i64>],
     /// Rows can be deleted from the table (by primary key).
     pub deletable: bool,
+    /// The cell menu can narrow the table's filter to (or away from) a value.
+    pub filterable: bool,
 }
 
 /// Per-result-set derived data.
@@ -161,6 +163,12 @@ pub enum GridEvent {
     Lookup { relation: usize },
     /// Delete these rows from the table (asks first).
     Delete { rows: Vec<usize> },
+    /// Add `col = value` (or `<>` with `exclude`) to the table's filter.
+    FilterValue { row: usize, col: usize, exclude: bool },
+    /// Add pending copies of these rows.
+    Duplicate { rows: Vec<usize> },
+    /// Drop these pending new rows.
+    RemoveNew { rows: Vec<usize> },
 }
 
 /// Inline editing, for table tabs whose rows have a primary key.
@@ -174,11 +182,18 @@ pub struct Editing<'a> {
     /// Per column: can't be edited (e.g. an expression in a query result).
     /// Empty: every column can.
     pub locked: &'a [bool],
+    /// Rows from this index on are pending new rows (`usize::MAX`: none).
+    pub added_from: usize,
+    /// Only the pending new rows can be edited (the table has no key to
+    /// find the others by).
+    pub existing_locked: bool,
+    /// The row menu offers Duplicate row.
+    pub insertable: bool,
 }
 
 impl Editing<'_> {
-    fn can_edit(&self, col: usize) -> bool {
-        self.locked.is_empty() || !self.locked.get(col).copied().unwrap_or(true)
+    fn can_edit(&self, row: usize, col: usize) -> bool {
+        (!self.existing_locked || row >= self.added_from) && (self.locked.is_empty() || !self.locked.get(col).copied().unwrap_or(true))
     }
 }
 
@@ -340,6 +355,7 @@ pub fn show(
     let cache_widths = cache.widths.clone();
     let changes = edit.as_ref().map(|e| e.changes);
     let kinds = edit.as_ref().map(|e| e.kinds);
+    let added_from = edit.as_ref().map_or(usize::MAX, |e| e.added_from);
     let mut close_editor = false;
 
     let mut freeze: Option<Freeze> = None;
@@ -493,7 +509,9 @@ pub fn show(
                         row.col(|ui| {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.add_space(8.0);
-                                ui.label(RichText::new((row_offset + i + 1).to_string()).size(11.0).color(theme::FAINT()));
+                                // A pending new row has no number yet.
+                                let (text, color) = if i >= added_from { ("+".to_string(), theme::ACCENT()) } else { ((row_offset + i + 1).to_string(), theme::FAINT()) };
+                                ui.label(RichText::new(text).size(11.0).color(color));
                             });
                         });
                     }
@@ -503,7 +521,7 @@ pub fn show(
                         let value = pending.map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
                         let editing = edit.as_mut().and_then(|e| e.editor.as_mut()).filter(|ed| ed.row == i && ed.col == col);
                         let (_, cell_resp) = row.col(|ui| {
-                            if pending.is_some() {
+                            if pending.is_some() || i >= added_from {
                                 ui.painter().rect_filled(ui.max_rect(), 0.0, theme::ACCENT().gamma_multiply(0.16));
                             }
                             if let Some((c, a)) = flash && c == col {
@@ -527,7 +545,7 @@ pub fn show(
                         if cell_resp.double_clicked() && !cache.geom_cols.contains(&col) {
                             let json = value.is_some_and(|v| matches!(v.trim_start().as_bytes().first(), Some(b'{' | b'[')));
                             match edit.as_mut() {
-                                Some(e) if !json && e.can_edit(col) => *e.editor = Some(CellEditor::open(i, col, value)),
+                                Some(e) if !json && e.can_edit(i, col) => *e.editor = Some(CellEditor::open(i, col, value)),
                                 _ if value.is_some() && anchor == Some(i) => view = Some((i, col)),
                                 _ => {}
                             }
@@ -570,11 +588,24 @@ pub fn show(
                             if rows.len() > 1 {
                                 copy_column_items(ui, rs, &rows, col, &format!("Copy {} ({} values)", rs.columns[col], rows.len()));
                             }
-                            if edit.as_ref().is_some_and(|e| e.can_edit(col)) && !cache.geom_cols.contains(&col) {
+                            // Filtering by a value of a row that doesn't exist yet makes no sense.
+                            if source.filterable && i < added_from {
+                                ui.separator();
+                                let shown = rs.rows[i][col].as_deref();
+                                if crate::icons::menu_item(ui, crate::icons::Svg::Search, "Filter by this value", true).on_hover_text(rgrip_core::edit::value_filter(&rs.columns[col], shown, false)).clicked() {
+                                    event = Some(GridEvent::FilterValue { row: i, col, exclude: false });
+                                    ui.close();
+                                }
+                                if crate::icons::menu_item(ui, crate::icons::Svg::Ban, "Exclude this value", true).on_hover_text(rgrip_core::edit::value_filter(&rs.columns[col], shown, true)).clicked() {
+                                    event = Some(GridEvent::FilterValue { row: i, col, exclude: true });
+                                    ui.close();
+                                }
+                            }
+                            if edit.as_ref().is_some_and(|e| e.can_edit(i, col)) && !cache.geom_cols.contains(&col) {
                                 ui.separator();
                             }
                         }
-                        if let (Some(e), Some(col)) = (edit.as_mut(), menu_col.filter(|c| !cache.geom_cols.contains(c))) && e.can_edit(col) {
+                        if let (Some(e), Some(col)) = (edit.as_mut(), menu_col.filter(|c| !cache.geom_cols.contains(c))) && e.can_edit(i, col) {
                             let pending = e.changes.get(&(i, col));
                             let value = pending.map_or(rs.rows[i][col].as_deref(), |v| v.as_deref());
                             if crate::icons::menu_item(ui, crate::icons::Svg::Pencil, "Edit cell", true).on_hover_text("Or double-click it").clicked() {
@@ -597,7 +628,23 @@ pub fn show(
                         if let Some(e) = rows_menu(ui, rs, &rows, source, geom) {
                             event = Some(e);
                         }
-                        if source.deletable {
+                        if let Some(e) = edit.as_ref().filter(|e| e.insertable) {
+                            ui.separator();
+                            let new: Vec<usize> = rows.iter().copied().filter(|&r| r >= e.added_from).collect();
+                            if crate::icons::menu_item(ui, crate::icons::Svg::Copy, if rows.len() == 1 { "Duplicate row" } else { "Duplicate rows" }, true)
+                                .on_hover_text("Add a copy as a new row, without its key")
+                                .clicked()
+                            {
+                                event = Some(GridEvent::Duplicate { rows: rows.clone() });
+                                ui.close();
+                            }
+                            if !new.is_empty() && crate::icons::menu_item(ui, crate::icons::Svg::Undo, if new.len() == 1 { "Remove new row" } else { "Remove new rows" }, true).clicked() {
+                                event = Some(GridEvent::RemoveNew { rows: new });
+                                ui.close();
+                            }
+                        }
+                        // New rows aren't in the table yet: nothing to delete.
+                        if source.deletable && rows.iter().all(|&r| r < added_from) {
                             ui.separator();
                             let label = if rows.len() == 1 { "Delete row".to_string() } else { format!("Delete {} rows", rows.len()) };
                             if crate::icons::danger_item(ui, crate::icons::Svg::Trash, &label).clicked() {
@@ -1263,7 +1310,7 @@ mod tests {
         };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[], deletable: false }, None);
+                show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[], deletable: false, filterable: false }, None);
             });
         });
     }
@@ -1356,8 +1403,8 @@ mod tests {
         let mut out = None;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let edit = Some(Editing { changes, editor: &mut *editor, kinds, locked: &[] });
-                out = show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[], deletable: false }, edit);
+                let edit = Some(Editing { changes, editor: &mut *editor, kinds, locked: &[], added_from: usize::MAX, existing_locked: false, insertable: false });
+                out = show(ui, Id::new("g"), rs, state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[], deletable: false, filterable: false }, edit);
             });
         });
         out
@@ -1636,7 +1683,7 @@ mod perf {
             let start = Instant::now();
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    show(ui, egui::Id::new("perf"), &rs, &mut state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[], deletable: false }, None);
+                    show(ui, egui::Id::new("perf"), &rs, &mut state, None, 0, &Source { table: "t", sql: None, relations: &[], counts: &[], deletable: false, filterable: false }, None);
                 });
             });
             // Tessellation runs every frame in the real app too.
