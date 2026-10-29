@@ -6,6 +6,7 @@ pub mod conn_string;
 pub mod datetime;
 pub mod edit;
 pub mod export;
+pub mod find;
 pub mod format;
 pub mod geo;
 pub mod alter;

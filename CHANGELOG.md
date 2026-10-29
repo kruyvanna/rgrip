@@ -6,6 +6,7 @@ All notable changes to rgrip are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Find and replace in the console editor. **⌘F** opens a find bar (prefilled with the selected text) and shades every match in the editor, the current one stronger; **↩** / **⌘G** go to the next match, **⇧↩** / **⇧⌘G** to the previous, wrapping around, and **Esc** closes the bar with the current match selected. **Aa** matches case, **W** whole words. **⌥⌘F** (or the arrow in the bar) adds a replace field: **↩** replaces the current match, **⌥⌘↩** or **Replace all** replaces every match in one undoable edit. **⌘G** keeps working after the bar is closed.
 - Right-click a row in a table tab → **Delete row** (or **Delete N rows** for the selection). Shows the `DELETE` statements and asks first; all or nothing, matched on the primary key. Needs a primary key and a writable connection, like inline editing.
 - Edit cells in console results, like in a table tab (double-click, or right-click → Edit cell / Set NULL), when the query reads a single table and includes its primary key. Columns that aren't read from the table (expressions) stay read-only; **Save rows** writes the changes in one transaction and reloads the page.
 - **Delete row** in console results too, when the query reads a single table and includes its primary key (`select * from t where …`). The page reloads afterwards.

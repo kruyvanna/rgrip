@@ -129,6 +129,8 @@ struct Console {
     /// Sorted char range of the editor cursor/selection.
     cursor: std::ops::Range<usize>,
     focus: bool,
+    /// Find and replace (⌘F); the current match is whichever one the editor has selected.
+    find: FindBar,
     running: Option<Instant>,
     /// Query waiting for the connection to come up.
     pending: Option<String>,
@@ -253,6 +255,7 @@ impl Console {
             last_edit: None,
             cursor: 0..0,
             focus: true,
+            find: FindBar::default(),
             running: None,
             pending: None,
             output: None,
@@ -286,6 +289,263 @@ impl Console {
             saving: false,
             deleting: false,
             run: 0,
+        }
+    }
+}
+
+#[derive(Default)]
+struct FindBar {
+    open: bool,
+    query: String,
+    replace: String,
+    show_replace: bool,
+    case_sensitive: bool,
+    whole_word: bool,
+    /// Which field to focus (and select the text of) on the next frame.
+    focus: Option<FindField>,
+    /// Scroll the current match into view on the next frame.
+    reveal: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FindField {
+    Find,
+    Replace,
+}
+
+impl FindBar {
+    fn matches(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        let opts = rgrip_core::find::Options { case_sensitive: self.case_sensitive, whole_word: self.whole_word };
+        rgrip_core::find::find_all(text, &self.query, opts)
+    }
+}
+
+/// Keys for the find bar, taken before the editor and the run shortcuts see them.
+#[derive(Default)]
+struct FindKeys {
+    open: bool,
+    with_replace: bool,
+    /// Next (true) or previous match.
+    step: Option<bool>,
+    replace_one: bool,
+    replace_all: bool,
+    close: bool,
+}
+
+fn find_field_id(tab_id: TabId, field: FindField) -> Id {
+    Id::new(("find", tab_id, field == FindField::Replace))
+}
+
+fn take_find_keys(ui: &mut Ui, tab_id: TabId, c: &Console) -> FindKeys {
+    let mut k = FindKeys::default();
+    // egui drops focus on Escape before this runs, hence "had focus last frame".
+    let focused = |ui: &Ui, field| c.find.open && ui.memory(|m| m.has_focus(find_field_id(tab_id, field)) || m.had_focus_last_frame(find_field_id(tab_id, field)));
+    let (in_find, in_replace) = (focused(ui, FindField::Find), focused(ui, FindField::Replace));
+    ui.input_mut(|i| {
+        // Alt first: a held ⌥ still matches the plain shortcut. ⇧⌘F (format) is taken before this.
+        if i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::F) {
+            (k.open, k.with_replace) = (true, true);
+        } else if i.consume_key(Modifiers::COMMAND, Key::F) {
+            k.open = true;
+        }
+        if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::G) {
+            k.step = Some(false);
+        } else if i.consume_key(Modifiers::COMMAND, Key::G) {
+            k.step = Some(true);
+        }
+        if in_find || in_replace {
+            if i.consume_key(Modifiers::COMMAND | Modifiers::ALT, Key::Enter) {
+                k.replace_all = true;
+            } else if i.consume_key(Modifiers::SHIFT, Key::Enter) {
+                k.step = Some(false);
+            } else if i.consume_key(Modifiers::NONE, Key::Enter) {
+                if in_replace {
+                    k.replace_one = true;
+                } else {
+                    k.step = Some(true);
+                }
+            }
+            if i.consume_key(Modifiers::NONE, Key::Escape) {
+                k.close = true;
+            }
+        }
+    });
+    k
+}
+
+fn cursor_bytes(c: &Console) -> std::ops::Range<usize> {
+    sql::char_to_byte(&c.sql, c.cursor.start)..sql::char_to_byte(&c.sql, c.cursor.end)
+}
+
+/// Select a byte range of the console's text in the editor (without focusing it).
+fn find_select(ctx: &egui::Context, editor_id: Id, c: &mut Console, range: std::ops::Range<usize>) {
+    let start = c.sql[..range.start].chars().count();
+    let end = start + c.sql[range].chars().count();
+    c.cursor = start..end;
+    if let Some(mut state) = TextEdit::load_state(ctx, editor_id) {
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(start), egui::text::CCursor::new(end))));
+        state.store(ctx, editor_id);
+    }
+    c.find.reveal = true;
+}
+
+/// Select the next (or previous) match from the editor's selection, wrapping around.
+fn find_step(ctx: &egui::Context, editor_id: Id, c: &mut Console, forward: bool) {
+    let matches = c.find.matches(&c.sql);
+    let at = cursor_bytes(c);
+    let i = if forward { rgrip_core::find::next_from(&matches, at.end) } else { rgrip_core::find::prev_before(&matches, at.start) };
+    if let Some(i) = i {
+        find_select(ctx, editor_id, c, matches[i].clone());
+    }
+}
+
+fn find_replace_one(ctx: &egui::Context, editor_id: Id, c: &mut Console) {
+    let selected = cursor_bytes(c);
+    if c.find.matches(&c.sql).contains(&selected) {
+        let with = c.find.replace.clone();
+        c.cursor = completion::replace_text(ctx, editor_id, &mut c.sql, selected, &with);
+        c.popup = None;
+    }
+    find_step(ctx, editor_id, c, true);
+}
+
+/// One edit to the text, so one undo step, like formatting.
+fn find_replace_all(ctx: &egui::Context, editor_id: Id, c: &mut Console) {
+    let matches = c.find.matches(&c.sql);
+    let Some(first) = matches.first().map(|m| m.start) else { return };
+    c.sql = rgrip_core::find::replace_all(&c.sql, &matches, &c.find.replace);
+    c.popup = None;
+    // The text before the first match is unchanged, so this is still a char boundary.
+    find_select(ctx, editor_id, c, first..first);
+}
+
+/// The find bar above the editor: query, count, next/previous, options and (⌥⌘F) replace.
+fn find_bar_ui(ui: &mut Ui, tab_id: TabId, c: &mut Console, editor_id: Id, keys: &FindKeys) {
+    let ctx = ui.ctx().clone();
+    let (find_id, replace_id) = (find_field_id(tab_id, FindField::Find), find_field_id(tab_id, FindField::Replace));
+    let editable = c.running.is_none();
+    let (mut step, mut query_changed) = (keys.step, false);
+    let (mut replace_one, mut replace_every) = (keys.replace_one, keys.replace_all);
+    if let Some(field) = c.find.focus.take() {
+        ui.memory_mut(|m| m.request_focus(if field == FindField::Find { find_id } else { replace_id }));
+        // Typing replaces the previous query, as in a search field.
+        if field == FindField::Find
+            && let Some(mut state) = TextEdit::load_state(&ctx, find_id)
+        {
+            let len = c.find.query.chars().count();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(len))));
+            state.store(&ctx, find_id);
+        }
+    }
+    let matches = c.find.matches(&c.sql);
+    let current = matches.iter().position(|m| *m == cursor_bytes(c));
+    Frame::new().fill(theme::SURFACE()).inner_margin(Margin { left: 12, right: 14, top: 6, bottom: 6 }).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let arrow = if c.find.show_replace { "▾" } else { "▸" };
+            if ghost_button(ui, arrow).on_hover_text("Replace  ⌥⌘F").clicked() {
+                c.find.show_replace = !c.find.show_replace;
+            }
+            let out = TextEdit::singleline(&mut c.find.query).id(find_id).hint_text("Find").desired_width(220.0).show(ui);
+            query_changed |= out.response.changed();
+            let (text, color) = match (c.find.query.is_empty(), current) {
+                (true, _) => (String::new(), theme::MUTED()),
+                (false, _) if matches.is_empty() => ("No results".to_string(), theme::ERROR()),
+                (false, Some(i)) => (format!("{} of {}", i + 1, matches.len()), theme::MUTED()),
+                (false, None) => (plural(matches.len(), "result"), theme::MUTED()),
+            };
+            ui.add_sized([72.0, 18.0], egui::Label::new(RichText::new(text).size(12.5).color(color)));
+            if ghost_button(ui, "↑").on_hover_text("Previous  ⇧↩  ⇧⌘G").clicked() {
+                step = Some(false);
+            }
+            if ghost_button(ui, "↓").on_hover_text("Next  ↩  ⌘G").clicked() {
+                step = Some(true);
+            }
+            if ui.selectable_label(c.find.case_sensitive, "Aa").on_hover_text("Match case").clicked() {
+                c.find.case_sensitive = !c.find.case_sensitive;
+                query_changed = true;
+            }
+            if ui.selectable_label(c.find.whole_word, "W").on_hover_text("Whole word").clicked() {
+                c.find.whole_word = !c.find.whole_word;
+                query_changed = true;
+            }
+            if ghost_button(ui, "✕").on_hover_text("Close  Esc").clicked() {
+                c.find.open = false;
+            }
+        });
+        if c.find.show_replace {
+            ui.horizontal(|ui| {
+                ui.add_space(22.0);
+                TextEdit::singleline(&mut c.find.replace).id(replace_id).hint_text("Replace").desired_width(220.0).show(ui);
+                ui.add_enabled_ui(editable, |ui| {
+                    if ui.button("Replace").on_hover_text("↩").clicked() {
+                        replace_one = true;
+                    }
+                    if ui.button("Replace all").on_hover_text("⌥⌘↩").clicked() {
+                        replace_every = true;
+                    }
+                });
+            });
+        }
+    });
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0_f32, theme::BORDER()));
+
+    if query_changed {
+        // Incremental: the first match from where the cursor is.
+        let at = cursor_bytes(c);
+        let matches = c.find.matches(&c.sql);
+        if let Some(i) = rgrip_core::find::next_from(&matches, at.start) {
+            find_select(&ctx, editor_id, c, matches[i].clone());
+        }
+    }
+    if let Some(forward) = step {
+        find_step(&ctx, editor_id, c, forward);
+    }
+    if editable && replace_one {
+        find_replace_one(&ctx, editor_id, c);
+    }
+    if editable && replace_every {
+        find_replace_all(&ctx, editor_id, c);
+    }
+    if keys.close {
+        // The current match stays selected.
+        c.find.open = false;
+        ui.memory_mut(|m| m.request_focus(editor_id));
+    }
+}
+
+/// Shade the matches over the text (the current one stronger); translucent, so the text stays readable.
+fn paint_matches(ui: &Ui, out: &egui::text_edit::TextEditOutput, matches: &[std::ops::Range<usize>], current: Option<usize>, reveal: bool) {
+    use egui::text::CCursor;
+    let text = out.galley.text();
+    let offset = out.galley_pos.to_vec2();
+    let clip = ui.clip_rect();
+    let (mut byte, mut chars) = (0, 0);
+    for (n, m) in matches.iter().enumerate() {
+        if m.end > text.len() {
+            break;
+        }
+        let start = chars + text[byte..m.start].chars().count();
+        let end = start + text[m.clone()].chars().count();
+        (byte, chars) = (m.end, end);
+        let from = out.galley.pos_from_cursor(CCursor::new(start)).translate(offset);
+        let to = out.galley.pos_from_cursor(CCursor::new(end)).translate(offset);
+        let color = if current == Some(n) { theme::ACCENT().gamma_multiply(0.45) } else { theme::ACCENT().gamma_multiply(0.2) };
+        // A match that wraps is shaded as the end of one row and the start of the next.
+        let rects = if (from.min.y - to.min.y).abs() < 1.0 {
+            vec![egui::Rect::from_min_max(from.min, egui::pos2(to.min.x.max(from.min.x + 2.0), from.max.y))]
+        } else {
+            let right = out.galley_pos.x + out.galley.rect.right();
+            vec![
+                egui::Rect::from_min_max(from.min, egui::pos2(right, from.max.y)),
+                egui::Rect::from_min_max(egui::pos2(out.galley_pos.x, to.min.y), egui::pos2(to.min.x, to.max.y)),
+            ]
+        };
+        if reveal && current == Some(n) {
+            ui.scroll_to_rect(rects[0].expand(24.0), None);
+        }
+        for r in rects.into_iter().filter(|r| clip.intersects(*r)) {
+            ui.painter().rect_filled(r, 2.0, color);
         }
     }
 }
@@ -4433,6 +4693,7 @@ fn console_ui(
         }
     }
     let mut format = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F));
+    let find_keys = take_find_keys(ui, tab_id, c);
     // ⌘/ (and ⌘?, the same key with shift) toggles `--` on the selected lines.
     let comment = ui.input_mut(|i| {
         i.consume_key(Modifiers::COMMAND, Key::Slash)
@@ -4556,6 +4817,24 @@ fn console_ui(
         ui.memory_mut(|m| m.request_focus(editor_id));
     }
 
+    if find_keys.open {
+        // Start from the selected text, unless it's the match already being looked at.
+        let selected = &c.sql[cursor_bytes(c)];
+        if !selected.is_empty() && !selected.contains('\n') && selected.to_lowercase() != c.find.query.to_lowercase() {
+            c.find.query = selected.to_string();
+        }
+        c.find.open = true;
+        c.find.show_replace |= find_keys.with_replace;
+        c.find.focus = Some(if find_keys.with_replace && !c.find.query.is_empty() { FindField::Replace } else { FindField::Find });
+        c.popup = None;
+    }
+    if c.find.open {
+        find_bar_ui(ui, tab_id, c, editor_id, &find_keys);
+    } else if let Some(forward) = find_keys.step.filter(|_| !c.find.query.is_empty()) {
+        // ⌘G still works after the bar is closed.
+        find_step(ui.ctx(), editor_id, c, forward);
+    }
+
     let max_h = (ui.available_height() - 120.0).max(120.0);
     egui::TopBottomPanel::top(Id::new(("editor-panel", tab_id)))
         .resizable(true)
@@ -4595,6 +4874,11 @@ fn console_ui(
                     }
                     if out.response.changed() {
                         c.last_edit = Some(Instant::now());
+                    }
+                    if c.find.open && !c.find.query.is_empty() {
+                        let matches = c.find.matches(&c.sql);
+                        let current = matches.iter().position(|m| *m == cursor_bytes(c));
+                        paint_matches(ui, &out, &matches, current, std::mem::take(&mut c.find.reveal));
                     }
                     update_popup(c, catalog, schemas, out.response.changed(), keys.force, previous);
                     if let Some(p) = &mut c.popup {
@@ -7089,6 +7373,61 @@ mod tests {
         h.type_text("select a, b from t where a = 1");
         h.key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT);
         assert_eq!(h.console.sql, "select a, b\nfrom t\nwhere a = 1");
+    }
+
+    #[test]
+    fn find_bar_finds_steps_and_replaces() {
+        let mut h = Harness::new();
+        h.type_text("select a from t; select b");
+        h.key(Key::F, Modifiers::COMMAND);
+        assert!(h.console.find.open);
+        // Typing goes to the find bar, not the editor, and lands on the first match.
+        h.type_text("SELECT");
+        assert_eq!(h.console.sql, "select a from t; select b");
+        assert_eq!(h.console.cursor, 0..6);
+
+        h.key(Key::Enter, Modifiers::NONE);
+        assert_eq!(h.console.cursor, 17..23);
+        // Wraps around, and ⇧↩ goes back.
+        h.key(Key::Enter, Modifiers::NONE);
+        assert_eq!(h.console.cursor, 0..6);
+        h.key(Key::Enter, Modifiers::SHIFT);
+        assert_eq!(h.console.cursor, 17..23);
+        h.key(Key::G, Modifiers::COMMAND);
+        assert_eq!(h.console.cursor, 0..6);
+        h.key(Key::G, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert_eq!(h.console.cursor, 17..23);
+
+        // Replace all, from the replace field: ⌥⌘↩.
+        h.key(Key::F, Modifiers::COMMAND | Modifiers::ALT);
+        assert!(h.console.find.show_replace);
+        h.type_text("pick");
+        assert_eq!(h.console.find.replace, "pick");
+        h.key(Key::Enter, Modifiers::COMMAND | Modifiers::ALT);
+        assert_eq!(h.console.sql, "pick a from t; pick b");
+
+        // Esc closes the bar and gives the editor back.
+        h.key(Key::Escape, Modifiers::NONE);
+        assert!(!h.console.find.open);
+        h.type_text("!");
+        assert!(h.console.sql.contains('!'));
+    }
+
+    #[test]
+    fn find_bar_replaces_one_at_a_time_and_keeps_khmer_intact() {
+        let mut h = Harness::new();
+        h.console.sql = "ក = 'សួស្តី'; ក".to_string();
+        h.frame(vec![]);
+        h.key(Key::F, Modifiers::COMMAND | Modifiers::ALT);
+        h.type_text("ក");
+        assert_eq!(h.console.cursor, 0..1);
+        h.ctx.memory_mut(|m| m.request_focus(find_field_id(1, FindField::Replace)));
+        h.frame(vec![]);
+        h.type_text("x");
+        h.key(Key::Enter, Modifiers::NONE);
+        assert_eq!(h.console.sql, "x = 'សួស្តី'; ក");
+        h.key(Key::Enter, Modifiers::NONE);
+        assert_eq!(h.console.sql, "x = 'សួស្តី'; x");
     }
 
     #[test]
