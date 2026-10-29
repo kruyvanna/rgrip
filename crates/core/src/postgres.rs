@@ -591,6 +591,22 @@ impl PgConn {
         self.execute(sql).await
     }
 
+    /// Ask for the plan of one statement (`explain` is an EXPLAIN … FORMAT JSON
+    /// statement). With `rollback` it runs inside a transaction that is always
+    /// rolled back, for ANALYZE of a statement that writes.
+    pub async fn explain_in(&self, schema: Option<&str>, explain: &str, rollback: bool) -> Result<crate::explain::Plan, String> {
+        let _guard = self.schema_lock.lock().await;
+        self.set_schema(schema).await?;
+        let sql = if rollback { crate::explain::rolled_back_sql(explain) } else { explain.to_string() };
+        let out = self.execute(&sql).await;
+        if rollback && out.is_err() {
+            // A failed statement leaves the transaction open (aborted): close it.
+            let _ = self.client.batch_execute("rollback").await;
+        }
+        let out = out?;
+        crate::explain::plan_from_output(&out).ok_or_else(|| "Postgres did not return a plan".to_string())
+    }
+
     /// [`execute_page`](Self::execute_page) with unqualified names resolved in `schema`.
     pub async fn execute_page_in(&self, schema: Option<&str>, stmt: &str, offset: usize) -> Result<QueryOutput, String> {
         let _guard = self.schema_lock.lock().await;

@@ -6,6 +6,7 @@ All notable changes to rgrip are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Explain** (⌘E) in the console shows the plan of the statement at the cursor (or the selection) without running it, as a tree: each step with its rows, cost and the table or index it uses, the expensive steps marked, and a **Raw** toggle and **Copy** for the JSON. **Explain analyze** (⇧⌘E) runs it for real timings: time per step (and its own time without its children), loops, buffers, and a flag where the actual rows are 10× or more off the estimate. A statement that writes is explained inside a transaction that is rolled back, and the plan says so; risky statements ask first, as with Run. Running your own `EXPLAIN (FORMAT JSON) …` opens the same view. Click a step for its conditions and buffers.
 - Right-click a row in a table tab → **Delete row** (or **Delete N rows** for the selection). Shows the `DELETE` statements and asks first; all or nothing, matched on the primary key. Needs a primary key and a writable connection, like inline editing.
 - Edit cells in console results, like in a table tab (double-click, or right-click → Edit cell / Set NULL), when the query reads a single table and includes its primary key. Columns that aren't read from the table (expressions) stay read-only; **Save rows** writes the changes in one transaction and reloads the page.
 - **Delete row** in console results too, when the query reads a single table and includes its primary key (`select * from t where …`). The page reloads afterwards.

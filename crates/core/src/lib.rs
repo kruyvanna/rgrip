@@ -5,6 +5,7 @@ pub mod config;
 pub mod conn_string;
 pub mod datetime;
 pub mod edit;
+pub mod explain;
 pub mod export;
 pub mod format;
 pub mod geo;
