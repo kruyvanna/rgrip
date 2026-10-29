@@ -188,6 +188,22 @@ struct Console {
     deleting: bool,
     /// Bumped on every Run: answers from an older run are dropped.
     run: u64,
+    /// The batch the user just ran (SQL, start time), until its answer is
+    /// written to the query history. Pages and sorts never set it.
+    history_run: Option<(String, u64)>,
+}
+
+/// The history record of a finished run: rows are what the batch returned
+/// or changed (a page of a long result counts as the page).
+fn history_entry(conn: &str, database: Option<String>, sql: String, at: u64, started: Option<Instant>, result: &Result<QueryOutput, String>) -> rgrip_core::history::Entry {
+    let (millis, rows, error) = match result {
+        Ok(out) => {
+            let rows = out.statements.iter().map(|s| s.result.as_ref().map_or(s.affected, |r| r.rows.len() as u64)).sum();
+            (out.elapsed.as_millis() as u64, Some(rows), false)
+        }
+        Err(_) => (started.map_or(0, |t| t.elapsed().as_millis() as u64), None, true),
+    };
+    rgrip_core::history::Entry { conn: conn.to_string(), database, sql, at, millis, rows, error }
 }
 
 /// Schemas a console can pick in `database`: the connection's, without system ones.
@@ -286,6 +302,7 @@ impl Console {
             saving: false,
             deleting: false,
             run: 0,
+            history_run: None,
         }
     }
 }
@@ -516,6 +533,8 @@ enum Action {
     Delete(usize),
     Refresh(usize),
     NewConsole(usize),
+    /// Open the query history of a connection.
+    ShowHistory(usize),
     /// Open (or switch to) the ER diagram of a schema.
     OpenDiagram(usize, String),
     OpenTable(usize, String, String),
@@ -780,6 +799,8 @@ enum TabAction {
     /// Write every row of the current query/table to a file.
     ExportAll(export::Format, std::path::PathBuf),
     Run { all: bool },
+    /// Open the query history of the tab's connection.
+    History,
     /// Write a table tab's pending inline edits.
     SaveEdits,
     /// Delete these rows of a table tab (by primary key, as loaded).
@@ -850,6 +871,8 @@ pub struct App {
     /// The Import data dialog, while open.
     import: Option<crate::import::ImportDialog>,
     table_editor: Option<crate::table_edit::TableEditor>,
+    /// The Query history dialog, while open.
+    history: Option<crate::history_view::HistoryView>,
     /// Debug demo recordings: the scripted steps being played.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     demo_play: Option<DemoPlay>,
@@ -925,6 +948,7 @@ impl App {
             commands_editor: None,
             import: None,
             table_editor: None,
+            history: None,
         }
     }
 
@@ -972,6 +996,7 @@ impl App {
                         match &mut tab.kind {
                             TabKind::Console(c) if c.pending.is_some() => {
                                 c.pending = None;
+                                c.history_run = None;
                                 c.running = None;
                                 c.output = Some(Err(error.clone()));
                             }
@@ -1093,6 +1118,10 @@ impl App {
                         }
                         if std::mem::take(&mut c.ddl) && result.is_ok() {
                             refresh = Some((conn.clone(), c.run_database.clone()));
+                        }
+                        if let Some((sql, at)) = c.history_run.take() {
+                            // Failing to write the history must never get in the way of a run.
+                            let _ = rgrip_core::history::record(&history_entry(conn, c.run_database.clone(), sql, at, c.running, &result));
                         }
                         c.running = None;
                         c.grid = GridState::fresh(&c.grid);
@@ -1640,6 +1669,7 @@ impl App {
                 }
                 self.conns.remove(ci);
                 self.save_config();
+                let _ = rgrip_core::history::clear(&id);
                 let key = format!("c/{id}");
                 if self.settings.pinned.contains(&key) {
                     self.settings.pinned.retain(|k| *k != key);
@@ -1651,6 +1681,10 @@ impl App {
                 self.worker.send(Cmd::Catalog(self.conns[ci].cfg.id.clone(), None));
             }
             Action::NewConsole(ci) => self.open_console(ci),
+            Action::ShowHistory(ci) => {
+                let cfg = &self.conns[ci].cfg;
+                self.history = Some(crate::history_view::HistoryView::new(cfg.id.clone(), cfg.display_name()));
+            }
             Action::OpenDiagram(ci, schema) => self.open_diagram(ci, schema),
             Action::OpenTable(ci, s, t) => self.open_table(ci, s, t),
             Action::OpenInConsole(ci, schema, table) => {
@@ -1961,6 +1995,7 @@ impl App {
                 (c.relations, c.sources, c.probe, c.related, c.total) = (Vec::new(), None, None, None, None);
                 (c.count_asked, c.origins_asked) = (false, false);
                 c.run += 1;
+                c.history_run = Some((text.clone(), rgrip_core::history::now()));
                 let page = c.paged.is_some().then_some(0);
                 if connected {
                     self.worker.send(Cmd::Query { conn: tab.conn.clone(), tab: tab.id, sql: text, page, schema: c.run_schema.clone(), database: c.run_database.clone() });
@@ -2097,8 +2132,10 @@ impl App {
             }
             (TabAction::Notify(text), _) => self.toast = Some((text, theme::WARN(), Instant::now())),
             (TabAction::NewCommand(name), _) => self.apply(Action::NewCommand(name)),
+            (TabAction::History, _) => self.apply(Action::ShowHistory(ci)),
             (TabAction::Cancel, TabKind::Console(c)) => {
                 if c.pending.take().is_some() {
+                    c.history_run = None;
                     c.running = None;
                 } else if c.running.is_some() {
                     self.worker.send(Cmd::Cancel(tab.conn.clone(), c.run_database.clone()));
@@ -3022,6 +3059,7 @@ impl eframe::App for App {
         self.commands_editor_ui(ctx);
         self.import_ui(ctx);
         self.table_editor_ui(ctx);
+        self.history_ui(ctx);
 
         if let Some(a) = tab_action {
             self.tab_action(self.active, a);
@@ -4075,6 +4113,10 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, folders: &[String], pinned: bo
         actions.push(Action::NewConsole(ci));
         ui.close();
     }
+    if crate::icons::menu_item(ui, Svg::Undo, "Query history", true).clicked() {
+        actions.push(Action::ShowHistory(ci));
+        ui.close();
+    }
     if crate::icons::menu_item(ui, Svg::Map, "New map layout", true).clicked() {
         actions.push(Action::NewLayout(ci));
         ui.close();
@@ -4515,6 +4557,9 @@ fn console_ui(
             }
             if ghost_button(ui, "Format").on_hover_text("Format selection or all  ⇧⌘F").clicked() {
                 format = true;
+            }
+            if ghost_button(ui, "History").on_hover_text("Statements run on this connection").clicked() {
+                action = Some(TabAction::History);
             }
         }
         if read_only {
@@ -5697,6 +5742,30 @@ impl App {
             Outcome::OpenTable(table) => {
                 self.import = None;
                 self.open_table(ci, schema, table);
+            }
+        }
+    }
+
+    fn history_ui(&mut self, ctx: &egui::Context) {
+        use crate::history_view::Outcome;
+        let Some(h) = &mut self.history else { return };
+        match h.ui(ctx) {
+            Outcome::Keep => {}
+            Outcome::Close => self.history = None,
+            Outcome::Clear => {
+                let r = rgrip_core::history::clear(&h.conn);
+                h.cleared();
+                self.report(r);
+            }
+            Outcome::Open(e) => {
+                self.history = None;
+                if let Some(ci) = self.conn_index(&e.conn) {
+                    self.open_console(ci);
+                    if let Some(TabKind::Console(c)) = self.tabs.last_mut().map(|t| &mut t.kind) {
+                        c.sql = e.sql;
+                        c.database = e.database;
+                    }
+                }
             }
         }
     }

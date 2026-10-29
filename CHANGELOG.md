@@ -6,6 +6,7 @@ All notable changes to rgrip are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Query history**: every statement batch you run in a console is kept per connection (SQL, database, time, duration, rows or error) in `history.jsonl` next to `connections.toml`, up to the last 1,000 per connection; running the same SQL twice in a row is kept once. Right-click a connection → **Query history**, or press **History** in a console's toolbar, to search the list, see the full SQL, **Open in console** or **Copy** it, or **Clear history**.
 - Right-click a row in a table tab → **Delete row** (or **Delete N rows** for the selection). Shows the `DELETE` statements and asks first; all or nothing, matched on the primary key. Needs a primary key and a writable connection, like inline editing.
 - Edit cells in console results, like in a table tab (double-click, or right-click → Edit cell / Set NULL), when the query reads a single table and includes its primary key. Columns that aren't read from the table (expressions) stay read-only; **Save rows** writes the changes in one transaction and reloads the page.
 - **Delete row** in console results too, when the query reads a single table and includes its primary key (`select * from t where …`). The page reloads afterwards.
