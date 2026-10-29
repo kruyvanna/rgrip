@@ -77,6 +77,16 @@ pub struct DiagramTab {
 }
 
 impl DiagramTab {
+    /// What a jump list entry keeps: the filter and the inferred-relations toggle (the view refits on load).
+    pub fn view_state(&self) -> (&str, bool) {
+        (&self.filter, self.show_inferred)
+    }
+
+    pub fn set_view_state(&mut self, filter: String, show_inferred: bool) {
+        self.filter = filter;
+        self.show_inferred = show_inferred;
+    }
+
     pub fn new(schema: &str, key: String) -> Self {
         Self {
             schema: schema.to_string(),

@@ -23,6 +23,7 @@ mod demo;
 mod dialog;
 mod events;
 mod explorer;
+mod jumps;
 mod modals;
 mod tab_actions;
 mod table;
@@ -657,6 +658,9 @@ enum Action {
     NewConsole(usize),
     /// Open the query history of a connection.
     ShowHistory(usize),
+    /// Bookmark a tab (with its state) in the jump list.
+    AddJump(usize),
+    OpenJumpList,
     /// Open (or switch to) the ER diagram of a schema.
     OpenDiagram(usize, String),
     /// Open (or switch to) the connection's Activity tab.
@@ -957,6 +961,9 @@ pub struct App {
     table_editor: Option<crate::table_edit::TableEditor>,
     /// The Query history dialog, while open.
     history: Option<crate::history_view::HistoryView>,
+    /// Bookmarked tabs (`jumplist.toml`) and their dialog, while open.
+    jumps: Vec<rgrip_core::jumps::JumpItem>,
+    jump_view: Option<crate::jump_view::JumpView>,
     /// Debug demo recordings: the scripted steps being played.
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     demo_play: Option<DemoPlay>,
@@ -1033,6 +1040,8 @@ impl App {
             import: None,
             table_editor: None,
             history: None,
+            jumps: rgrip_core::jumps::load(),
+            jump_view: None,
         }
     }
 
@@ -1122,6 +1131,14 @@ impl eframe::App for App {
             actions.push(Action::Close(CloseWhich::One(self.active)));
         }
 
+        // ⌘⇧K bookmarks the active tab, ⌘K shows the bookmarks (⌘J is the grid's "go to column").
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::K)) && !self.tabs.is_empty() {
+            actions.push(Action::AddJump(self.active));
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
+            actions.push(Action::OpenJumpList);
+        }
+
         // Before the panels, or the editor's own ⌘↩ would take it.
         if self.confirm.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
             self.accept_confirm();
@@ -1159,6 +1176,7 @@ impl eframe::App for App {
         self.import_ui(ctx);
         self.table_editor_ui(ctx);
         self.history_ui(ctx);
+        self.jump_ui(ctx);
 
         if let Some(a) = tab_action {
             self.tab_action(self.active, a);

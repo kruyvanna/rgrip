@@ -445,7 +445,7 @@ pub fn save_diagram(key: &str, positions: std::collections::BTreeMap<String, [f3
     write_toml(&diagrams_path().ok_or("no config directory")?, &all)
 }
 
-fn write_toml(path: &std::path::Path, value: &impl Serialize) -> Result<(), String> {
+pub(crate) fn write_toml(path: &std::path::Path, value: &impl Serialize) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }

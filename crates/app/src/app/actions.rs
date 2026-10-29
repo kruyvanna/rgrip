@@ -56,6 +56,8 @@ impl App {
                 let cfg = &self.conns[ci].cfg;
                 self.history = Some(crate::history_view::HistoryView::new(cfg.id.clone(), cfg.display_name()));
             }
+            Action::AddJump(i) => self.add_jump(i),
+            Action::OpenJumpList => self.jump_view = Some(crate::jump_view::JumpView::new()),
             Action::OpenDiagram(ci, schema) => self.open_diagram(ci, schema),
             Action::OpenActivity(ci) => self.open_activity(ci),
             Action::OpenTable(ci, s, t) => self.open_table(ci, s, t),

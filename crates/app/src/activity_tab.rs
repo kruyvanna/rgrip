@@ -47,6 +47,18 @@ pub struct ActivityTab {
 }
 
 impl ActivityTab {
+    /// Filter, show idle, auto refresh, interval: what a jump list entry keeps.
+    pub fn view_state(&self) -> (&str, bool, bool, u64) {
+        (&self.filter, self.show_idle, self.auto, self.interval)
+    }
+
+    pub fn set_view_state(&mut self, filter: String, show_idle: bool, auto: bool, interval: u64) {
+        self.filter = filter;
+        self.show_idle = show_idle;
+        self.auto = auto;
+        self.interval = interval;
+    }
+
     pub fn new() -> Self {
         Self {
             sessions: Vec::new(),

@@ -207,6 +207,11 @@ fn tab_button(
     demo_open_menu(ui, "RGRIP_DEMO_TAB_MENU", i, &tab_resp);
     tab_resp.context_menu(|ui| {
         menu_layout(ui);
+        if !matches!(tab.kind, TabKind::Layout(_)) && crate::icons::menu_item(ui, Svg::Pin, "Add to jump list", true).clicked() {
+            actions.push(Action::AddJump(i));
+            ui.close();
+        }
+        ui.separator();
         let mut item = |ui: &mut Ui, icon: Svg, label: &str, enabled: bool, which: CloseWhich| {
             if crate::icons::menu_item(ui, icon, label, enabled).clicked() {
                 actions.push(Action::Close(which));

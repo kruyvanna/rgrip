@@ -93,6 +93,8 @@ After that, rgrip updates itself: ⚙ → **Check for updates…** → **Install
 | ⌘N | New query |
 | ⌘W | Close tab |
 | ⌘J | Go to column (in a results grid) |
+| ⌘K | Jump list: reopen bookmarked tabs, with their SQL / filters |
+| ⌘⇧K | Add the current tab to the jump list |
 | ⌘R | Reload a table tab |
 | Tab | Expand slash command |
 | Esc | Close popups / cancel cell edit |

@@ -4,6 +4,7 @@ mod diagram_tab;
 mod completion;
 mod grid;
 mod history_view;
+mod jump_view;
 mod highlight;
 mod icons;
 mod import;
