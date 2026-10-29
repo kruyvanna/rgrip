@@ -30,6 +30,8 @@ docker compose -f dev/docker-compose.yml up -d --build
 cargo test
 ```
 
+CI (`.github/workflows/ci.yml`) runs clippy and the tests on macOS for every push to `main` and every pull request, and runs the core tests against the dev environment on Linux.
+
 ## Code style
 
 - Match the surrounding style. The code isn't rustfmt-formatted (it uses longer lines), so please don't reformat files you aren't otherwise changing.

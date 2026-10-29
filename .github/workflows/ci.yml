@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The app is built for macOS, so build, lint and run the unit and UI tests there.
+  # No database here: the live-server tests skip themselves.
+  macos:
+    name: Build, clippy and tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Not -D warnings yet: there are existing warnings (see CONTRIBUTING: don't add new ones).
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+
+  # Core tests against a real server: the dev environment (PostGIS with SSL and
+  # an SSH bastion, dev/docker-compose.yml) runs pg.rs, import.rs and remote.rs.
+  database:
+    name: Database tests (PostGIS, SSL, SSH)
+    runs-on: ubuntu-latest
+    env:
+      RGRIP_TEST_HOST: localhost
+      RGRIP_TEST_PORT: "55432"
+      RGRIP_TEST_DB: rgrip
+      RGRIP_TEST_USER: rgrip
+      RGRIP_TEST_PASSWORD: rgrip
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the dev environment
+        run: |
+          ./dev/gen-certs.sh
+          docker compose -f dev/docker-compose.yml up -d --build
+          # The init scripts (seed.sql) run before Postgres listens on TCP.
+          for i in $(seq 1 60); do
+            docker compose -f dev/docker-compose.yml exec -T pg pg_isready -h 127.0.0.1 -U rgrip -d rgrip && exit 0
+            sleep 2
+          done
+          docker compose -f dev/docker-compose.yml logs
+          exit 1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p rgrip-core
+      - name: Dev environment logs
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml logs
