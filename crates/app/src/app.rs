@@ -445,6 +445,7 @@ enum TabKind {
     Table(TableView),
     Layout(Box<crate::layout_tab::LayoutTab>),
     Diagram(Box<crate::diagram_tab::DiagramTab>),
+    Activity(Box<crate::activity_tab::ActivityTab>),
 }
 
 impl TabKind {
@@ -453,7 +454,7 @@ impl TabKind {
         match self {
             TabKind::Console(c) => Some((&mut c.related, &mut c.probe)),
             TabKind::Table(t) => Some((&mut t.related, &mut t.probe)),
-            TabKind::Layout(_) | TabKind::Diagram(_) => None,
+            TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_) => None,
         }
     }
 }
@@ -518,6 +519,8 @@ enum Action {
     NewConsole(usize),
     /// Open (or switch to) the ER diagram of a schema.
     OpenDiagram(usize, String),
+    /// Open (or switch to) the connection's Activity tab.
+    OpenActivity(usize),
     OpenTable(usize, String, String),
     /// Open a new console with a SELECT of a table.
     OpenInConsole(usize, String, String),
@@ -745,6 +748,8 @@ enum ConfirmKind {
     Save,
     AddKey,
     Delete(Vec<usize>),
+    /// Cancel the query of (`false`) or terminate (`true`) a backend.
+    Backend(i64, bool),
 }
 
 const READ_ONLY_HINT: &str = "This connection is read-only: Postgres rejects writes. Untick it in the connection's settings to edit.";
@@ -793,6 +798,12 @@ enum TabAction {
     OpenTable { schema: String, table: String },
     /// Diagram: load the schema again.
     ReloadDiagram,
+    /// Activity: fetch the sessions again.
+    RefreshActivity,
+    /// Activity: ask before cancelling (`false`) or terminating (`true`) a backend.
+    ConfirmBackend(i64, bool),
+    /// Activity: signal the backend (after the confirmation).
+    SignalBackend(i64, bool),
     /// Show related rows in the tab's popup (stacking on an open one).
     ShowRelated(RelatedTarget),
     /// Count related rows for the row menu (`modal`: the popup's rows).
@@ -983,6 +994,7 @@ impl App {
                             TabKind::Diagram(d) if matches!(d.state, crate::diagram_tab::State::Pending) => {
                                 d.state = crate::diagram_tab::State::Failed(error.clone());
                             }
+                            TabKind::Activity(a) if a.pending => a.failed(error.clone()),
                             _ => {}
                         }
                     }
@@ -1062,6 +1074,16 @@ impl App {
                 Ev::Diagram { conn, schema, result } => {
                     if let Some(Tab { kind: TabKind::Diagram(d), .. }) = self.tabs.iter_mut().find(|t| t.conn == conn && matches!(&t.kind, TabKind::Diagram(d) if d.schema == schema)) {
                         d.loaded(result);
+                    }
+                }
+                Ev::Activity { tab, result } => {
+                    if let Some(Tab { kind: TabKind::Activity(a), .. }) = self.tab_mut(tab) {
+                        a.loaded(result);
+                    }
+                }
+                Ev::BackendSignal { tab, pid, terminate, result } => {
+                    if let Some(Tab { kind: TabKind::Activity(a), .. }) = self.tab_mut(tab) {
+                        a.signalled(pid, terminate, result);
                     }
                 }
                 Ev::LayerResult { tab, layer, seq, result } => {
@@ -1374,6 +1396,10 @@ impl App {
                     d.state = crate::diagram_tab::State::Loading;
                     self.worker.send(Cmd::Diagram { conn: tab.conn.clone(), schema: d.schema.clone() });
                 }
+                TabKind::Activity(a) if a.pending => {
+                    a.pending = false;
+                    self.worker.send(Cmd::Activity { conn: tab.conn.clone(), tab: tab.id });
+                }
                 _ => {}
             }
         }
@@ -1480,6 +1506,18 @@ impl App {
             self.worker.send(Cmd::Diagram { conn: conn.clone(), schema: schema.clone() });
         }
         self.push_tab(conn, format!("Diagram · {schema}"), TabKind::Diagram(Box::new(tab)));
+    }
+
+    /// Switch to the connection's Activity tab, or open it (it loads itself).
+    fn open_activity(&mut self, ci: usize) {
+        let conn = self.conns[ci].cfg.id.clone();
+        if let Some(i) = self.tabs.iter().position(|t| t.conn == conn && matches!(t.kind, TabKind::Activity(_))) {
+            self.active = i;
+            return;
+        }
+        let title = format!("Activity · {}", self.conns[ci].cfg.display_name());
+        self.push_tab(conn, title, TabKind::Activity(Box::new(crate::activity_tab::ActivityTab::new())));
+        self.ensure_connected(ci);
     }
 
     fn push_tab(&mut self, conn: ConnId, title: String, kind: TabKind) {
@@ -1652,6 +1690,7 @@ impl App {
             }
             Action::NewConsole(ci) => self.open_console(ci),
             Action::OpenDiagram(ci, schema) => self.open_diagram(ci, schema),
+            Action::OpenActivity(ci) => self.open_activity(ci),
             Action::OpenTable(ci, s, t) => self.open_table(ci, s, t),
             Action::OpenInConsole(ci, schema, table) => {
                 self.open_console(ci);
@@ -1877,6 +1916,47 @@ impl App {
             }
             return;
         }
+        if let TabAction::RefreshActivity = action {
+            let (conn, tab) = (self.tabs[ti].conn.clone(), self.tabs[ti].id);
+            let TabKind::Activity(a) = &mut self.tabs[ti].kind else { return };
+            a.requested();
+            if matches!(self.conns[ci].status, Status::Connected(_)) {
+                self.worker.send(Cmd::Activity { conn, tab });
+            } else {
+                a.pending = true;
+                self.ensure_connected(ci);
+            }
+            return;
+        }
+        if let TabAction::ConfirmBackend(pid, terminate) = action {
+            if self.confirm.is_some() {
+                return;
+            }
+            if self.conns[ci].cfg.read_only {
+                self.toast = Some((READ_ONLY_HINT.into(), theme::WARN(), Instant::now()));
+                return;
+            }
+            let tab = self.tabs[ti].id;
+            let TabKind::Activity(a) = &self.tabs[ti].kind else { return };
+            let (user, query) = a.describe(pid).unwrap_or(("", ""));
+            let who = if user.is_empty() { String::new() } else { format!(" ({user})") };
+            let (title, why) = if terminate {
+                (format!("Terminate session {pid}{who}?"), "Disconnects the session and rolls back its open transaction")
+            } else {
+                (format!("Cancel the query of session {pid}{who}?"), "Stops the running query; the session stays connected")
+            };
+            let query = if query.trim().is_empty() { "(no query text)".to_string() } else { query.to_string() };
+            self.confirm = Some(Confirm { tab, kind: ConfirmKind::Backend(pid, terminate), title, items: vec![(query, why.to_string(), terminate)], focused: false });
+            return;
+        }
+        if let TabAction::SignalBackend(pid, terminate) = action {
+            if self.conns[ci].cfg.read_only {
+                return;
+            }
+            let (conn, tab) = (self.tabs[ti].conn.clone(), self.tabs[ti].id);
+            self.worker.send(Cmd::BackendSignal { conn, tab, pid, terminate });
+            return;
+        }
         if let TabAction::OpenFiltered { schema, table, filter } = action {
             return self.open_table_filtered(ci, schema, table, filter);
         }
@@ -1901,7 +1981,7 @@ impl App {
         let mut needs_connect = false;
         let database = match &self.tabs[ti].kind {
             TabKind::Console(c) => c.database.clone(),
-            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
+            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_) => None,
         };
         let catalog = self.conns[ci].catalog_in(database.as_deref());
         let schemas = user_schemas(&self.conns[ci], database.as_deref());
@@ -2061,7 +2141,7 @@ impl App {
                         rgrip_core::postgres::table_select_sql(&t.query()),
                         format!("{}.{}", t.schema, t.table),
                     ),
-                    TabKind::Layout(_) | TabKind::Diagram(_) => return,
+                    TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_) => return,
                 };
                 self.toast = Some((format!("Exporting to {}…", path.display()), theme::MUTED(), Instant::now()));
                 self.worker.send(Cmd::ExportAll { conn: tab.conn.clone(), database, schema, sql, format, table, path });
@@ -2503,7 +2583,7 @@ impl App {
                 }
                 _ => false,
             },
-            Some(TabKind::Layout(_) | TabKind::Diagram(_)) => true,
+            Some(TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_)) => true,
         };
         // `RGRIP_DEMO_IMPORT=<file>`: the import dialog with that file picked,
         // into the first `RGRIP_DEMO_EXPAND` schema.
@@ -2769,7 +2849,7 @@ impl App {
                             _ => Pane::Grid,
                         }
                     }
-                    Some(TabKind::Layout(_) | TabKind::Diagram(_)) | None => {}
+                    Some(TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_)) | None => {}
                 }
                 return advance(self);
             }
@@ -3423,7 +3503,7 @@ impl App {
         ui.add_space(4.0);
         let active_saved = self.tabs.get(self.active).and_then(|t| match &t.kind {
             TabKind::Console(c) => c.saved_id.clone(),
-            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
+            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_) => None,
         });
         let matches = |q: &SavedQuery| filter.is_empty() || q.name.to_lowercase().contains(filter);
         let mut folders: Vec<&String> = self.query_folders.iter().collect();
@@ -4079,6 +4159,10 @@ fn conn_menu(ui: &mut Ui, ci: usize, conn: &Conn, folders: &[String], pinned: bo
         actions.push(Action::NewLayout(ci));
         ui.close();
     }
+    if crate::icons::menu_item(ui, Svg::Activity, "Activity", true).clicked() {
+        actions.push(Action::OpenActivity(ci));
+        ui.close();
+    }
     crate::icons::submenu(ui, Svg::Link, "Copy connection URL", |ui| {
         if ui.button("Without password").clicked() {
             ui.ctx().copy_text(rgrip_core::conn_string::to_url(&conn.cfg, false));
@@ -4177,13 +4261,13 @@ impl App {
                                     TabKind::Console(c) => c.saved_id.as_ref().is_some_and(|id| {
                                         self.saved.iter().find(|q| &q.id == id).is_some_and(|q| q.sql != c.sql)
                                     }),
-                                    TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => false,
+                                    TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_) => false,
                                 };
                                 let style = match self.conn_index(&tab.conn).map(|ci| &self.conns[ci]) {
                                     Some(c) => TabStyle {
                                         title: match &tab.kind {
                                             TabKind::Console(k) => k.database.as_deref().and_then(|db| console_title(&tab.title, &c.cfg, db)),
-                                            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
+                                            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_) => None,
                                         },
                                         color: theme::conn_color(c.cfg.color),
                                         tip: format!("{} · {}:{}/{}", c.cfg.display_name(), c.cfg.host, c.cfg.port, c.cfg.database),
@@ -4206,7 +4290,7 @@ impl App {
             let tab = self.tabs.get(self.active)?;
             let database = match &tab.kind {
                 TabKind::Console(c) => c.database.as_deref(),
-                TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
+                TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_) => None,
             };
             match self.conn_index(&tab.conn).map(|ci| &self.conns[ci]) {
                 Some(c) => {
@@ -4222,7 +4306,7 @@ impl App {
         };
         let dirty = match &self.tabs.get(self.active)?.kind {
             TabKind::Console(c) => c.saved_id.as_ref().is_some_and(|id| self.saved.iter().any(|q| &q.id == id && q.sql != c.sql)),
-            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => false,
+            TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_) => false,
         };
         let tab = self.tabs.get_mut(self.active)?;
         let id = tab.id;
@@ -4235,6 +4319,13 @@ impl App {
             TabKind::Layout(l) => {
                 let loads = l.ui(ui, &catalog);
                 (!loads.is_empty()).then_some(TabAction::LoadLayers(loads))
+            }
+            TabKind::Activity(a) => {
+                let out = a.ui(ui, read_only);
+                match out.signal {
+                    Some((pid, terminate)) => Some(TabAction::ConfirmBackend(pid, terminate)),
+                    None => out.refresh.then_some(TabAction::RefreshActivity),
+                }
             }
             TabKind::Diagram(d) => {
                 let out = d.ui(ui);
@@ -4337,6 +4428,7 @@ fn tab_button(
         TabKind::Table(_) => Icon::Table,
         TabKind::Layout(_) => Icon::Globe,
         TabKind::Diagram(_) => Icon::Schema,
+        TabKind::Activity(_) => Icon::Table,
     };
     widgets::paint_icon(painter, egui::pos2(rect.left() + PAD_L + ICON / 2.0, cy), icon);
     painter.galley(egui::pos2(rect.left() + PAD_L + ICON + GAP, cy - galley.size().y / 2.0), galley, color);
@@ -5942,6 +6034,7 @@ impl App {
             ConfirmKind::Save => TabAction::SaveEdits,
             ConfirmKind::AddKey => TabAction::AddKey,
             ConfirmKind::Delete(rows) => TabAction::DeleteRows(rows),
+            ConfirmKind::Backend(pid, terminate) => TabAction::SignalBackend(pid, terminate),
         });
         self.skip_confirm = false;
     }
@@ -5989,7 +6082,12 @@ fn confirm_modal(ctx: &egui::Context, c: &mut Confirm) -> Option<bool> {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let danger = c.items.iter().any(|i| i.2);
                     let fill = if danger { theme::ERROR() } else { theme::ACCENT() };
-                    let label = if matches!(c.kind, ConfirmKind::Delete(_)) { "Delete  ⌘↩" } else { "Run anyway  ⌘↩" };
+                    let label = match c.kind {
+                        ConfirmKind::Delete(_) => "Delete  ⌘↩",
+                        ConfirmKind::Backend(_, true) => "Terminate  ⌘↩",
+                        ConfirmKind::Backend(_, false) => "Cancel query  ⌘↩",
+                        _ => "Run anyway  ⌘↩",
+                    };
                     if ui.add(Button::new(RichText::new(label).color(theme::BG())).fill(fill)).clicked() {
                         go = true;
                     }
@@ -6069,7 +6167,7 @@ impl App {
                     let tab = self.tabs.iter_mut().find(|t| t.id == tab_id);
                     match tab.and_then(|t| match &mut t.kind {
                         TabKind::Console(c) => Some((&mut t.title, c, t.conn.clone())),
-                        TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) => None,
+                        TabKind::Table(_) | TabKind::Layout(_) | TabKind::Diagram(_) | TabKind::Activity(_) => None,
                     }) {
                         Some((title, c, conn)) => config::create_query(&name, &c.sql, Some(conn), c.database.clone(), c.picked_schemas()).map(|q| {
                             c.saved_id = Some(q.id.clone());

@@ -45,6 +45,10 @@ pub enum Cmd {
     Catalog(ConnId, Option<String>),
     /// Tables, columns and links of a schema, for its diagram tab.
     Diagram { conn: ConnId, schema: String },
+    /// Sessions of the server, for an Activity tab.
+    Activity { conn: ConnId, tab: TabId },
+    /// Cancel the query of, or terminate, backend `pid`.
+    BackendSignal { conn: ConnId, tab: TabId, pid: i64, terminate: bool },
     /// `database`: `None` = the connection's own database.
     /// `page: Some(offset)` fetches one page of a read-only query.
     Query { conn: ConnId, tab: TabId, sql: String, page: Option<usize>, schema: Option<String>, database: Option<String> },
@@ -91,6 +95,9 @@ pub enum Ev {
     Columns { conn: ConnId, schema: String, table: String, result: Result<Vec<ColumnInfo>, String> },
     Catalog { conn: ConnId, database: Option<String>, result: Result<Catalog, String> },
     Diagram { conn: ConnId, schema: String, result: Result<rgrip_core::diagram::Diagram, String> },
+    Activity { tab: TabId, result: Result<Vec<rgrip_core::activity::Session>, String> },
+    /// What the server answered to a cancel / terminate (`false`: nothing signalled).
+    BackendSignal { tab: TabId, pid: i64, terminate: bool, result: Result<bool, String> },
     QueryDone { tab: TabId, result: Result<QueryOutput, String> },
     /// Per result column of `sql`, its source column; then per source table
     /// (schema, table) its columns and foreign keys.
@@ -303,6 +310,22 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                 Err(e) => Err(e),
             };
             emit.send(Ev::Diagram { conn, schema, result });
+        }
+        Cmd::Activity { conn, tab } => {
+            let result = match get(&conns, &conn).await {
+                Ok(c) => c.execute(rgrip_core::activity::ACTIVITY_SQL).await.map(|out| out.statements.into_iter().find_map(|s| s.result).map(|rs| rgrip_core::activity::parse(&rs)).unwrap_or_default()),
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::Activity { tab, result });
+        }
+        Cmd::BackendSignal { conn, tab, pid, terminate } => {
+            let result = match get(&conns, &conn).await {
+                Ok(c) => c.execute(&rgrip_core::activity::signal_sql(pid, terminate)).await.map(|out| {
+                    out.statements.iter().filter_map(|s| s.result.as_ref()).any(|rs| rs.rows.first().and_then(|r| r.first()).is_some_and(|v| v.as_deref() == Some("true")))
+                }),
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::BackendSignal { tab, pid, terminate, result });
         }
         Cmd::Query { conn, tab, sql, page, schema, database } => {
             let result = match (get_db(&conns, &conn, database.as_deref()).await, page) {
