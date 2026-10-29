@@ -1,4 +1,6 @@
 //! End-to-end update flow against a local fake of the GitHub API.
+// macOS only: the release zip is built with `ditto`, as the macOS updater expects.
+#![cfg(target_os = "macos")]
 
 use rgrip_core::update;
 use sha2::{Digest, Sha256};
