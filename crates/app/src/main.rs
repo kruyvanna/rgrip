@@ -1,4 +1,5 @@
 mod app;
+mod activity_tab;
 mod diagram_tab;
 mod completion;
 mod grid;

@@ -44,6 +44,7 @@ pub enum Svg {
     ChevronDown,
     ArrowUp,
     ArrowDown,
+    Activity,
 }
 
 impl Svg {
@@ -68,6 +69,7 @@ impl Svg {
             Svg::ChevronRight => lucide(r#"<path d="m9 18 6-6-6-6"/>"#),
             Svg::ChevronDown => lucide(r#"<path d="m6 9 6 6 6-6"/>"#),
             Svg::ArrowUp => lucide(r#"<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>"#),
+            Svg::Activity => lucide(r#"<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>"#),
             Svg::ArrowDown => lucide(r#"<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>"#),
             Svg::Map => lucide(r#"<path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z"/><path d="M15 5.764v15"/><path d="M9 3.236v15"/>"#),
             Svg::Download => lucide(r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>"#),

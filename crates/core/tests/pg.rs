@@ -218,3 +218,27 @@ async fn read_only_session_rejects_writes() {
     rw.execute(&format!("drop table {table}")).await.unwrap();
     result
 }
+
+#[tokio::test]
+async fn activity_query_lists_other_sessions() {
+    let Ok(conn) = PgConn::connect(&cfg()).await else {
+        eprintln!("skipping: no postgres reachable");
+        return;
+    };
+    // A second session to look at; the asking one must not show up.
+    let other = PgConn::connect(&cfg()).await.unwrap();
+    let pid = |out: QueryOutput| -> i64 { out.statements[0].result.as_ref().unwrap().rows[0][0].as_ref().unwrap().parse().unwrap() };
+    let mine = pid(conn.execute("select pg_backend_pid()").await.unwrap());
+    let theirs = pid(other.execute("select pg_backend_pid()").await.unwrap());
+
+    let out = conn.execute(rgrip_core::activity::ACTIVITY_SQL).await.unwrap();
+    let sessions = rgrip_core::activity::parse(out.statements[0].result.as_ref().unwrap());
+    assert!(sessions.iter().all(|s| s.pid != mine), "own backend is excluded");
+    let seen = sessions.iter().find(|s| s.pid == theirs).expect("the other session is listed");
+    assert_eq!(seen.state, "idle");
+    assert!(seen.blocked_by.is_empty());
+
+    // Signalling a backend answers with a boolean.
+    let out = conn.execute(&rgrip_core::activity::signal_sql(theirs, false)).await.unwrap();
+    assert_eq!(out.statements[0].result.as_ref().unwrap().rows[0][0].as_deref(), Some("true"));
+}

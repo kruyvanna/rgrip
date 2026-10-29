@@ -6,6 +6,7 @@ All notable changes to rgrip are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- Right-click a connection → **Activity**: the server's sessions from `pg_stat_activity` (all databases) with user, database, application, client, state, wait event, how long it has been running, and the query. Idle sessions are hidden until you tick **Show idle**, and a text box filters the rest. Blocked sessions show who blocks them and blocking ones are marked; active queries over a minute and sessions idle in a transaction are highlighted. It refreshes every 2 to 10 seconds while the tab is showing (and pauses on an error until you press **Refresh**). **Cancel query** and **Terminate session** (toolbar or right-click) ask first, with the pid, user and query, and are off on read-only connections; **Copy query** copies the text.
 - Right-click a row in a table tab → **Delete row** (or **Delete N rows** for the selection). Shows the `DELETE` statements and asks first; all or nothing, matched on the primary key. Needs a primary key and a writable connection, like inline editing.
 - Edit cells in console results, like in a table tab (double-click, or right-click → Edit cell / Set NULL), when the query reads a single table and includes its primary key. Columns that aren't read from the table (expressions) stay read-only; **Save rows** writes the changes in one transaction and reloads the page.
 - **Delete row** in console results too, when the query reads a single table and includes its primary key (`select * from t where …`). The page reloads afterwards.
