@@ -8,6 +8,7 @@ use eframe::egui::{
     Modifiers, RichText, Sense, Stroke, TextEdit, TextStyle, Ui,
 };
 use crate::completion::{self, Popup};
+use crate::plan_view;
 use rgrip_core::complete::{self, Catalog};
 use rgrip_core::config::{SavedQuery, Settings, ThemeChoice};
 use rgrip_core::update::{self, Release};
@@ -110,6 +111,8 @@ enum View {
     Map(usize),
     /// Grid and map side by side, selection linked.
     Split(usize),
+    /// The EXPLAIN plan (`Console::plan`).
+    Plan,
     Output,
 }
 
@@ -188,6 +191,10 @@ struct Console {
     deleting: bool,
     /// Bumped on every Run: answers from an older run are dropped.
     run: u64,
+    /// The last EXPLAIN plan (from Explain, or a JSON EXPLAIN you ran).
+    plan: Option<crate::plan_view::PlanState>,
+    /// An Explain is running, in a transaction that is rolled back (or not).
+    explaining: Option<bool>,
     /// The batch the user just ran (SQL, start time), until its answer is
     /// written to the query history. Pages and sorts never set it.
     history_run: Option<(String, u64)>,
@@ -303,6 +310,8 @@ impl Console {
             deleting: false,
             run: 0,
             history_run: None,
+            plan: None,
+            explaining: None,
         }
     }
 }
@@ -766,6 +775,7 @@ struct Confirm {
 
 enum ConfirmKind {
     Run { all: bool },
+    Explain { analyze: bool },
     Save,
     AddKey,
     Delete(Vec<usize>),
@@ -808,6 +818,8 @@ enum TabAction {
     Run { all: bool },
     /// Open the query history of the tab's connection.
     History,
+    /// Show the plan of the statement Run would run (`analyze`: run it for real timings).
+    Explain { analyze: bool },
     /// Write a table tab's pending inline edits.
     SaveEdits,
     /// Delete these rows of a table tab (by primary key, as loaded).
@@ -1158,6 +1170,11 @@ impl App {
                             },
                             Err(_) => View::Output,
                         };
+                        // A JSON EXPLAIN you ran yourself gets the plan view too.
+                        if let Some(plan) = result.as_ref().ok().and_then(rgrip_core::explain::plan_from_output) {
+                            c.plan = Some(crate::plan_view::PlanState::new(plan, None));
+                            c.view = View::Plan;
+                        }
                         // Edits are keyed by row index: they belong to the old rows.
                         c.changes.clear();
                         c.editor = None;
@@ -1171,6 +1188,23 @@ impl App {
                     }
                     if let Some(((conn, tab, run, sql, schema), database)) = count {
                         self.worker.send(Cmd::CountRows { conn, tab, run, sql, schema, database });
+                    }
+                }
+                Ev::ExplainDone { tab, result } => {
+                    if let Some(Tab { kind: TabKind::Console(c), .. }) = self.tab_mut(tab) {
+                        let rolled_back = c.explaining.take().unwrap_or_default();
+                        c.running = None;
+                        match result {
+                            Ok(plan) => {
+                                let note = rolled_back.then(|| "Ran in a transaction that was rolled back: no rows or tables changed (sequences and other effects outside the transaction still happened)".to_string());
+                                c.plan = Some(crate::plan_view::PlanState::new(plan, note));
+                                c.view = View::Plan;
+                            }
+                            Err(e) => {
+                                c.output = Some(Err(e));
+                                c.view = View::Output;
+                            }
+                        }
                     }
                 }
                 Ev::QueryOrigins { tab, run, sql, origins, tables } => {
@@ -2012,7 +2046,7 @@ impl App {
         // or reorders the rows waits for Save / Discard.
         if let TabKind::Console(c) = &self.tabs[ti].kind
             && !c.changes.is_empty()
-            && matches!(action, TabAction::Run { .. } | TabAction::SortResult(..) | TabAction::Page(_) | TabAction::ResultArea(_) | TabAction::DeleteRows(_))
+            && matches!(action, TabAction::Run { .. } | TabAction::Explain { .. } | TabAction::SortResult(..) | TabAction::Page(_) | TabAction::ResultArea(_) | TabAction::DeleteRows(_))
         {
             self.toast = Some(("Save or discard your changes first".into(), theme::WARN(), Instant::now()));
             return;
@@ -2089,6 +2123,62 @@ impl App {
                     c.pending = Some(text);
                     needs_connect = true;
                 }
+            }
+            (TabAction::Explain { analyze }, TabKind::Console(c)) => {
+                let confirmed = std::mem::take(&mut self.skip_confirm);
+                if c.running.is_some() || self.confirm.is_some() {
+                    return;
+                }
+                let at = sql::char_to_byte(&c.sql, c.cursor.start);
+                // The statement Run would run.
+                let text = if c.cursor.start != c.cursor.end {
+                    let b = sql::char_to_byte(&c.sql, c.cursor.end);
+                    c.sql[at..b].to_string()
+                } else {
+                    run_range(&c.sql, at).map(|r| c.sql[r].to_string()).unwrap_or_default()
+                };
+                let text = match rgrip_core::commands::expand_all(&text, &catalog, c.schema_or_default(&schemas)) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.toast = Some((e, theme::WARN(), Instant::now()));
+                        return;
+                    }
+                };
+                let note = if text.trim().is_empty() {
+                    Some("Put the cursor on the statement to explain")
+                } else if !rgrip_core::explain::is_single_statement(&text) {
+                    Some("Explain works on one statement: put the cursor on it or select just that one")
+                } else if text.trim_start().to_lowercase().starts_with("explain") {
+                    Some("This is already an EXPLAIN: run it with ⌘↩")
+                } else if !connected {
+                    Some("Open the connection first")
+                } else {
+                    None
+                };
+                if let Some(n) = note {
+                    if !c.sql.trim().is_empty() {
+                        self.toast = Some((n.into(), theme::WARN(), Instant::now()));
+                    }
+                    return;
+                }
+                let cfg = &self.conns[ci].cfg;
+                // ANALYZE really executes the statement, so a risky one asks first, like Run.
+                if analyze && !confirmed {
+                    let items = risky_items(&text, cfg.color == ConnColor::Red);
+                    if !items.is_empty() {
+                        self.confirm = Some(Confirm { tab: tab.id, kind: ConfirmKind::Explain { analyze }, title: format!("Explain analyze on {}?", cfg.display_name()), items, focused: false });
+                        return;
+                    }
+                }
+                // A statement that writes runs in a transaction that is rolled back.
+                let rollback = analyze && !rgrip_core::safety::classify(&text).is_empty();
+                let sql = rgrip_core::explain::explain_sql(&text, analyze);
+                c.running = Some(Instant::now());
+                c.popup = None;
+                c.explaining = Some(rollback);
+                c.run_schema = c.schema_for_run(&schemas);
+                c.run_database = c.database.clone();
+                self.worker.send(Cmd::Explain { conn: tab.conn.clone(), tab: tab.id, sql, rollback, schema: c.run_schema.clone(), database: c.run_database.clone() });
             }
             (TabAction::SortResult(n, col), TabKind::Console(c)) => {
                 if c.running.is_some() {
@@ -4637,6 +4727,10 @@ fn console_ui(
         action = Some(TabAction::Run { all: true });
     } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
         action = Some(TabAction::Run { all: false });
+    } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::E)) {
+        action = Some(TabAction::Explain { analyze: true });
+    } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::E)) {
+        action = Some(TabAction::Explain { analyze: false });
     } else if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
         action = Some(TabAction::Save);
     }
@@ -4656,6 +4750,12 @@ fn console_ui(
             }
             if ui.button("Run all").on_hover_text("⇧⌘↩").clicked() {
                 action = Some(TabAction::Run { all: true });
+            }
+            if ghost_button(ui, "Explain").on_hover_text("Show the plan of the statement at cursor, without running it  ⌘E").clicked() {
+                action = Some(TabAction::Explain { analyze: false });
+            }
+            if ghost_button(ui, "Explain analyze").on_hover_text("Run the statement and show the plan with real timings  ⇧⌘E\nA statement that writes runs in a transaction that is rolled back.").clicked() {
+                action = Some(TabAction::Explain { analyze: true });
             }
             if ghost_button(ui, "Format").on_hover_text("Format selection or all  ⇧⌘F").clicked() {
                 format = true;
@@ -4780,7 +4880,7 @@ fn console_ui(
         }
         _ => Default::default(),
     };
-    let Console { running, output, view, grid, paged, offset, map, last_sql, order, relations, probe, related, total, area, changes, editor, .. } = c;
+    let Console { running, output, view, grid, paged, offset, map, last_sql, order, relations, probe, related, total, area, changes, editor, plan, .. } = c;
     // Only a paged (wrappable) statement can be filtered to an area.
     let area_filter = paged.is_some().then_some(area.as_str());
     if let Some(started) = running {
@@ -4797,6 +4897,36 @@ fn console_ui(
         return action;
     }
 
+    if *view == View::Plan {
+        match plan {
+            Some(p) => {
+                toolbar(ui, |ui| {
+                    segment(ui, true, "Plan");
+                    if let Some(Ok(out)) = output {
+                        let n = out.statements.iter().filter(|s| s.result.is_some()).count();
+                        if n > 0 && segment(ui, false, "Result") {
+                            *view = View::Result(n - 1);
+                        }
+                        if segment(ui, false, "Output") {
+                            *view = View::Output;
+                        }
+                    }
+                    ui.add_space(8.0);
+                    if segment(ui, p.raw, "Raw") {
+                        p.raw = !p.raw;
+                    }
+                    if ghost_button(ui, "Copy").on_hover_text("Copy the plan as JSON").clicked() {
+                        ui.ctx().copy_text(p.plan.raw.clone());
+                    }
+                });
+                if *view == View::Plan {
+                    plan_view::show(ui, Id::new(("plan", tab_id)), p);
+                    return action;
+                }
+            }
+            None => *view = View::Output,
+        }
+    }
     match output {
         None => centered(ui, |ui| muted(ui, "Run a query to see results here")),
         Some(Err(e)) => {
@@ -4837,6 +4967,9 @@ fn console_ui(
                 if segment(ui, *view == View::Output, "Output") {
                     *view = View::Output;
                 }
+                if plan.is_some() && segment(ui, false, "Plan") {
+                    *view = View::Plan;
+                }
                 if !changes.is_empty() {
                     ui.add_space(8.0);
                     ui.label(RichText::new(plural(changes.len(), "change")).small().color(theme::ACCENT()));
@@ -4854,7 +4987,7 @@ fn console_ui(
                     let ms = out.elapsed.as_secs_f64() * 1000.0;
                     let result = match *view {
                         View::Result(n) | View::Map(n) | View::Split(n) => sets.get(n).copied(),
-                        View::Output => None,
+                        View::Output | View::Plan => None,
                     };
                     if let Some(rs) = result {
                         if let Some(a) = export_menu(ui, rs, "query_result", paged.is_some()) {
@@ -6110,6 +6243,7 @@ impl App {
         self.skip_confirm = true;
         self.tab_action(ti, match c.kind {
             ConfirmKind::Run { all } => TabAction::Run { all },
+            ConfirmKind::Explain { analyze } => TabAction::Explain { analyze },
             ConfirmKind::Save => TabAction::SaveEdits,
             ConfirmKind::AddKey => TabAction::AddKey,
             ConfirmKind::Delete(rows) => TabAction::DeleteRows(rows),

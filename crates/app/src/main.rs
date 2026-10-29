@@ -10,6 +10,7 @@ mod import;
 mod table_edit;
 mod map;
 mod map_export;
+mod plan_view;
 mod layout_tab;
 mod shaping;
 mod snapshot;

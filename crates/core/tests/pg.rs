@@ -242,3 +242,39 @@ async fn activity_query_lists_other_sessions() {
     let out = conn.execute(&rgrip_core::activity::signal_sql(theirs, false)).await.unwrap();
     assert_eq!(out.statements[0].result.as_ref().unwrap().rows[0][0].as_deref(), Some("true"));
 }
+
+#[tokio::test]
+async fn explain_plans_and_rolls_back_analyze_of_writes() {
+    use rgrip_core::explain::{explain_sql, is_single_statement};
+    let Ok(conn) = PgConn::connect(&cfg()).await else {
+        eprintln!("skipping: no postgres reachable");
+        return;
+    };
+    let table = format!("rgrip_explain_{}", std::process::id());
+    conn.execute(&format!("create table {table} (id int primary key, v text); insert into {table} select g, 'x' from generate_series(1, 100) g")).await.unwrap();
+
+    let result = async {
+        let plan = conn.explain_in(None, &explain_sql(&format!("select * from {table} where id = 5"), false), false).await.unwrap();
+        assert!(!plan.analyzed && plan.execution_ms.is_none());
+        assert!(plan.node_count() >= 1 && plan.root.total_cost > 0.0);
+        assert!(plan.raw.contains("\"Plan\""));
+
+        // ANALYZE of a delete runs it for real, but in a transaction that is rolled back.
+        let delete = format!("delete from {table}");
+        assert!(is_single_statement(&delete));
+        let plan = conn.explain_in(None, &explain_sql(&delete, true), true).await.unwrap();
+        assert!(plan.analyzed && plan.execution_ms.is_some());
+        let count = conn.execute(&format!("select count(*) from {table}")).await.unwrap();
+        assert_eq!(count.statements[0].result.as_ref().unwrap().rows[0][0].as_deref(), Some("100"));
+
+        // A failing statement leaves no transaction open.
+        assert!(conn.explain_in(None, &explain_sql("select * from rgrip_no_such_table", true), true).await.is_err());
+        conn.execute(&format!("delete from {table} where id = 1")).await.unwrap();
+        let count = conn.execute(&format!("select count(*) from {table}")).await.unwrap();
+        assert_eq!(count.statements[0].result.as_ref().unwrap().rows[0][0].as_deref(), Some("99"));
+    }
+    .await;
+
+    conn.execute(&format!("drop table {table}")).await.unwrap();
+    result
+}

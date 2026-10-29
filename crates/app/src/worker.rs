@@ -55,6 +55,8 @@ pub enum Cmd {
     /// Where the columns of a console statement come from, with their tables'
     /// columns and foreign keys (for relations in the result grid).
     QueryOrigins { conn: ConnId, tab: TabId, run: u64, sql: String, schema: Option<String> },
+    /// The plan of one statement: `sql` is the EXPLAIN statement; `rollback` runs it in a transaction that is rolled back.
+    Explain { conn: ConnId, tab: TabId, sql: String, rollback: bool, schema: Option<String>, database: Option<String> },
     /// Count the rows of a paged console statement (own connection, so paging stays quick).
     CountRows { conn: ConnId, tab: TabId, run: u64, sql: String, schema: Option<String>, database: Option<String> },
     /// `modal`: for the tab's related-rows popup rather than the tab itself.
@@ -99,6 +101,7 @@ pub enum Ev {
     /// What the server answered to a cancel / terminate (`false`: nothing signalled).
     BackendSignal { tab: TabId, pid: i64, terminate: bool, result: Result<bool, String> },
     QueryDone { tab: TabId, result: Result<QueryOutput, String> },
+    ExplainDone { tab: TabId, result: Result<rgrip_core::explain::Plan, String> },
     /// Per result column of `sql`, its source column; then per source table
     /// (schema, table) its columns and foreign keys.
     QueryOrigins { tab: TabId, run: u64, sql: String, origins: Vec<Option<rgrip_core::relations::Origin>>, tables: Vec<SourceTable> },
@@ -334,6 +337,13 @@ async fn handle(cmd: Cmd, conns: Conns, emit: Emitter) {
                 (Err(e), _) => Err(e),
             };
             emit.send(Ev::QueryDone { tab, result });
+        }
+        Cmd::Explain { conn, tab, sql, rollback, schema, database } => {
+            let result = match get_db(&conns, &conn, database.as_deref()).await {
+                Ok(c) => c.explain_in(schema.as_deref(), &sql, rollback).await,
+                Err(e) => Err(e),
+            };
+            emit.send(Ev::ExplainDone { tab, result });
         }
         Cmd::QueryOrigins { conn, tab, run, sql, schema } => {
             // Quiet on any failure: the grid just has no relations.
