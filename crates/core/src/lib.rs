@@ -9,6 +9,7 @@ pub mod export;
 pub mod format;
 pub mod geo;
 pub mod activity;
+pub mod history;
 pub mod alter;
 pub mod import;
 pub mod layout;
