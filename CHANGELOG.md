@@ -6,6 +6,8 @@ All notable changes to rgrip are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **+ Add row** in a table tab adds a blank row at the end of the page for you to fill in; right-click a row → **Duplicate row** adds a copy without its key. New rows are marked until saved, **Save** writes them as `INSERT`s in the same transaction as your edits (cells left empty are left out, so column defaults apply), and **Discard** or right-click → **Remove new row** drops them. Needs a writable connection; a primary key isn't needed to insert.
+- Right-click a cell in a table tab → **Filter by this value** or **Exclude this value**, added to the filter above the grid (`"status" = 'open'`, or `is null`). Escape in the filter field clears the filter.
 - Right-click a row in a table tab → **Delete row** (or **Delete N rows** for the selection). Shows the `DELETE` statements and asks first; all or nothing, matched on the primary key. Needs a primary key and a writable connection, like inline editing.
 - Edit cells in console results, like in a table tab (double-click, or right-click → Edit cell / Set NULL), when the query reads a single table and includes its primary key. Columns that aren't read from the table (expressions) stay read-only; **Save rows** writes the changes in one transaction and reloads the page.
 - **Delete row** in console results too, when the query reads a single table and includes its primary key (`select * from t where …`). The page reloads afterwards.
