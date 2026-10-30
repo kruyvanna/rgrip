@@ -106,6 +106,7 @@ impl App {
         if cfg!(debug_assertions) && let Some(y) = std::env::var("RGRIP_DEMO_EXPLORER_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
             scroll = scroll.vertical_scroll_offset(y);
         }
+        let viewport_h = ui.available_height();
         let out = scroll.show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             // Pinned folders and connections first, then folders (by name),
@@ -125,7 +126,10 @@ impl App {
             }
             self.saved_section(ui, &filter, actions);
             // Right-click below the rows: add a connection or a folder.
-            let rest = (ui.clip_rect().bottom() - ui.cursor().top()).max(widgets::ROW_HEIGHT);
+            // Never taller than the space left (less a little for rounding), or
+            // the filler itself would make short content scroll. (Not the clip
+            // rect: it reaches past the viewport.)
+            let rest = (viewport_h - (ui.cursor().top() - ui.min_rect().top()) - 2.0).max(0.0);
             let (_, blank) = ui.allocate_exact_size(egui::vec2(ui.available_width(), rest), egui::Sense::click());
             blank.context_menu(|ui| {
                 menu_layout(ui);
